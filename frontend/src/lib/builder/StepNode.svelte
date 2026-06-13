@@ -62,6 +62,8 @@
   /* The agent (general) box stands out with its own color. */
   .snode.root { background: color-mix(in srgb, #a855f7 22%, var(--panel)); border-color: #a855f7; box-shadow: 0 6px 22px color-mix(in srgb, #a855f7 30%, transparent); width: 210px; }
   .snode.tool { background: color-mix(in srgb, var(--ok) 10%, var(--panel)); border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
+  /* Output blocks (file/mail/discord/webhook/ftp) — distinct "sortie" color. */
+  .snode.out { background: color-mix(in srgb, #e879f9 14%, var(--panel)); border-color: #e879f9; }
   .snode.control { background: color-mix(in srgb, var(--warn) 12%, var(--panel)); border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); }
   :global(.svelte-flow__node.selected) .snode { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); }
   .snode.running { border-color: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 40%, transparent); animation: pulse 1s infinite; }

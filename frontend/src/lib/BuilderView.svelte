@@ -42,10 +42,12 @@
     { group: "Restitutions", items: [
       { key: "action", label: "Action", glyph: "⚙️", kind: "step" },
       { key: "restitution", label: "Restitution", glyph: "📄", kind: "step" },
-      { key: "send_email", label: "Email", glyph: "✉️", kind: "tool" },
-      { key: "send_discord", label: "Webhook / Discord", glyph: "🔔", kind: "tool" },
-      { key: "write_file", label: "Écrire un fichier", glyph: "💾", kind: "tool" },
-      { key: "write_calendar", label: "Calendrier", glyph: "📅", kind: "tool" },
+      { key: "write_file", label: "Fichier", glyph: "💾", kind: "out" },
+      { key: "send_email", label: "Email", glyph: "✉️", kind: "out" },
+      { key: "send_discord", label: "Discord", glyph: "🔔", kind: "out" },
+      { key: "send_webhook", label: "Webhook", glyph: "🔗", kind: "out" },
+      { key: "send_ftp", label: "FTP", glyph: "📁", kind: "out" },
+      { key: "write_calendar", label: "Calendrier", glyph: "📅", kind: "out" },
     ]},
   ];
   // Control blocks expose multiple labeled output handles → distinct paths.
@@ -72,6 +74,8 @@
     market_data: ["symbol"],
     send_discord: ["discord_webhook"],
     send_email: ["recipient", "subject"],
+    send_webhook: ["webhook_url"],
+    send_ftp: ["ftp_host", "ftp_path"],
     write_file: ["filename"],
     write_calendar: ["calendar_url", "title"],
     analyse_video: ["source_url"],
@@ -92,6 +96,8 @@
     recipient: "name@example.com", subject: "Objet de l'email",
     filename: "rapport.md", calendar_url: "ICS / CalDAV URL", title: "Titre de l'événement",
     source_url: "URL du média (ou laisser vide)",
+    webhook_url: "https://… (laisser vide = défaut Settings)",
+    ftp_host: "ftp.exemple.com (creds dans Settings)", ftp_path: "/dossier/rapport.md",
   };
   const PARAM_LABEL: Record<string, string> = {
     event: "Événement déclencheur",
@@ -100,7 +106,7 @@
     each_of: "Pour chaque", repeat: "Répéter",
     site: "Site web", symbol: "Symbole", discord_webhook: "URL Webhook", recipient: "Destinataire",
     subject: "Objet", filename: "Nom du fichier", calendar_url: "URL calendrier", title: "Titre",
-    source_url: "URL source",
+    source_url: "URL source", webhook_url: "URL Webhook", ftp_host: "Hôte FTP", ftp_path: "Chemin FTP",
   };
 
   // ── Agent state ────────────────────────────────────────────────────────────
@@ -323,7 +329,9 @@
   const slug = (s: string) => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "agent";
   function buildToml(): string {
     const stepNodes = nodes.filter((n) => n.data.kind === "step");
-    const toolNodes = nodes.filter((n) => n.data.kind === "tool");
+    // Output blocks (file/mail/discord/webhook/ftp) are tools too — just colored
+    // differently in the UI.
+    const toolNodes = nodes.filter((n) => n.data.kind === "tool" || n.data.kind === "out");
     // Control blocks become natural-language rules the LLM agent must honor.
     // Branch targets are read from the edges leaving each labeled handle.
     const labelOf = (id: string) => nodes.find((nn) => nn.id === id)?.data?.label ?? id;
@@ -756,8 +764,8 @@
       <div class="phead"><h3>{#if isImg(selNode.data.glyph)}<img class="hicon" src={selNode.data.glyph as string} alt="" />{:else}{selNode.data.glyph}{/if} {selNode.data.label}</h3><button class="del" onclick={() => removeNode(selNode.id)}>🗑</button></div>
       {#if kind === "step"}
         <label class="blk">{$t("builder.systemPrompt")}<textarea rows="6" bind:value={prompts[selected]} placeholder={$t("builder.promptPlaceholder")}></textarea></label>
-      {:else if kind === "tool"}
-        <p class="hint">Outil exécuté à l'étape Action.</p>
+      {:else if kind === "tool" || kind === "out"}
+        <p class="hint">{kind === "out" ? "Sortie exécutée à la fin (Action/Restitution)." : "Outil exécuté à l'étape Action."}</p>
         {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
           {@render paramField(pk)}
         {/each}
@@ -792,8 +800,8 @@
           {:else if isVideoTool}
             <p class="hint">Uploade ou enregistre une vidéo : elle est échantillonnée puis analysée par l'agent.</p>
             <VideoView />
-          {:else if mkind === "tool"}
-            <p class="hint">Outil exécuté à l'étape Action.</p>
+          {:else if mkind === "tool" || mkind === "out"}
+            <p class="hint">{mkind === "out" ? "Sortie : envoie le résultat (config + secrets dans Settings)." : "Outil exécuté à l'étape Action."}</p>
             {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
               {@render paramField(pk)}
             {/each}
@@ -863,6 +871,7 @@
   .pblock:hover { border-color: var(--accent); }
   .pblock:active { cursor: grabbing; }
   .pblock.tool { border-left: 3px solid var(--ok); }
+  .pblock.out { border-left: 3px solid #e879f9; }
   .pblock.control { border-left: 3px solid var(--warn); }
   .pblock.step { border-left: 3px solid var(--accent); }
   .pg { font-size: 1rem; }
