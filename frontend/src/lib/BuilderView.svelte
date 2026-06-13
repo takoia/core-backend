@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
   import {
     SvelteFlow,
     Background,
@@ -107,10 +107,12 @@
     { id: "e5", source: "restitution", target: "emit", animated: true },
   ]);
 
-  // Sync editable fields + live status onto the nodes.
+  // Sync editable fields + live status onto the nodes. Read `nodes` via
+  // untrack() so writing it back does not re-trigger this effect (which would
+  // loop forever and crash with effect_update_depth_exceeded).
   $effect(() => {
     const tr = triggerOn, em = emit, tl = tools, ss = stepStatus;
-    nodes = nodes.map((n) => {
+    nodes = untrack(() => nodes).map((n) => {
       if (n.id === "trigger") return { ...n, data: { ...n.data, sub: tr || "manual" } };
       if (n.id === "emit") return { ...n, data: { ...n.data, sub: em || "—" } };
       const base: any = { ...n.data };
