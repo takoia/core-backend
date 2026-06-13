@@ -24,6 +24,10 @@ pub struct AnalyzeVideo {
     /// Optional analysis instruction; a sensible default is used otherwise.
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Optional target agent: its ICM memory is recalled to inform the analysis
+    /// and the result is stored back, so analyses build on each other.
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 /// `POST /api/video/analyze` — analyze sampled video frames with claude -p.
@@ -60,9 +64,22 @@ pub async fn analyze(
          recording or video."
             .to_string()
     });
+
+    // ICM recall: bring in what the target agent already learned from previous
+    // analyses, so each video analysis builds on the prior ones.
+    let recalled = match &body.agent_id {
+        Some(aid) => state.memory.recall(aid, &instruction, 5).await,
+        None => String::new(),
+    };
+    let memory_block = if recalled.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nWhat this agent already knows (build on it, avoid repeats):\n{recalled}")
+    };
+
     // Ask for structured, human-reviewable extracted information.
     let prompt = format!(
-        "{instruction}\n\nRead the frames in order, then EXTRACT the distinct, \
+        "{instruction}{memory_block}\n\nRead the frames in order, then EXTRACT the distinct, \
          factual pieces of information observed (actions performed, on-screen data, \
          text, entities, steps). Return ONLY a JSON array, each item \
          {{\"info\": <short label>, \"detail\": <one-sentence detail>}}. No prose, \
@@ -117,6 +134,25 @@ pub async fn analyze(
     // Try to parse the result as a JSON array of extracted items; fall back to a
     // single free-text item so the human always has something to confirm.
     let items = extract_items(&analysis);
+
+    // ICM store: persist this analysis to the agent's memory so the next
+    // analysis recalls it (continuous learning across analyses).
+    if let Some(aid) = &body.agent_id {
+        let summary: String = items
+            .iter()
+            .filter_map(|it| {
+                let info = it.get("info").and_then(|v| v.as_str()).unwrap_or("");
+                let detail = it.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+                (!info.is_empty()).then(|| format!("{info}: {detail}"))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !summary.trim().is_empty() {
+            if let Err(e) = state.memory.store(aid, "video-analysis", &summary).await {
+                tracing::warn!(error = %e, "failed to store video analysis in memory");
+            }
+        }
+    }
 
     Ok(Json(json!({
         "items": items,

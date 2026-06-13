@@ -181,7 +181,7 @@ export const api = {
     return req<{ logs: LogEntry[]; total: number }>(`/api/logs${suffix}`);
   },
 
-  analyzeVideo: (frames: string[], prompt?: string) =>
+  analyzeVideo: (frames: string[], prompt?: string, agentId?: string) =>
     req<{
       items: { info: string; detail: string }[];
       raw: string;
@@ -190,7 +190,7 @@ export const api = {
     }>("/api/video/analyze", {
       method: "POST",
       headers: jsonH,
-      body: JSON.stringify({ frames, prompt }),
+      body: JSON.stringify({ frames, prompt, agent_id: agentId || undefined }),
     }),
 
   memoryOverview: () =>

@@ -68,7 +68,7 @@
     busy = true; items = [];
     try {
       status = $t("video.analyzing", { n: 1 });
-      const r = await api.analyzeVideo([imageData], prompt || undefined);
+      const r = await api.analyzeVideo([imageData], prompt || undefined, targetAgent || undefined);
       items = r.items.map((it) => ({ ...it, ok: null }));
       status = $t("video.done", { n: r.frame_count });
     } catch (e) {
@@ -146,7 +146,7 @@
     try {
       const frames = await extractFrames();
       status = $t("video.analyzing", { n: frames.length });
-      const r = await api.analyzeVideo(frames, prompt || undefined);
+      const r = await api.analyzeVideo(frames, prompt || undefined, targetAgent || undefined);
       items = r.items.map((it) => ({ ...it, ok: null }));
       status = $t("video.done", { n: r.frame_count });
     } catch (e) {

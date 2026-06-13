@@ -4,9 +4,10 @@
 //! choice; switching to Postgres later means swapping the pool type here.
 
 use anyhow::{Context, Result};
-use sqlx::sqlite::{SqlitePoolOptions, SqliteConnectOptions, SqliteJournalMode};
+use sqlx::sqlite::{SqlitePoolOptions, SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::SqlitePool;
 use std::str::FromStr;
+use std::time::Duration;
 
 /// The shared connection pool type used across the app.
 pub type Db = SqlitePool;
@@ -21,6 +22,11 @@ pub async fn connect(database_url: &str) -> Result<Db> {
         // WAL lets a reader run while the single writer works: needed for SSE
         // reads while the worker writes step progress.
         .journal_mode(SqliteJournalMode::Wal)
+        // NORMAL is durable under WAL and much faster than the FULL default.
+        .synchronous(SqliteSynchronous::Normal)
+        // Make concurrent writers wait for the lock instead of failing
+        // immediately with "database is locked" (several agents looping).
+        .busy_timeout(Duration::from_secs(10))
         .foreign_keys(true);
 
     let pool = SqlitePoolOptions::new()
