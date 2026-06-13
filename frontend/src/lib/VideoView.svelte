@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { api } from "./api";
+  import { onMount } from "svelte";
+  import { api, type Agent } from "./api";
   import { t } from "./i18n";
 
-  const MAX_FRAMES = 40;
+  const MAX_FRAMES = 60;
   const FRAME_WIDTH = 640;
 
   let videoEl: HTMLVideoElement;
@@ -10,6 +11,22 @@
   let prompt = "";
   let status = "";
   let busy = false;
+  // Configurable analysis window (seconds), one frame per second.
+  let durationSec = 30;
+
+  // Improve-an-agent target.
+  let agents: Agent[] = [];
+  let targetAgent = "";
+  let savedMsg = "";
+
+  onMount(async () => {
+    try {
+      agents = await api.listAgents();
+      if (agents.length) targetAgent = agents[0].id;
+    } catch {
+      agents = [];
+    }
+  });
 
   // Extracted info items + per-item human confirmation (null = undecided).
   type Item = { info: string; detail: string; ok: boolean | null };
@@ -73,7 +90,8 @@
     canvas.width = Math.round((videoEl.videoWidth || FRAME_WIDTH) * scale);
     canvas.height = Math.round((videoEl.videoHeight || 360) * scale);
     const ctx = canvas.getContext("2d")!;
-    const count = Math.min(MAX_FRAMES, Math.max(1, Math.floor(duration)));
+    const window = Math.min(durationSec || 30, MAX_FRAMES);
+    const count = Math.min(window, Math.max(1, Math.floor(duration)));
     const out: string[] = [];
     for (let s = 0; s < count; s++) {
       status = $t("video.extracting", { i: s + 1, n: count });
@@ -102,6 +120,20 @@
   }
 
   $: confirmed = items.filter((i) => i.ok === true);
+
+  // Improve an existing agent: store the confirmed info into its memory.
+  async function improveAgent() {
+    if (!targetAgent || !confirmed.length) return;
+    savedMsg = "";
+    try {
+      for (const it of confirmed) {
+        await api.addAgentMemory(targetAgent, `${it.info}: ${it.detail}`, "demonstration");
+      }
+      savedMsg = $t("video.improved", { n: confirmed.length });
+    } catch (e) {
+      savedMsg = e instanceof Error ? e.message : String(e);
+    }
+  }
 
   let speaking = false;
   // Speak the AI's understanding aloud via the backend OpenAI TTS endpoint.
@@ -145,9 +177,14 @@
 
   {#if videoUrl}
     <video bind:this={videoEl} src={videoUrl} controls preload="auto" muted></video>
-    <label>{$t("video.prompt")}
-      <textarea rows="2" bind:value={prompt} placeholder={$t("video.promptPlaceholder")}></textarea>
-    </label>
+    <div class="opts">
+      <label>{$t("video.prompt")}
+        <textarea rows="2" bind:value={prompt} placeholder={$t("video.promptPlaceholder")}></textarea>
+      </label>
+      <label class="dur">{$t("video.duration")}
+        <input type="number" min="5" max={MAX_FRAMES} bind:value={durationSec} />
+      </label>
+    </div>
     <div class="row">
       <button class="primary" on:click={analyze} disabled={busy}>{busy ? "…" : $t("video.analyze")}</button>
       {#if status}<span class="muted small">{status}</span>{/if}
@@ -174,6 +211,19 @@
       </div>
     {/each}
     <p class="muted small summary">{$t("video.confirmedCount", { n: confirmed.length, total: items.length })}</p>
+
+    <div class="improve">
+      <span class="muted small">{$t("video.improveHint")}</span>
+      <div class="row">
+        <select bind:value={targetAgent}>
+          {#each agents as a}<option value={a.id}>{a.name}</option>{/each}
+        </select>
+        <button class="primary" on:click={improveAgent} disabled={!confirmed.length || !targetAgent}>
+          {$t("video.improveBtn")}
+        </button>
+        {#if savedMsg}<span class="muted small">{savedMsg}</span>{/if}
+      </div>
+    </div>
   </div>
 {/if}
 
@@ -185,8 +235,13 @@
   video { width: 100%; max-height: 380px; border-radius: 10px; border: 1px solid var(--border); background: #000; margin-top: 0.3rem; }
   label { display: block; font-size: 0.85rem; color: var(--muted); margin-top: 0.8rem; }
   textarea { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.55rem 0.7rem; font: inherit; margin-top: 0.25rem; }
-  .row { display: flex; gap: 0.8rem; align-items: center; margin-top: 0.8rem; }
+  .row { display: flex; gap: 0.8rem; align-items: center; margin-top: 0.8rem; flex-wrap: wrap; }
+  .opts { display: grid; grid-template-columns: 1fr 120px; gap: 0.8rem; align-items: start; }
+  .dur input { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.55rem 0.7rem; font: inherit; margin-top: 0.25rem; }
+  .improve { margin-top: 1rem; padding-top: 0.8rem; border-top: 1px solid var(--border); }
+  .improve select { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.5rem 0.6rem; font: inherit; }
   button.primary { background: var(--accent); border: 1px solid var(--accent); color: #04231a; font-weight: 600; border-radius: 8px; padding: 0.55rem 1rem; cursor: pointer; font: inherit; }
+  button.primary:disabled { opacity: 0.5; cursor: default; }
   button.primary:disabled { opacity: 0.6; cursor: default; }
   .head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
   .listen { border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); border-radius: 8px; padding: 0.4rem 0.8rem; cursor: pointer; font: inherit; font-size: 0.82rem; }

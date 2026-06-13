@@ -247,4 +247,8 @@ export const fr: Record<string, string> = {
   "video.confirmHint": "confirmez ce qui est pertinent",
   "video.listen": "Écouter",
   "video.confirmedCount": "{n} sur {total} confirmées",
+  "video.duration": "Durée (s)",
+  "video.improveHint": "Ajoutez les infos confirmées à la mémoire d'un agent pour l'améliorer :",
+  "video.improveBtn": "Améliorer l'agent",
+  "video.improved": "{n} infos ajoutées à la mémoire de l'agent",
 };

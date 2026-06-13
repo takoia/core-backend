@@ -278,6 +278,36 @@ pub async fn delete(
     Ok(Json(json!({ "ok": true })))
 }
 
+#[derive(Deserialize)]
+pub struct AddMemory {
+    pub content: String,
+    #[serde(default = "default_mem_key")]
+    pub key: String,
+}
+
+fn default_mem_key() -> String {
+    "demonstration".into()
+}
+
+/// `POST /api/agents/:id/memory` — add a piece of knowledge to an agent's
+/// permanent memory (e.g. confirmed info from a screen-recording demonstration),
+/// improving the agent over time.
+pub async fn add_memory(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<AddMemory>,
+) -> AppResult<Json<Value>> {
+    if body.content.trim().is_empty() {
+        return Err(AppError::BadRequest("content is required".into()));
+    }
+    state
+        .memory
+        .store(&id, &body.key, &body.content)
+        .await
+        .map_err(AppError::Other)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 /// `GET /api/agents/:id/memories` — the agent's accumulated expertise.
 pub async fn memories(
     State(state): State<AppState>,

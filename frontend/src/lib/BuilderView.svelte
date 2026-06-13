@@ -412,29 +412,39 @@
 
   /* Canvas + flow */
   .canvas {
-    overflow-x: auto;
+    overflow: auto;
+    min-height: 600px;
+    display: flex;
+    flex-direction: column;
   }
   .flow {
     display: flex;
+    flex-direction: column;
     align-items: center;
     gap: 0;
-    padding: 0.5rem 0.2rem 1rem;
-    min-width: max-content;
+    padding: 1.5rem 0.5rem;
+    flex: 1;
   }
   .node {
     border: 1.5px solid var(--border);
     background: var(--panel);
     color: var(--text);
-    border-radius: 14px;
-    padding: 0.7rem 0.8rem;
-    min-width: 130px;
+    border-radius: 16px;
+    padding: 1rem 1.2rem;
+    width: 280px;
+    max-width: 90%;
+    min-height: 64px;
     cursor: pointer;
     font: inherit;
-    text-align: left;
+    text-align: center;
     flex: none;
     transition:
       border-color 0.12s,
-      box-shadow 0.12s;
+      box-shadow 0.12s,
+      transform 0.12s;
+  }
+  .node:hover {
+    transform: translateY(-1px);
   }
   .node:hover {
     border-color: var(--accent);
@@ -478,9 +488,9 @@
     margin-top: 0.2rem;
   }
   .wire {
-    width: 34px;
-    height: 2px;
-    background: var(--border);
+    width: 2px;
+    height: 34px;
+    background: linear-gradient(var(--border), var(--accent), var(--border));
     flex: none;
   }
   .chips {

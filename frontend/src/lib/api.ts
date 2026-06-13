@@ -132,6 +132,12 @@ export const api = {
       body: toml,
     }),
   exportToml: (id: string) => req<string>(`/api/agents/${id}/export`),
+  addAgentMemory: (id: string, content: string, key = "demonstration") =>
+    req<{ ok: boolean }>(`/api/agents/${id}/memory`, {
+      method: "POST",
+      headers: jsonH,
+      body: JSON.stringify({ content, key }),
+    }),
   memories: (id: string) =>
     req<{ memories: { key: string; content: string; created_at: string }[] }>(
       `/api/agents/${id}/memories`,
