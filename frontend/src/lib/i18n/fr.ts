@@ -274,6 +274,7 @@ export const fr: Record<string, string> = {
   "builder.descrPlaceholder": "ce que fait cet agent",
   "builder.triggerPick": "Choisissez comment l'agent démarre",
   "builder.iconImage": "Ou URL d'image",
+  "builder.properties": "Propriétés",
   "builder.toolbox": "Boîte à outils",
   "builder.toolboxHint": "Glissez un bloc sur le canvas (ou cliquez).",
   "builder.upload": "Importer une image",

@@ -151,7 +151,11 @@
 
   function onNodeClick(e: any) {
     const id = e?.node?.id ?? e?.detail?.node?.id;
-    if (id) selected = id;
+    if (!id) return;
+    selected = id;
+    // The agent (trigger) node is edited in the inspector; every other node
+    // opens the properties modal so it works even with panels collapsed.
+    if (id !== "agent") modalOpen = true;
   }
 
   // Keep the agent node + live status in sync without looping (untrack).
@@ -331,6 +335,10 @@
 
   // Agent image upload -> data URL.
   let agentsOpen = $state(true);
+  // Collapsible side panels (toolbox + properties) and the per-node edit modal.
+  let paletteOpen = $state(true);
+  let inspectorOpen = $state(true);
+  let modalOpen = $state(false);
   function onIconFile(e: Event) {
     const f = (e.target as HTMLInputElement).files?.[0];
     if (!f) return;
@@ -350,22 +358,26 @@
   }
 </script>
 
-<div class="dash">
+<div class="dash" style="grid-template-columns: {paletteOpen ? '200px' : '36px'} 1fr {inspectorOpen ? '300px' : '36px'};">
   <!-- Palette (tools window) -->
-  <aside class="palette card">
-    <h3>{$t("builder.toolbox")}</h3>
-    <p class="hint">{$t("builder.toolboxHint")}</p>
-    {#each PALETTE as g}
-      <div class="pgroup">{g.group}</div>
-      {#each g.items as b}
-        <button class="pblock {b.kind}" draggable="true"
-          ondragstart={(e) => e.dataTransfer?.setData("text/plain", b.key)}
-          onclick={() => addBlock(b.key)}>
-          <span class="pg">{b.glyph}</span> {b.label}
-        </button>
+  {#if paletteOpen}
+    <aside class="palette card">
+      <div class="phead"><h3>{$t("builder.toolbox")}</h3><button class="collapse" onclick={() => (paletteOpen = false)} title="Réduire">«</button></div>
+      <p class="hint">{$t("builder.toolboxHint")}</p>
+      {#each PALETTE as g}
+        <div class="pgroup">{g.group}</div>
+        {#each g.items as b}
+          <button class="pblock {b.kind}" draggable="true"
+            ondragstart={(e) => e.dataTransfer?.setData("text/plain", b.key)}
+            onclick={() => addBlock(b.key)}>
+            <span class="pg">{b.glyph}</span> {b.label}
+          </button>
+        {/each}
       {/each}
-    {/each}
-  </aside>
+    </aside>
+  {:else}
+    <aside class="railbar card"><button class="collapse" onclick={() => (paletteOpen = true)} title={$t("builder.toolbox")}>»</button></aside>
+  {/if}
 
   <!-- Canvas -->
   <section class="center">
@@ -393,7 +405,11 @@
   </section>
 
   <!-- Inspector -->
+  {#if !inspectorOpen}
+    <aside class="railbar card"><button class="collapse" onclick={() => (inspectorOpen = true)} title="Propriétés">«</button></aside>
+  {:else}
   <aside class="inspector card">
+    <div class="phead insp-top"><strong>{$t("builder.properties")}</strong><button class="collapse" onclick={() => (inspectorOpen = false)} title="Réduire">»</button></div>
     {#if agentsOpen}
       <div class="phead"><strong>{$t("builder.myAgents")}</strong><button class="new" onclick={newAgent}>＋</button></div>
       <div class="alist">
@@ -443,6 +459,39 @@
       {/if}
     {/if}
   </aside>
+  {/if}
+
+  <!-- Per-node properties modal (modify / remove on click) -->
+  {#if modalOpen && selNode && selected !== "agent"}
+    {@const mkind = selNode.data.kind}
+    <div class="overlay" onclick={() => (modalOpen = false)} role="presentation">
+      <div class="nmodal" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div class="nmhead">
+          <h3>{#if isImg(selNode.data.glyph)}<img class="hicon" src={selNode.data.glyph} alt="" />{:else}{selNode.data.glyph}{/if} {selNode.data.label}</h3>
+          <button class="x" onclick={() => (modalOpen = false)} aria-label="close">×</button>
+        </div>
+        <div class="nmbody">
+          {#if mkind === "step"}
+            <label class="blk">{$t("builder.systemPrompt")}<textarea rows="6" bind:value={prompts[selected]} placeholder={$t("builder.promptPlaceholder")}></textarea></label>
+          {:else if mkind === "tool"}
+            <p class="hint">Outil exécuté à l'étape Action.</p>
+            {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
+              <label class="blk">{PARAM_LABEL[pk] ?? pk}<input value={params[selected]?.[pk] ?? ""}
+                oninput={(e) => params = { ...params, [selected]: { ...(params[selected]||{}), [pk]: (e.target as HTMLInputElement).value } }}
+                placeholder={PARAM_PH[pk] ?? ""} /></label>
+            {/each}
+            {#if (PARAM_KEYS[blockKey(selected)] ?? []).length === 0}<p class="hint">Aucune propriété pour cet outil.</p>{/if}
+          {:else if mkind === "control"}
+            <p class="hint">Bloc logique (visuel) — exécution avancée à venir.</p>
+          {/if}
+        </div>
+        <div class="nmfoot">
+          <button class="danger" onclick={() => { removeNode(selNode.id); modalOpen = false; }}>🗑 Supprimer</button>
+          <button class="ghost" onclick={() => (modalOpen = false)}>Fermer</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -481,7 +530,21 @@
   .inspector { padding: 0.8rem; overflow-y: auto; }
   .inspector h3 { margin: 0 0 0.5rem; font-size: 0.95rem; }
   .phead { display: flex; justify-content: space-between; align-items: center; }
+  .insp-top { margin-bottom: 0.5rem; }
+  .collapse { background: var(--bg); border: 1px solid var(--border); color: var(--muted); border-radius: 7px; width: 24px; height: 24px; cursor: pointer; font-size: 0.9rem; line-height: 1; }
+  .collapse:hover { color: var(--text); border-color: var(--accent); }
+  .railbar { display: flex; align-items: flex-start; justify-content: center; padding: 0.5rem 0; }
   .new { width: 24px; height: 24px; border-radius: 7px; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); cursor: pointer; }
+  /* Per-node properties modal */
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1100; display: flex; align-items: center; justify-content: center; }
+  .nmodal { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; width: 380px; max-width: 92vw; box-shadow: 0 20px 60px rgba(0,0,0,0.5); overflow: hidden; }
+  .nmhead { display: flex; align-items: center; justify-content: space-between; padding: 0.8rem 1rem; border-bottom: 1px solid var(--border); }
+  .nmhead h3 { margin: 0; font-size: 0.98rem; display: flex; align-items: center; gap: 0.4rem; }
+  .nmhead .x { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1.3rem; line-height: 1; }
+  .nmbody { padding: 1rem; }
+  .nmfoot { display: flex; justify-content: space-between; gap: 0.6rem; padding: 0.8rem 1rem; border-top: 1px solid var(--border); }
+  .nmfoot button { border-radius: 8px; padding: 0.5rem 0.9rem; cursor: pointer; font: inherit; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  .nmfoot .danger { background: var(--err); border-color: var(--err); color: #2a0707; font-weight: 600; }
   .alist { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.4rem; }
   .arow { display: flex; align-items: center; }
   .arow.on { background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 8px; }
