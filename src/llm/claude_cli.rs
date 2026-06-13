@@ -100,9 +100,10 @@ impl LlmProvider for ClaudeCliProvider {
             cmd.arg("--append-system-prompt").arg(&system);
         }
         if req.enable_web_search {
-            // Allow both WebSearch (find pages) and WebFetch (read pages);
-            // without WebFetch the model often concludes it has no web access.
-            cmd.arg("--allowedTools").arg("WebSearch WebFetch");
+            // Allow both WebSearch (find pages) and WebFetch (read pages).
+            // The flag takes a comma-separated list; a space would be parsed as a
+            // single invalid tool name and block everything.
+            cmd.arg("--allowedTools").arg("WebSearch,WebFetch");
         }
         if let Some(token) = &self.token {
             cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);

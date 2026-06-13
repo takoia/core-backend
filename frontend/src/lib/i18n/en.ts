@@ -268,4 +268,8 @@ export const en: Record<string, string> = {
   "builder.toolParams": "Tool parameters",
   "builder.delete": "Delete",
   "builder.confirmDelete": "Delete this agent?",
+  "builder.general": "General",
+  "builder.icon": "Icon",
+  "builder.descr": "Description",
+  "builder.descrPlaceholder": "what this agent does",
 };

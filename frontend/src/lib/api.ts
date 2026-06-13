@@ -18,6 +18,7 @@ export interface Agent {
   runs_count: number;
   created_at: string;
   author?: string;
+  icon?: string;
 }
 
 export interface StepConfig {

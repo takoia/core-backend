@@ -27,13 +27,14 @@ struct AgentRow {
     author: String,
     trigger_on: Option<String>,
     emit: String,
+    icon: String,
 }
 
 /// `GET /api/agents` — list this account's agents.
 pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
     let rows = sqlx::query_as::<_, AgentRow>(
         r#"SELECT id, name, description, autonomy_level, expertise_domain, visibility,
-                  price_per_run_usd, runs_count, created_at, author, trigger_on, emit
+                  price_per_run_usd, runs_count, created_at, author, trigger_on, emit, icon
            FROM agents WHERE account_id = ? ORDER BY created_at DESC"#,
     )
     .bind(DEFAULT_ACCOUNT_ID)
@@ -46,7 +47,7 @@ pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
 pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Value>> {
     let agent = sqlx::query_as::<_, AgentRow>(
         r#"SELECT id, name, description, autonomy_level, expertise_domain, visibility,
-                  price_per_run_usd, runs_count, created_at, author, trigger_on, emit
+                  price_per_run_usd, runs_count, created_at, author, trigger_on, emit, icon
            FROM agents WHERE id = ?"#,
     )
     .bind(&id)

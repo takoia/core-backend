@@ -41,6 +41,9 @@
   let loopMinutes = $state(0);
   let goals = $state("");
   let checks = $state("");
+  let description = $state("");
+  let icon = $state("");
+  const ICON_CHOICES = ["🐙", "📈", "🧾", "🌦️", "🛰️", "✉️", "🤖", "🔎", "📊", "🛒", "💬", "🧠"];
   let prompts = $state<Record<StepKey, string>>({ analyse: "", decision: "", action: "", restitution: "" });
   let tools = $state<string[]>([]);
   let toolParams = $state<Record<string, string>>({ symbol: "^IXIC", discord_webhook: "" });
@@ -49,6 +52,7 @@
   // Floating overlay panels (canvas is full-screen underneath).
   let agentsOpen = $state(true);
   let inspectorOpen = $state(false);
+  let busy = $state(false);
 
   // Param fields to show for the currently chosen action tools.
   const activeParams = $derived(
@@ -68,6 +72,7 @@
     editingId = null;
     name = "New agent"; author = "You"; expertise = ""; autonomy = "confirm_before_action";
     triggerOn = ""; emit = ""; loopMinutes = 0; goals = ""; checks = "";
+    description = ""; icon = "🐙";
     prompts = { analyse: "", decision: "", action: "", restitution: "" };
     tools = []; selected = "analyse"; resetRun();
   }
@@ -84,6 +89,7 @@
     const d = await api.getAgent(id);
     editingId = d.agent.id;
     name = d.agent.name; author = d.agent.author ?? ""; expertise = d.agent.expertise_domain ?? "";
+    description = d.agent.description ?? ""; icon = d.agent.icon || "";
     autonomy = d.agent.autonomy_level === "full_auto" ? "full_auto" : "confirm_before_action";
     triggerOn = (d.agent as any).trigger_on ?? "";
     try { emit = (JSON.parse((d.agent as any).emit ?? "[]") as string[]).join(", "); } catch { emit = ""; }
@@ -152,8 +158,9 @@
 
   function buildToml(): string {
     const emitArr = emit.split(",").map((e) => e.trim()).filter(Boolean);
+    const desc = (description || goals || "Built in TakoIA.").replace(/\n/g, " ");
     let toml = `[agent]\nid = "${editingId ?? slug(name)}"\nname = "${name}"\nauthor = "${author}"\nversion = "0.1.0"\n`;
-    toml += `description = "${goals ? goals.replace(/\n/g, " ") : "Built in TakoIA."}"\nexpertise = "${expertise}"\nautonomy = "${autonomy}"\n`;
+    toml += `description = ${JSON.stringify(desc)}\nexpertise = "${expertise}"\nautonomy = "${autonomy}"\nicon = "${icon}"\n`;
     toml += `emit = [${emitArr.map((e) => `"${e}"`).join(", ")}]\n`;
     if (triggerOn.trim()) toml += `\n[trigger]\non = "${triggerOn.trim()}"\n`;
     for (const s of STEPS) {
@@ -175,6 +182,8 @@
 
   async function save() {
     createdMsg = "";
+    busy = true;
+    try {
     const r = await api.importToml(buildToml());
     editingId = r.id;
     if (loopMinutes > 0) {
@@ -185,6 +194,7 @@
     createdMsg = $t("builder.created");
     await refreshAgents();
     return r.id;
+    } finally { busy = false; }
   }
 
   // ── Live run ──
@@ -240,6 +250,7 @@
 
   const isStep = $derived(selected !== null && (STEPS as readonly string[]).includes(selected));
   function emoji(a: Agent): string {
+    if (a.icon) return a.icon;
     const e = (a.expertise_domain || "").toLowerCase();
     if (e.includes("trad")) return "📈"; if (e.includes("invoice") || e.includes("fact")) return "🧾";
     if (e.includes("meteo") || e.includes("weather")) return "🌦️"; if (e.includes("watch") || e.includes("veille")) return "🛰️";
@@ -260,8 +271,11 @@
   <!-- Floating top bar -->
   <div class="topbar card">
     <button class="ptoggle" onclick={() => (agentsOpen = !agentsOpen)} title={$t("builder.myAgents")}>☰</button>
+    <button class="iconbtn" onclick={() => { selected = "general"; inspectorOpen = true; }} title={$t("builder.general")}>{icon || "🐙"}</button>
     <input class="agentname" bind:value={name} />
+    <button class="gear" onclick={() => { selected = "general"; inspectorOpen = true; }} title={$t("builder.general")}>⚙</button>
     <div class="runctl">
+      {#if busy || runStatus === "queued" || runStatus === "running"}<span class="spinner"></span>{/if}
       {#if runStatus}<span class="badge {runStatus}">{runStatus}</span>{/if}
       <button class="start" onclick={start}><Icon name="run" size={14} /> {$t("builder.start")}</button>
       <button class="stop" onclick={stop} disabled={!runJobId}>■ {$t("builder.stop")}</button>
@@ -344,10 +358,16 @@
     {:else if selected === "emit"}
       <h3>{$t("builder.node.emit")}</h3>
       <label class="blk">{$t("builder.emit")}<input bind:value={emit} placeholder="report.ready" /></label>
-    {/if}
-
-    <details class="more">
-      <summary>{$t("builder.moreOptions")}</summary>
+    {:else if selected === "general"}
+      <h3>{$t("builder.general")}</h3>
+      <label class="blk">{$t("builder.icon")}</label>
+      <div class="iconpick">
+        {#each ICON_CHOICES as ic}
+          <button class="ic" class:on={icon === ic} onclick={() => (icon = ic)}>{ic}</button>
+        {/each}
+      </div>
+      <label class="blk">{$t("builder.name")}<input bind:value={name} /></label>
+      <label class="blk">{$t("builder.descr")}<textarea rows="3" bind:value={description} placeholder={$t("builder.descrPlaceholder")}></textarea></label>
       <label class="blk">{$t("builder.author")}<input bind:value={author} /></label>
       <label class="blk">{$t("builder.expertise")}<input bind:value={expertise} /></label>
       <label class="blk">{$t("builder.autonomy")}
@@ -359,7 +379,7 @@
       <label class="blk">{$t("builder.loopEvery")}<input type="number" min="0" bind:value={loopMinutes} /></label>
       <label class="blk">{$t("builder.goals")}<input bind:value={goals} placeholder={$t("builder.goalsPlaceholder")} /></label>
       <label class="blk">{$t("builder.checks")}<input bind:value={checks} placeholder={$t("builder.checksPlaceholder")} /></label>
-    </details>
+    {/if}
     {#if createdMsg}<p class="muted small">{createdMsg}</p>{/if}
   </aside>
   {/if}
@@ -421,4 +441,16 @@
   .more summary { cursor: pointer; color: var(--muted); font-size: 0.82rem; }
   .small { font-size: 0.78rem; }
   :global(.svelte-flow__attribution) { display: none; }
+
+  .iconbtn { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.2rem 0.4rem; cursor: pointer; font-size: 1.15rem; }
+  .gear { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.35rem 0.5rem; cursor: pointer; font-size: 0.95rem; }
+  .iconpick { display: flex; gap: 0.3rem; flex-wrap: wrap; margin: 0.2rem 0 0.5rem; }
+  .ic { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.2rem 0.4rem; cursor: pointer; font-size: 1.25rem; line-height: 1.4; }
+  .ic.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
+  .spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; flex: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* Make the task palette stand out (Scratch-like) */
+  .palette { border: 1.5px dashed var(--accent) !important; background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  .palette > span:first-child { display: block; color: var(--text) !important; font-weight: 700; font-size: 0.85rem; margin-bottom: 0.4rem; }
+  .add { font-size: 0.8rem !important; padding: 0.35rem 0.6rem !important; }
 </style>

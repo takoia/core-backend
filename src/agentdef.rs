@@ -35,6 +35,9 @@ pub struct AgentMeta {
     pub expertise: String,
     #[serde(default = "default_autonomy")]
     pub autonomy: String,
+    /// Custom emoji/icon shown for the agent.
+    #[serde(default)]
+    pub icon: String,
     /// Events emitted at the end of a run (choreography). Lives in `[agent]` so
     /// it is unambiguous regardless of table ordering in the file.
     #[serde(default)]
@@ -102,8 +105,8 @@ pub async fn import(db: &Db, account_id: &str, toml_str: &str) -> Result<String>
     sqlx::query(
         r#"INSERT INTO agents
              (id, account_id, name, description, autonomy_level, expertise_domain,
-              author, version, trigger_on, emit, definition_toml, visibility, price_per_run_usd)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              author, version, trigger_on, emit, definition_toml, visibility, price_per_run_usd, icon)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              name = excluded.name,
              description = excluded.description,
@@ -116,6 +119,7 @@ pub async fn import(db: &Db, account_id: &str, toml_str: &str) -> Result<String>
              definition_toml = excluded.definition_toml,
              visibility = excluded.visibility,
              price_per_run_usd = excluded.price_per_run_usd,
+             icon = excluded.icon,
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')"#,
     )
     .bind(&id)
@@ -131,6 +135,7 @@ pub async fn import(db: &Db, account_id: &str, toml_str: &str) -> Result<String>
     .bind(toml_str)
     .bind(visibility)
     .bind(def.agent.price_per_run_usd.unwrap_or(0.0))
+    .bind(&def.agent.icon)
     .execute(&mut *tx)
     .await?;
 
@@ -187,10 +192,11 @@ pub async fn export(db: &Db, agent_id: &str) -> Result<String> {
         emit: String,
         visibility: String,
         price_per_run_usd: f64,
+        icon: String,
     }
     let a = sqlx::query_as::<_, AgentRow>(
         r#"SELECT id, name, description, autonomy_level, expertise_domain, author,
-                  version, trigger_on, emit, visibility, price_per_run_usd
+                  version, trigger_on, emit, visibility, price_per_run_usd, icon
            FROM agents WHERE id = ?"#,
     )
     .bind(agent_id)
@@ -248,6 +254,7 @@ pub async fn export(db: &Db, agent_id: &str) -> Result<String> {
             description: a.description,
             expertise: a.expertise_domain,
             autonomy: a.autonomy_level,
+            icon: a.icon,
             emit: serde_json::from_str(&a.emit).unwrap_or_default(),
             visibility: Some(a.visibility),
             price_per_run_usd: Some(a.price_per_run_usd),
