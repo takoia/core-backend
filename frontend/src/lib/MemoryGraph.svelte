@@ -25,15 +25,26 @@
   const mkNode = (id: string, label: string, x: number, y: number, kind: string): Node =>
     ({ id, position: { x, y }, data: { label }, class: `mg-${kind}` }) as Node;
 
-  // Memory node sized/colored by importance (content richness as a proxy for
-  // the ICM importance/weight: longer, denser memories matter more).
-  const mkMem = (id: string, mem: { key: string; content: string }, x: number, y: number): Node => {
-    const len = (mem.content || "").length;
-    const imp = len > 400 ? "hi" : len > 140 ? "mid" : "lo";
-    const w = Math.round(Math.min(260, 130 + len / 6));
+  // A memory normalized with its ICM importance metadata.
+  type Mem = { text: string; weight: number; access: number; imp: string };
+  async function loadMems(aid: string): Promise<Mem[]> {
+    try {
+      const e = await api.icmMemories(aid);
+      if (e.length) return e.map((x) => ({ text: x.summary, weight: x.weight, access: x.access_count, imp: x.importance }));
+    } catch { /* fall back to DB mirror */ }
+    const m = await api.memories(aid).catch(() => []);
+    return m.map((x) => ({ text: x.content, weight: 1, access: 0, imp: "medium" }));
+  }
+
+  // Node size/color reflect REAL ICM importance: weight × recall reinforcement
+  // (access_count). Frequently recalled + high-weight memories stand out.
+  const mkMem = (id: string, mem: Mem, x: number, y: number): Node => {
+    const score = mem.weight * (1 + Math.log2(1 + mem.access));
+    const imp = mem.imp === "high" || score > 1.5 ? "hi" : (mem.imp === "low" || score < 0.6) ? "lo" : "mid";
+    const w = Math.round(Math.min(280, 120 + score * 55 + (mem.text || "").length / 12));
     return {
       id, position: { x, y },
-      data: { label: `[${mem.key}] ${short(mem.content, 30)}`, full: mem.content, mkey: mem.key },
+      data: { label: `${short(mem.text, 26)}  ↺${mem.access}`, full: mem.text, mkey: `${mem.imp} · poids ${mem.weight.toFixed(2)} · rappels ${mem.access}` },
       class: `mg-mem mg-${imp}`, style: `width:${w}px`,
     } as Node;
   };
@@ -46,7 +57,7 @@
   }
 
   async function buildOne(aid: string) {
-    const mems = await api.memories(aid);
+    const mems = await loadMems(aid);
     truncated = Math.max(0, mems.length - MAX_PER_AGENT);
     const ns: Node[] = [mkNode(`a:${aid}`, `${agentIcon(aid)} ${agentName(aid)}`, 0, 0, "agent")];
     const es: Edge[] = [];
@@ -67,7 +78,7 @@
     let trunc = 0;
     const AR = 520; // agent ring radius
     const results = await Promise.all(
-      ids.map((id) => api.memories(id).then((m) => ({ id, m })).catch(() => ({ id, m: [] as any[] }))),
+      ids.map((id) => loadMems(id).then((m) => ({ id, m })).catch(() => ({ id, m: [] as Mem[] }))),
     );
     results.forEach(({ id, m }, ai) => {
       const ang = (ai / Math.max(1, ids.length)) * Math.PI * 2;

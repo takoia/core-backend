@@ -48,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         .route("/agents/:id/publish", post(agents::publish))
         .route("/agents/:id/export", get(agents::export_toml))
         .route("/agents/:id/memories", get(agents::memories))
+        .route("/agents/:id/icm-memories", get(agents::icm_memories))
         .route("/agents/:id/memory", post(agents::add_memory))
         // Objectives -> jobs
         .route("/objectives", get(objectives::list).post(objectives::create))

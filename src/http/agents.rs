@@ -317,3 +317,23 @@ pub async fn memories(
     let items = state.memory.list(&id).await.map_err(AppError::Other)?;
     Ok(Json(json!({ "memories": items })))
 }
+
+/// ICM memories with native importance metadata (weight, access_count) so the
+/// memory map can size/color entries by real importance relative to others.
+pub async fn icm_memories(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    // Keyword query from the agent's name + domain so its memories surface.
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT name, expertise_domain FROM agents WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| AppError::Other(e.into()))?;
+    let query = row
+        .map(|(n, e)| format!("{n} {e}"))
+        .unwrap_or_else(|| "memory".into());
+    let entries = state.memory.icm_entries(&id, &query, 30).await;
+    Ok(Json(json!({ "entries": entries })))
+}

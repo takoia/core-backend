@@ -145,6 +145,12 @@ export const api = {
       `/api/agents/${id}/memories`,
     ).then((r) => r.memories),
 
+  // ICM memories with native importance metadata (weight, access_count).
+  icmMemories: (id: string) =>
+    req<{ entries: { summary: string; weight: number; access_count: number; importance: string }[] }>(
+      `/api/agents/${id}/icm-memories`,
+    ).then((r) => r.entries),
+
   marketplace: () => req<{ agents: Agent[] }>("/api/marketplace").then((r) => r.agents),
 
   createObjective: (agent_id: string, title: string, prompt: string) =>

@@ -11,6 +11,15 @@ use serde::Serialize;
 use tokio::process::Command;
 use uuid::Uuid;
 
+/// An ICM memory with its native importance metadata.
+#[derive(Debug, Clone, Serialize)]
+pub struct IcmEntry {
+    pub summary: String,
+    pub weight: f64,
+    pub access_count: i64,
+    pub importance: String,
+}
+
 /// A stored memory entry, surfaced in the UI.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct MemoryEntry {
@@ -246,6 +255,48 @@ impl Memory {
                 .await?;
         }
         Ok(())
+    }
+
+    /// ICM memories with their native importance metadata (weight, access_count,
+    /// importance), used to size/color the memory map by real importance. The
+    /// query keyword-matches the agent's domain so its memories surface.
+    pub async fn icm_entries(&self, agent_id: &str, query: &str, limit: usize) -> Vec<IcmEntry> {
+        let q = if query.trim().is_empty() { "memory" } else { query };
+        let out = Command::new("icm")
+            .arg("recall")
+            .arg(q)
+            .arg("--topic")
+            .arg(Self::topic(agent_id))
+            .arg("--limit")
+            .arg(limit.to_string())
+            .arg("--db")
+            .arg(&self.icm_db_path)
+            .arg("--no-embeddings")
+            .arg("--format")
+            .arg("json")
+            .output()
+            .await;
+        let text = match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            _ => return Vec::new(),
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(text.trim()) {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+        parsed
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .map(|m| IcmEntry {
+                        summary: m.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        weight: m.get("weight").and_then(|v| v.as_f64()).unwrap_or(1.0),
+                        access_count: m.get("access_count").and_then(|v| v.as_i64()).unwrap_or(0),
+                        importance: m.get("importance").and_then(|v| v.as_str()).unwrap_or("medium").to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Agent ids that currently have at least `min` stored memories.
