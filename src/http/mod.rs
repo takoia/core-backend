@@ -7,7 +7,9 @@ mod connectors;
 mod health;
 mod jobs;
 mod marketplace;
+mod mcp;
 mod objectives;
+mod skills;
 mod usage;
 
 use crate::state::AppState;
@@ -48,6 +50,15 @@ pub fn router(state: AppState) -> Router {
         // Settings / connectors (encrypted)
         .route("/connectors", get(connectors::list).post(connectors::upsert))
         .route("/connectors/:id", delete(connectors::delete))
+        // MCP catalog + connect
+        .route("/mcp/catalog", get(mcp::catalog))
+        .route("/mcp/installed", get(mcp::installed))
+        .route("/mcp/connect", post(mcp::connect))
+        // Skills catalog + install (from GitHub)
+        .route("/skills/catalog", get(skills::catalog))
+        .route("/skills/installed", get(skills::installed))
+        .route("/skills/install", post(skills::install))
+        .route("/skills/github", get(skills::github))
         // Usage metering (billing basis)
         .route("/usage", get(usage::get))
         // Public marketplace

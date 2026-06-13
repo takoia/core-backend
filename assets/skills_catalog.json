@@ -1,0 +1,14 @@
+[
+  { "id": "pdf-filling", "name": "PDF Form Filling", "category": "Documents", "logo": "adobeacrobatreader", "description": "Fill, extract and merge PDF forms programmatically.", "repo": "anthropics/skills", "path": "document-skills/pdf", "branch": "main" },
+  { "id": "xlsx", "name": "Excel / Spreadsheets", "category": "Documents", "logo": "microsoftexcel", "description": "Create and edit XLSX spreadsheets with formulas and charts.", "repo": "anthropics/skills", "path": "document-skills/xlsx", "branch": "main" },
+  { "id": "docx", "name": "Word Documents", "category": "Documents", "logo": "microsoftword", "description": "Generate and edit DOCX documents with styles.", "repo": "anthropics/skills", "path": "document-skills/docx", "branch": "main" },
+  { "id": "pptx", "name": "PowerPoint", "category": "Documents", "logo": "microsoftpowerpoint", "description": "Build PPTX decks from structured content.", "repo": "anthropics/skills", "path": "document-skills/pptx", "branch": "main" },
+  { "id": "web-research", "name": "Deep Web Research", "category": "Research", "logo": "googlescholar", "description": "Fan-out search, fetch sources and synthesize a cited report.", "repo": "anthropics/skills", "path": "research/deep-research", "branch": "main" },
+  { "id": "data-analysis", "name": "Data Analysis", "category": "Data", "logo": "pandas", "description": "Explore datasets, compute stats and produce charts.", "repo": "anthropics/skills", "path": "data/analysis", "branch": "main" },
+  { "id": "sql-expert", "name": "SQL Expert", "category": "Data", "logo": "postgresql", "description": "Write, optimize and explain SQL queries.", "repo": "anthropics/skills", "path": "data/sql", "branch": "main" },
+  { "id": "code-review", "name": "Code Review", "category": "Dev", "logo": "github", "description": "Review a diff for bugs and cleanups at a chosen effort level.", "repo": "anthropics/skills", "path": "dev/code-review", "branch": "main" },
+  { "id": "slack-digest", "name": "Slack Digest", "category": "Comms", "logo": "slack", "description": "Summarize channels and surface action items.", "repo": "anthropics/skills", "path": "comms/slack-digest", "branch": "main" },
+  { "id": "invoice-extract", "name": "Invoice Extraction", "category": "Finance", "logo": "stripe", "description": "Extract structured fields from invoices and receipts.", "repo": "anthropics/skills", "path": "finance/invoice", "branch": "main" },
+  { "id": "brand-guidelines", "name": "Brand Guidelines", "category": "Design", "logo": "figma", "description": "Apply a brand's voice, colors and layout to outputs.", "repo": "anthropics/skills", "path": "design/brand", "branch": "main" },
+  { "id": "meeting-notes", "name": "Meeting Notes", "category": "Productivity", "logo": "notion", "description": "Turn transcripts into structured notes and decisions.", "repo": "anthropics/skills", "path": "productivity/meeting-notes", "branch": "main" }
+]

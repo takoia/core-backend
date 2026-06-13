@@ -139,6 +139,56 @@ export const api = {
 
   usage: () =>
     req<{ totals: UsageTotal[]; estimated_total_usd: number }>("/api/usage"),
+
+  mcpCatalog: () => req<{ servers: McpServer[] }>("/api/mcp/catalog").then((r) => r.servers),
+  mcpInstalled: () =>
+    req<{ installed: { name: string; connected: boolean }[] }>("/api/mcp/installed").then(
+      (r) => r.installed,
+    ),
+  mcpConnect: (id: string, env: string[] = []) =>
+    req<{ ok: boolean; cli_registered: boolean; message: string }>("/api/mcp/connect", {
+      method: "POST",
+      headers: jsonH,
+      body: JSON.stringify({ id, env }),
+    }),
+};
+
+export interface McpServer {
+  id: string;
+  name: string;
+  category: string;
+  logo: string;
+  description: string;
+  transport: string;
+  command?: string;
+  url?: string;
+  docs: string;
+}
+
+export interface Skill {
+  id: string;
+  name: string;
+  category: string;
+  logo: string;
+  description: string;
+  repo: string;
+  path: string;
+  branch: string;
+}
+
+export const skillsApi = {
+  catalog: () => req<{ skills: Skill[] }>("/api/skills/catalog").then((r) => r.skills),
+  installed: () => req<{ installed: string[] }>("/api/skills/installed").then((r) => r.installed),
+  install: (s: { id: string; repo: string; path: string; branch: string }) =>
+    req<{ ok: boolean; source: string }>("/api/skills/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(s),
+    }),
+  github: (repo: string, path = "") =>
+    req<{ folders: { name: string; path: string }[] }>(
+      `/api/skills/github?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(path)}`,
+    ).then((r) => r.folders),
 };
 
 const jsonH = { "Content-Type": "application/json" };

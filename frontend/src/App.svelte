@@ -5,8 +5,10 @@
   import AgentsView from "./lib/AgentsView.svelte";
   import SettingsView from "./lib/SettingsView.svelte";
   import UsageView from "./lib/UsageView.svelte";
+  import McpView from "./lib/McpView.svelte";
+  import SkillsView from "./lib/SkillsView.svelte";
 
-  type View = "run" | "agents" | "settings" | "usage";
+  type View = "run" | "agents" | "mcp" | "skills" | "settings" | "usage";
   let view: View = "run";
   let healthy = false;
 
@@ -50,6 +52,8 @@
     <nav>
       <button class:active={view === "run"} on:click={() => (view = "run")}>Run</button>
       <button class:active={view === "agents"} on:click={() => (view = "agents")}>Agents</button>
+      <button class:active={view === "mcp"} on:click={() => (view = "mcp")}>MCP</button>
+      <button class:active={view === "skills"} on:click={() => (view = "skills")}>Skills</button>
       <button class:active={view === "settings"} on:click={() => (view = "settings")}>Settings</button>
       <button class:active={view === "usage"} on:click={() => (view = "usage")}>Usage</button>
       <span class="dot" class:ok={healthy} title={healthy ? "backend online" : "backend offline"}></span>
@@ -62,6 +66,10 @@
     <RunView {agents} />
   {:else if view === "agents"}
     <AgentsView {agents} onChanged={loadAgents} />
+  {:else if view === "mcp"}
+    <McpView />
+  {:else if view === "skills"}
+    <SkillsView />
   {:else if view === "settings"}
     <SettingsView {connectors} onChanged={loadConnectors} />
   {:else if view === "usage"}
