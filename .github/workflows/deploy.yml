@@ -1,0 +1,35 @@
+name: Deploy to VM
+
+# Auto-deploy on every push to the MVP branch: SSH into the Azure VM, pull the
+# new code, rebuild the frontend, and let cargo-watch rebuild/restart the backend.
+on:
+  push:
+    branches: [feat/core-mvp]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          command_timeout: 20m
+          script: |
+            set -e
+            export PATH="$HOME/.bun/bin:$HOME/.cargo/bin:$PATH"
+            cd ~/core-backend
+            git fetch --quiet origin feat/core-mvp
+            git reset --hard origin/feat/core-mvp
+            # Rebuild the static frontend (served by the binary).
+            cd frontend && bun install --silent && bun run build && cd ..
+            # Ensure the hot-reload server is running; cargo-watch rebuilds the
+            # backend automatically when the pulled sources changed.
+            if ! pgrep -f "cargo watch" >/dev/null; then
+              source "$HOME/.cargo/env"
+              nohup cargo watch -x "run --release" > ~/server.log 2>&1 &
+            fi
+            echo "deployed $(git rev-parse --short HEAD)"
