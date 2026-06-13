@@ -177,6 +177,7 @@ export const en: Record<string, string> = {
   "builder.tapToEdit": "Click a step to edit its prompt",
   "builder.create": "Create agent",
   "builder.created": "Agent created",
+  "builder.started": "Agent started",
   "builder.node.trigger": "Trigger",
   "builder.node.emit": "Emit",
   "builder.step.analyse": "Analyse",

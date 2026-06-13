@@ -386,7 +386,7 @@
     selected = "agent"; resetRun();
   }
 
-  async function save() {
+  async function save(quiet = false) {
     busy = true;
     try {
       const r = await api.importToml(buildToml());
@@ -400,7 +400,7 @@
         await fetch("/api/schedules", { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ agent_id: r.id, title: `${name} loop`, prompt: (goals.trim() || `Run ${name}`) + checkLine, interval_seconds: effLoopMin * 60 }) });
       }
-      toast($t("builder.created"), "success");
+      if (!quiet) toast($t("builder.created"), "success");
       await refreshAgents();
       return r.id;
     } catch (e) { toast(e instanceof Error ? e.message : String(e), "error"); }
@@ -436,11 +436,13 @@
   }
 
   async function start() {
-    const id = await save();
+    const id = await save(true);
     if (!id) return;
     resetRun();
     const res = await api.createObjective(id, `${name} run`, goals.trim() || `Run ${name}`);
     runJobId = res.job_id; runStatus = "queued";
+    logsOpen = true;
+    toast($t("builder.started"), "success");
     cleanup = subscribeJob(runJobId, (ev) => {
       const k = ev.kind as string, step = ev.step_type as string | undefined;
       if ((k === "step_started" || k === "step_completed") && step) {

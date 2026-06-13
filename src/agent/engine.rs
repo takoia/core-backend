@@ -88,6 +88,8 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob) -> Result<RunOutcome> {
         configs: &configs,
         expertise: &agent.expertise_domain,
         account_id: &objective.account_id,
+        objective_prompt: &objective.prompt,
+        session: Vec::new(),
     };
 
     // ── Analyse ────────────────────────────────────────────────────────────
@@ -226,6 +228,10 @@ struct RunCtx<'a> {
     configs: &'a HashMap<String, StepConfigRow>,
     expertise: &'a str,
     account_id: &'a str,
+    objective_prompt: &'a str,
+    /// Accumulated outputs of THIS run's steps, injected into every later step
+    /// so the agent keeps a continuous session memory across steps.
+    session: Vec<String>,
 }
 
 impl<'a> RunCtx<'a> {
@@ -290,11 +296,36 @@ impl<'a> RunCtx<'a> {
 
         bus.publish(JobEvent::step_started(&self.job.id, step.as_str()));
 
+        // ── ICM recall at the START of every step ──────────────────────────
+        // Long-term memory (past runs + expertise) plus this run's earlier
+        // steps, so the agent keeps a continuous, coherent session.
+        let recalled = self
+            .state
+            .memory
+            .recall(&self.job.agent_id, self.objective_prompt, 6)
+            .await;
+        if !recalled.trim().is_empty() {
+            bus.publish(JobEvent::log(
+                &self.job.id,
+                format!("{}: recalled memory", label(step)),
+            ));
+        }
+
         let provider = self.registry.resolve(self.provider_for(step).as_deref());
-        let req = CompletionRequest::new(vec![
-            Message::system(self.system_prompt(step)),
-            Message::user(input.to_string()),
-        ]);
+        let mut messages = vec![Message::system(self.system_prompt(step))];
+        if !self.session.is_empty() {
+            messages.push(Message::system(format!(
+                "Context from earlier steps of THIS run (stay consistent with it):\n{}",
+                self.session.join("\n\n")
+            )));
+        }
+        if !recalled.trim().is_empty() {
+            messages.push(Message::system(format!(
+                "Recalled long-term memory (past runs & expertise):\n{recalled}"
+            )));
+        }
+        messages.push(Message::user(input.to_string()));
+        let req = CompletionRequest::new(messages);
 
         let completion = match provider.complete(req.clone()).await {
             Ok(c) => c,
@@ -320,7 +351,30 @@ impl<'a> RunCtx<'a> {
         )
         .await?;
 
-        bus.publish(JobEvent::step_completed(
+        // ── ICM store at the END of every step ─────────────────────────────
+        // Persist this step's result so later steps and future runs recall it.
+        let trimmed: String = completion.content.chars().take(500).collect();
+        if let Err(e) = self
+            .state
+            .memory
+            .store(&self.job.agent_id, step.as_str(), &trimmed)
+            .await
+        {
+            tracing::warn!(error = %e, "failed to store step memory");
+        } else {
+            self.state.events.publish(JobEvent::log(
+                &self.job.id,
+                format!("{}: saved to memory", label(step)),
+            ));
+        }
+        // Keep the full step output in the in-run session for the next steps.
+        self.session.push(format!(
+            "[{}]\n{}",
+            step.as_str(),
+            completion.content.chars().take(800).collect::<String>()
+        ));
+
+        self.state.events.publish(JobEvent::step_completed(
             &self.job.id,
             step.as_str(),
             serde_json::json!({ "text": completion.content }),

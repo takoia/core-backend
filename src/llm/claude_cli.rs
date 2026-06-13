@@ -104,6 +104,10 @@ impl LlmProvider for ClaudeCliProvider {
             // The flag takes a comma-separated list; a space would be parsed as a
             // single invalid tool name and block everything.
             cmd.arg("--allowedTools").arg("WebSearch,WebFetch");
+            // Bypass per-domain permission prompts: in headless `-p` mode WebFetch
+            // otherwise errors on arbitrary domains found via WebSearch. The agent
+            // runs in an isolated workdir, so this stays scoped to web research.
+            cmd.arg("--permission-mode").arg("bypassPermissions");
         }
         if let Some(token) = &self.token {
             cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
