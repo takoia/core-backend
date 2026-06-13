@@ -450,6 +450,12 @@
   let runJobId = $state<string | null>(null);
   let runStatus = $state("");
   let currentStep = $state(""); // the step_type currently running (for the agent box)
+  // Test harness: validate the agent's goal against an image/video/text sample.
+  let testOpen = $state(false);
+  let testScenario = $state("");
+  let testImage = $state("");
+  let testImgName = $state("");
+  let testBusy = $state(false);
   let stepStatus = $state<Record<string, string>>({});
   let runLogs = $state<string[]>([]);
   let logsOpen = $state(true);
@@ -466,15 +472,12 @@
     return nodes.find((n) => blockKey(n.id) === stepKey && n.data.kind === "step")?.id;
   }
 
-  async function start() {
-    const id = await save(true);
-    if (!id) return;
+  // Launch a job for the given objective prompt and wire live updates.
+  async function launchJob(id: string, title: string, objPrompt: string) {
     resetRun();
-    const objPrompt = `${langDirective()}\n\n${goals.trim() || `Run ${name}`}`;
-    const res = await api.createObjective(id, `${name} run`, objPrompt);
+    const res = await api.createObjective(id, title, objPrompt);
     runJobId = res.job_id; runStatus = "queued";
     logsOpen = true;
-    toast($t("builder.started"), "success");
     cleanup = subscribeJob(runJobId, (ev) => {
       const k = ev.kind as string, step = ev.step_type as string | undefined;
       if ((k === "step_started" || k === "step_completed") && step) {
@@ -487,6 +490,45 @@
       // only drives the live step animation above.
     });
     pollTimer = setInterval(pollRun, 2500); pollRun();
+  }
+
+  async function start() {
+    const id = await save(true);
+    if (!id) return;
+    await launchJob(id, `${name} run`, `${langDirective()}\n\n${goals.trim() || `Run ${name}`}`);
+    toast($t("builder.started"), "success");
+  }
+
+  function onTestImage(e: Event) {
+    const f = (e.target as HTMLInputElement).files?.[0];
+    if (!f) return;
+    testImgName = f.name;
+    const r = new FileReader();
+    r.onload = () => (testImage = r.result as string);
+    r.readAsDataURL(f);
+  }
+
+  // Test the agent's goal against an image/text sample: optionally describe the
+  // image (vision), then run the agent on the scenario and watch the result.
+  async function runTest() {
+    const id = await save(true);
+    if (!id) return;
+    testBusy = true;
+    try {
+      let imageNote = "";
+      if (testImage) {
+        const r = await api.analyzeVideo([testImage], `${langDirective()} Décris ce que montre cette image.`, id);
+        imageNote = "\n\nImage fournie:\n" + r.items.map((it) => `- ${it.info}: ${it.detail}`).join("\n");
+      }
+      const prompt = `${langDirective()}\n\nTEST — valide cet objectif sur l'entrée fournie:\n${testScenario.trim() || goals.trim() || name}${imageNote}`;
+      await launchJob(id, `${name} test`, prompt);
+      testOpen = false;
+      toast($t("builder.testRunning"), "success");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    } finally {
+      testBusy = false;
+    }
   }
 
   async function pollRun() {
@@ -693,6 +735,7 @@
         {#if runStatus}<span class="badge {runStatus}">{runStatus}</span>{/if}
         <button class="start" onclick={start}>▶ {$t("builder.start")}</button>
         <button class="stop" onclick={stop} disabled={!runJobId}>■ {$t("builder.stop")}</button>
+        <button class="test" onclick={() => { testScenario = goals; testOpen = true; }}>🧪 {$t("builder.test")}</button>
         <button class="save" onclick={() => save()}>{$t("builder.save")}</button>
       </div>
     </div>
@@ -819,6 +862,24 @@
     </div>
   {/if}
 
+  <!-- Test modal: validate the agent's goal on an image/text sample -->
+  {#if testOpen}
+    <div class="overlay" onclick={() => (testOpen = false)} role="presentation">
+      <div class="nmodal" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div class="nmhead"><h3>🧪 {$t("builder.test")} — {name}</h3><button class="x" onclick={() => (testOpen = false)} aria-label="close">×</button></div>
+        <div class="nmbody">
+          <label class="blk">{$t("builder.testGoal")}<textarea rows="3" bind:value={testScenario} placeholder={$t("builder.testGoalPlaceholder")}></textarea></label>
+          <label class="blk">{$t("builder.testImage")}<input type="file" accept="image/*" onchange={onTestImage} /></label>
+          {#if testImage}<img class="hicon" style="width:auto;max-height:120px;display:block;margin-top:0.4rem" src={testImage} alt="" />{/if}
+        </div>
+        <div class="nmfoot">
+          <button class="ghost" onclick={() => (testOpen = false)}>{$t("builder.cancel")}</button>
+          <button class="danger" style="background:var(--accent);border-color:var(--accent);color:#04231a" onclick={runTest} disabled={testBusy}>{testBusy ? "…" : "▶ " + $t("builder.testRun")}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <!-- Canvas right-click context menu to add a block -->
   {#if ctxMenu}
     <div class="ctxback" onclick={() => (ctxMenu = null)} oncontextmenu={(e) => { e.preventDefault(); ctxMenu = null; }} role="presentation"></div>
@@ -878,6 +939,7 @@
   .stop { background: var(--err) !important; border-color: var(--err) !important; color: #2a0707 !important; }
   .stop:disabled { opacity: 0.5; }
   .save { background: var(--accent) !important; border-color: var(--accent) !important; color: #04231a !important; }
+  .test { background: var(--warn) !important; border-color: var(--warn) !important; color: #2a2410 !important; }
   .spinner { width: 15px; height: 15px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .badge { font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 20px; background: var(--border); }
