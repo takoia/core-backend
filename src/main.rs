@@ -4,8 +4,11 @@
 mod config;
 mod crypto;
 mod db;
+mod domain;
 mod error;
 mod http;
+mod llm;
+mod memory;
 mod state;
 
 use anyhow::{Context, Result};

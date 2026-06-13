@@ -22,6 +22,10 @@ pub struct Config {
     pub default_llm_provider: String,
     pub provider_seeds: Vec<ProviderSeed>,
     pub discord_webhook_url: Option<String>,
+    /// Path to the dedicated ICM SQLite database for agent memory.
+    pub icm_db_path: String,
+    /// Optional Claude plan token (`claude setup-token`) used to seed claude_max.
+    pub claude_max_token: Option<String>,
 }
 
 impl Config {
@@ -37,6 +41,8 @@ impl Config {
         let provider_seeds = load_provider_seeds();
 
         let discord_webhook_url = non_empty(std::env::var("DISCORD_WEBHOOK_URL").ok());
+        let icm_db_path = env_or("ICM_DB_PATH", "data/icm.db");
+        let claude_max_token = non_empty(std::env::var("CLAUDE_MAX_TOKEN").ok());
 
         Ok(Self {
             bind_addr,
@@ -46,6 +52,8 @@ impl Config {
             default_llm_provider,
             provider_seeds,
             discord_webhook_url,
+            icm_db_path,
+            claude_max_token,
         })
     }
 }

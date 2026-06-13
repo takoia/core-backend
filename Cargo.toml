@@ -44,6 +44,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Errors
 anyhow = "1"
 thiserror = "1"
+# Async trait objects (LlmProvider behind dyn)
+async-trait = "0.1"
 # Config
 dotenvy = "0.15"
 # Crypto for connector credentials
