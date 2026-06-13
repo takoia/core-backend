@@ -229,8 +229,11 @@
   let flowEl: HTMLDivElement;
   let viewport = $state.raw({ x: 0, y: 0, zoom: 1 });
   // Convert a screen position into flow coordinates (accounts for pan/zoom).
+  // Defensive: if the canvas ref is stale (HMR) fall back so drop/context-menu
+  // never throw and silently stop working.
   function flowCoords(clientX: number, clientY: number) {
-    const rect = flowEl.getBoundingClientRect();
+    const rect = flowEl?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
     const z = viewport.zoom || 1;
     return {
       x: (clientX - rect.left - viewport.x) / z - 95,
