@@ -56,6 +56,7 @@
   const PARAM_KEYS: Record<string, string[]> = {
     trigger_manual: ["event"], trigger_email: ["event"], trigger_webhook: ["event"],
     trigger_ftp: ["event"], trigger_schedule: ["interval_min"],
+    if: ["condition", "then", "else"], for: ["each_of"], loop: ["repeat"],
     web_search: ["site"],
     market_data: ["symbol"],
     send_discord: ["discord_webhook"],
@@ -70,6 +71,11 @@
   const PARAM_PH: Record<string, string> = {
     event: "ex. email.received, webhook.received, schedule",
     interval_min: "ex. 60 → relance toutes les 60 min",
+    condition: "ex. le vent dépasse 20 nœuds",
+    then: "ex. envoyer une alerte Discord",
+    else: "ex. ne rien faire (optionnel)",
+    each_of: "ex. chaque email reçu / la liste des symboles",
+    repeat: "ex. 5 fois / tant que le marché est ouvert",
     site: "ex. windguru.com (laisser vide = tout le web)",
     symbol: "^IXIC, AAPL, NVDA…", discord_webhook: "https://discord.com/api/webhooks/…",
     recipient: "name@example.com", subject: "Objet de l'email",
@@ -79,6 +85,8 @@
   const PARAM_LABEL: Record<string, string> = {
     event: "Événement déclencheur",
     interval_min: "Relancer toutes les (min)",
+    condition: "Si (condition)", then: "Alors", else: "Sinon",
+    each_of: "Pour chaque", repeat: "Répéter",
     site: "Site web", symbol: "Symbole", discord_webhook: "URL Webhook", recipient: "Destinataire",
     subject: "Objet", filename: "Nom du fichier", calendar_url: "URL calendrier", title: "Titre",
     source_url: "URL source",
@@ -255,7 +263,19 @@
   function buildToml(): string {
     const stepNodes = nodes.filter((n) => n.data.kind === "step");
     const toolNodes = nodes.filter((n) => n.data.kind === "tool");
-    const desc = (description || goals || "Built in TakoIA.").replace(/\n/g, " ");
+    // Control blocks become natural-language rules the LLM agent must honor.
+    const rules = nodes
+      .filter((n) => n.data.kind === "control")
+      .map((n) => {
+        const k = blockKey(n.id); const p = params[n.id] ?? {};
+        if (k === "if" && p.condition) return `If ${p.condition}, then ${p.then || "act accordingly"}${p.else ? `, otherwise ${p.else}` : ""}.`;
+        if (k === "for" && p.each_of) return `For each ${p.each_of}, repeat the steps.`;
+        if (k === "loop" && p.repeat) return `Repeat: ${p.repeat}.`;
+        return "";
+      })
+      .filter(Boolean);
+    const baseDesc = (description || goals || "Built in TakoIA.").replace(/\n/g, " ");
+    const desc = rules.length ? `${baseDesc} Rules: ${rules.join(" ")}` : baseDesc;
     const emitArr = emit.split(",").map((x) => x.trim()).filter(Boolean);
     let toml = `[agent]\nid = "${editingId ?? slug(name)}"\nname = "${name}"\nauthor = "${author}"\nversion = "0.1.0"\n`;
     toml += `description = ${JSON.stringify(desc)}\nexpertise = "${expertise}"\nautonomy = "${autonomy}"\nicon = "${icon}"\n`;
@@ -629,7 +649,12 @@
             placeholder={PARAM_PH[pk] ?? ""} /></label>
         {/each}
       {:else if kind === "control"}
-        <p class="hint">Bloc logique (visuel) — exécution avancée à venir.</p>
+        <p class="hint">Logique : {selNode.data.label}.</p>
+        {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
+          <label class="blk">{PARAM_LABEL[pk] ?? pk}<input value={params[selected]?.[pk] ?? ""}
+            oninput={(e) => params = { ...params, [selected]: { ...(params[selected]||{}), [pk]: (e.target as HTMLInputElement).value } }}
+            placeholder={PARAM_PH[pk] ?? ""} /></label>
+        {/each}
       {/if}
     {/if}
   </aside>
@@ -667,7 +692,12 @@
             {/each}
             {#if (PARAM_KEYS[blockKey(selected)] ?? []).length === 0}<p class="hint">Aucune propriété pour cet outil.</p>{/if}
           {:else if mkind === "control"}
-            <p class="hint">Bloc logique (visuel) — exécution avancée à venir.</p>
+            <p class="hint">Logique : {selNode.data.label}.</p>
+            {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
+              <label class="blk">{PARAM_LABEL[pk] ?? pk}<input value={params[selected]?.[pk] ?? ""}
+                oninput={(e) => params = { ...params, [selected]: { ...(params[selected]||{}), [pk]: (e.target as HTMLInputElement).value } }}
+                placeholder={PARAM_PH[pk] ?? ""} /></label>
+            {/each}
           {/if}
         </div>
         <div class="nmfoot">
