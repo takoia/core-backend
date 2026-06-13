@@ -24,22 +24,6 @@
   {/each}
 </div>
 
-<!-- Notification bell -->
-<div class="bell-wrap">
-  <button class="bell" onclick={() => (bellOpen = !bellOpen)} aria-label="notifications">
-    🔔{#if $history.length}<span class="count">{$history.length}</span>{/if}
-  </button>
-  {#if bellOpen}
-    <div class="bellpanel">
-      <div class="bellhead"><strong>Notifications</strong><button class="clear" onclick={() => history.set([])}>clear</button></div>
-      {#if $history.length === 0}<p class="empty">—</p>{/if}
-      {#each $history as t}
-        <div class="bitem {t.kind}"><span class="ic">{icon[t.kind]}</span><span>{t.message}</span></div>
-      {/each}
-    </div>
-  {/if}
-</div>
-
 <!-- Confirm modal -->
 {#if $confirmState}
   <div class="overlay" onclick={() => decide(false)} role="presentation">

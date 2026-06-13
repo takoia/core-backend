@@ -14,6 +14,7 @@
   import VideoView from "./lib/VideoView.svelte";
   import LoginView from "./lib/LoginView.svelte";
   import Toasts from "./lib/Toasts.svelte";
+  import Bell from "./lib/Bell.svelte";
   import { t, locale, setLocale } from "./lib/i18n";
   import "./lib/theme"; // applies the persisted theme on load
   import logo from "./lib/assets/takoia.png";
@@ -90,6 +91,7 @@
         <button class:active={view === "settings"} on:click={() => (view = "settings")}><Icon name="settings" />{$t("nav.settings")}</button>
         <button class:active={view === "usage"} on:click={() => (view = "usage")}><Icon name="usage" />{$t("nav.usage")}</button>
         <span class="sep"></span>
+        <Bell />
         <button class="lang" class:on={$locale === "fr"} on:click={() => setLocale("fr")}>FR</button>
         <button class="lang" class:on={$locale === "en"} on:click={() => setLocale("en")}>EN</button>
         <button class="logout" on:click={logout} title={$t("login.logout")}>⎋</button>

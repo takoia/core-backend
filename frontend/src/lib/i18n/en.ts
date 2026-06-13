@@ -274,4 +274,7 @@ export const en: Record<string, string> = {
   "builder.descrPlaceholder": "what this agent does",
   "builder.triggerPick": "Pick how this agent starts",
   "builder.iconImage": "Or image URL",
+  "builder.toolbox": "Toolbox",
+  "builder.toolboxHint": "Drag a block onto the canvas (or click).",
+  "builder.upload": "Upload image",
 };

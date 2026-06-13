@@ -1,39 +1,60 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from "svelte";
-  import {
-    SvelteFlow,
-    Background,
-    Controls,
-    MiniMap,
-    type Node,
-    type Edge,
-  } from "@xyflow/svelte";
+  import { SvelteFlow, Background, Controls, MiniMap, type Node, type Edge } from "@xyflow/svelte";
   import "@xyflow/svelte/dist/style.css";
   import StepNode from "./builder/StepNode.svelte";
-  import Icon from "./Icon.svelte";
   import { api, subscribeJob, type Agent } from "./api";
   import { t } from "./i18n";
   import { toast, confirmModal } from "./toast";
 
-  const nodeTypes = { step: StepNode } as any;
-  const STEPS = ["analyse", "decision", "action", "restitution"] as const;
-  type StepKey = (typeof STEPS)[number];
-  const TOOLS = ["web_search", "market_data", "send_discord", "write_report", "extract_fields"];
-  // Tools that need parameters -> {tool: [param keys]}.
-  const TOOL_PARAMS: Record<string, string[]> = {
+  const nodeTypes = { block: StepNode } as any;
+
+  // ── Palette: the blocks you drag onto the canvas (Scratch-like) ────────────
+  const PALETTE = [
+    { group: "Étapes", items: [
+      { key: "analyse", label: "Analyse", glyph: "🔍", kind: "step" },
+      { key: "decision", label: "Décision", glyph: "🧭", kind: "step" },
+      { key: "action", label: "Action", glyph: "⚙️", kind: "step" },
+      { key: "restitution", label: "Restitution", glyph: "📄", kind: "step" },
+    ]},
+    { group: "Outils", items: [
+      { key: "web_search", label: "Recherche web", glyph: "🌐", kind: "tool" },
+      { key: "market_data", label: "Données marché", glyph: "📈", kind: "tool" },
+      { key: "send_discord", label: "Webhook / Discord", glyph: "🔔", kind: "tool" },
+      { key: "send_email", label: "Email", glyph: "✉️", kind: "tool" },
+      { key: "write_file", label: "Écrire un fichier", glyph: "💾", kind: "tool" },
+      { key: "write_calendar", label: "Calendrier", glyph: "📅", kind: "tool" },
+      { key: "analyse_video", label: "Analyse vidéo", glyph: "🎥", kind: "tool" },
+      { key: "analyse_image", label: "Analyse image", glyph: "🖼️", kind: "tool" },
+      { key: "analyse_sound", label: "Analyse son", glyph: "🎙️", kind: "tool" },
+      { key: "analyse_text", label: "Analyse texte", glyph: "📝", kind: "tool" },
+    ]},
+    { group: "Logique", items: [
+      { key: "loop", label: "Boucle", glyph: "🔁", kind: "control" },
+      { key: "for", label: "Pour chaque", glyph: "🔢", kind: "control" },
+      { key: "if", label: "Condition", glyph: "❓", kind: "control" },
+    ]},
+  ];
+  type Block = { key: string; label: string; glyph: string; kind: string };
+  const ALL_BLOCKS: Record<string, Block> = Object.fromEntries(
+    PALETTE.flatMap((g) => g.items).map((b) => [b.key, b]),
+  );
+  const PARAM_KEYS: Record<string, string[]> = {
     market_data: ["symbol"],
     send_discord: ["discord_webhook"],
+    send_email: ["recipient"],
+    write_calendar: ["calendar_url"],
   };
-  const PARAM_PLACEHOLDER: Record<string, string> = {
-    symbol: "^IXIC (NASDAQ), AAPL, NVDA…",
-    discord_webhook: "https://discord.com/api/webhooks/…",
-  };
-  const STEP_LABEL: Record<string, string> = {
-    analyse: "Analyse", decision: "Décision", action: "Action", restitution: "Restitution",
+  const PARAM_PH: Record<string, string> = {
+    symbol: "^IXIC, AAPL, NVDA…", discord_webhook: "https://discord.com/api/webhooks/…",
+    recipient: "name@example.com", calendar_url: "ICS / CalDAV URL",
   };
 
-  // ── Agent state ──
-  let name = $state("New agent");
+  // ── Agent state ────────────────────────────────────────────────────────────
+  let editingId = $state<string | null>(null);
+  let name = $state("Nouvel agent");
+  let icon = $state("🐙");
+  let description = $state("");
   let author = $state("You");
   let expertise = $state("");
   let autonomy = $state<"full_auto" | "confirm_before_action">("full_auto");
@@ -42,49 +63,192 @@
   let loopMinutes = $state(0);
   let goals = $state("");
   let checks = $state("");
-  let description = $state("");
-  let icon = $state("");
-  const ICON_CHOICES = ["🐙", "📈", "🧾", "🌦️", "🛰️", "✉️", "🤖", "🔎", "📊", "🛒", "💬", "🧠"];
-  const TRIGGER_TYPES = [
-    { icon: "🖐️", label: "Manuel", event: "" },
-    { icon: "📨", label: "Email reçu", event: "email.received" },
-    { icon: "🔗", label: "Webhook", event: "webhook.received" },
-    { icon: "🧾", label: "Facture", event: "invoice.received" },
-    { icon: "📁", label: "Fichier FTP", event: "ftp.file" },
-    { icon: "⏰", label: "Chaque jour", event: "schedule.daily" },
-    { icon: "⏱️", label: "Chaque heure", event: "schedule.hourly" },
-  ];
-  let prompts = $state<Record<StepKey, string>>({ analyse: "", decision: "", action: "", restitution: "" });
-  let tools = $state<string[]>([]);
-  let toolParams = $state<Record<string, string>>({ symbol: "^IXIC", discord_webhook: "" });
-  let selected = $state<string | null>("analyse");
-  let createdMsg = $state("");
-  // Floating overlay panels (canvas is full-screen underneath).
-  let agentsOpen = $state(true);
-  let inspectorOpen = $state(false);
+
+  // Per-node config (keyed by node id): prompts for steps, params for tools.
+  let prompts = $state<Record<string, string>>({});
+  let params = $state<Record<string, Record<string, string>>>({});
+
+  let selected = $state<string | null>("agent");
   let busy = $state(false);
+  const isImg = (s: string) => /^(https?:|data:)/.test(s || "");
 
-  // Param fields to show for the currently chosen action tools.
-  const activeParams = $derived(
-    Array.from(new Set(tools.flatMap((t) => TOOL_PARAMS[t] ?? []))),
-  );
-
-  // ── Agent dashboard list ──
+  // ── Agent list ─────────────────────────────────────────────────────────────
   let agentList = $state<Agent[]>([]);
-  let editingId = $state<string | null>(null);
-
-  async function refreshAgents() {
-    try { agentList = await api.listAgents(); } catch { agentList = []; }
-  }
+  async function refreshAgents() { try { agentList = await api.listAgents(); } catch { agentList = []; } }
   onMount(refreshAgents);
+
+  function agentEmoji(a: Agent): string {
+    if (a.icon) return a.icon;
+    const e = (a.expertise_domain || "").toLowerCase();
+    if (e.includes("trad") || e.includes("market") || e.includes("nasdaq")) return "📈";
+    if (e.includes("invoice") || e.includes("fact")) return "🧾";
+    if (e.includes("meteo") || e.includes("weather")) return "🌦️";
+    return "🐙";
+  }
+
+  // ── Canvas: starts with ONE agent box; you drag blocks to add steps ────────
+  let counter = $state(0);
+  let nodes = $state.raw<Node[]>([
+    { id: "agent", type: "block", position: { x: 0, y: 0 }, data: { label: name, kind: "trigger", glyph: icon, sub: "agent" } },
+  ]);
+  let edges = $state.raw<Edge[]>([]);
+  let lastId = $state("agent");
 
   function newAgent() {
     editingId = null;
-    name = "New agent"; author = "You"; expertise = ""; autonomy = "confirm_before_action";
-    triggerOn = ""; emit = ""; loopMinutes = 0; goals = ""; checks = "";
-    description = ""; icon = "🐙";
-    prompts = { analyse: "", decision: "", action: "", restitution: "" };
-    tools = []; selected = "analyse"; resetRun();
+    name = "Nouvel agent"; icon = "🐙"; description = ""; author = "You"; expertise = "";
+    autonomy = "full_auto"; triggerOn = ""; emit = ""; loopMinutes = 0; goals = ""; checks = "";
+    prompts = {}; params = {}; counter = 0; lastId = "agent";
+    nodes = [{ id: "agent", type: "block", position: { x: 0, y: 0 }, data: { label: name, kind: "trigger", glyph: icon, sub: "agent" } }];
+    edges = [];
+    selected = "agent"; resetRun();
+  }
+
+  function addBlock(key: string, pos?: { x: number; y: number }) {
+    const b = ALL_BLOCKS[key];
+    if (!b) return;
+    counter += 1;
+    const id = `${key}-${counter}`;
+    const position = pos ?? { x: 0, y: 130 + counter * 120 };
+    const node: Node = { id, type: "block", position, data: { label: b.label, kind: b.kind, glyph: b.glyph } };
+    const edge: Edge = { id: `e-${lastId}-${id}`, source: lastId, target: id, animated: true };
+    nodes = [...nodes, node];
+    edges = [...edges, edge];
+    lastId = id;
+    selected = id;
+  }
+
+  function removeNode(id: string) {
+    if (id === "agent") return;
+    nodes = nodes.filter((n) => n.id !== id);
+    edges = edges.filter((e) => e.source !== id && e.target !== id);
+    if (selected === id) selected = "agent";
+  }
+
+  // Drag from palette -> drop on canvas.
+  let flowEl: HTMLDivElement;
+  function onDrop(e: DragEvent) {
+    e.preventDefault();
+    const key = e.dataTransfer?.getData("text/plain");
+    if (!key) return;
+    const rect = flowEl.getBoundingClientRect();
+    addBlock(key, { x: e.clientX - rect.left - 95, y: e.clientY - rect.top - 30 });
+  }
+
+  function onNodeClick(e: any) {
+    const id = e?.node?.id ?? e?.detail?.node?.id;
+    if (id) selected = id;
+  }
+
+  // Keep the agent node + live status in sync without looping (untrack).
+  $effect(() => {
+    const nm = name, ic = icon, ss = stepStatus;
+    nodes = untrack(() => nodes).map((n) => {
+      if (n.id === "agent") return { ...n, data: { ...n.data, label: nm, glyph: ic } };
+      const st = ss[n.id];
+      return st ? { ...n, data: { ...n.data, status: st } } : n;
+    });
+  });
+
+  // Selected node helpers.
+  const selNode = $derived(nodes.find((n) => n.id === selected) ?? null);
+  function blockKey(id: string): string { return id.replace(/-\d+$/, ""); }
+
+  // ── Build TOML from the graph ──────────────────────────────────────────────
+  const slug = (s: string) => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "agent";
+  function buildToml(): string {
+    const stepNodes = nodes.filter((n) => n.data.kind === "step");
+    const toolNodes = nodes.filter((n) => n.data.kind === "tool");
+    const desc = (description || goals || "Built in TakoIA.").replace(/\n/g, " ");
+    const emitArr = emit.split(",").map((x) => x.trim()).filter(Boolean);
+    let toml = `[agent]\nid = "${editingId ?? slug(name)}"\nname = "${name}"\nauthor = "${author}"\nversion = "0.1.0"\n`;
+    toml += `description = ${JSON.stringify(desc)}\nexpertise = "${expertise}"\nautonomy = "${autonomy}"\nicon = "${icon}"\n`;
+    toml += `emit = [${emitArr.map((x) => `"${x}"`).join(", ")}]\n`;
+    if (triggerOn.trim()) toml += `\n[trigger]\non = "${triggerOn.trim()}"\n`;
+    // Steps (by step key; prompt from the node).
+    const seen = new Set<string>();
+    for (const n of stepNodes) {
+      const key = blockKey(n.id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const p = (prompts[n.id] || "").trim();
+      const isAction = key === "action";
+      const tools = isAction ? toolNodes.map((tn) => blockKey(tn.id)) : [];
+      if (!p && !tools.length) continue;
+      toml += `\n[steps.${key}]\n`;
+      if (p) toml += `system_prompt = ${JSON.stringify(p)}\n`;
+      if (tools.length) toml += `allowed_tools = [${tools.map((x) => `"${x}"`).join(", ")}]\n`;
+      // Tool params merged from all tool nodes.
+      if (isAction) {
+        const tp: Record<string, string> = {};
+        for (const tn of toolNodes) for (const pk of PARAM_KEYS[blockKey(tn.id)] ?? []) {
+          const v = params[tn.id]?.[pk]; if (v) tp[pk] = v;
+        }
+        const pairs = Object.entries(tp).map(([k, v]) => `${k} = ${JSON.stringify(v)}`);
+        if (pairs.length) toml += `tool_params = { ${pairs.join(", ")} }\n`;
+      }
+    }
+    // If there are tools but no explicit action step, add one.
+    if (toolNodes.length && !seen.has("action")) {
+      const tools = toolNodes.map((tn) => blockKey(tn.id));
+      toml += `\n[steps.action]\nallowed_tools = [${tools.map((x) => `"${x}"`).join(", ")}]\n`;
+      const tp: Record<string, string> = {};
+      for (const tn of toolNodes) for (const pk of PARAM_KEYS[blockKey(tn.id)] ?? []) { const v = params[tn.id]?.[pk]; if (v) tp[pk] = v; }
+      const pairs = Object.entries(tp).map(([k, v]) => `${k} = ${JSON.stringify(v)}`);
+      if (pairs.length) toml += `tool_params = { ${pairs.join(", ")} }\n`;
+    }
+    return toml;
+  }
+
+  async function loadAgent(id: string) {
+    const d = await api.getAgent(id);
+    newAgent();
+    editingId = d.agent.id;
+    name = d.agent.name; icon = d.agent.icon || ""; description = d.agent.description ?? "";
+    author = d.agent.author ?? ""; expertise = d.agent.expertise_domain ?? "";
+    autonomy = d.agent.autonomy_level === "full_auto" ? "full_auto" : "confirm_before_action";
+    triggerOn = (d.agent as any).trigger_on ?? "";
+    try { emit = (JSON.parse((d.agent as any).emit ?? "[]") as string[]).join(", "); } catch { emit = ""; }
+    // Rebuild the graph from the saved steps + tools.
+    let toolKeys: string[] = [];
+    const tParams: Record<string, string> = {};
+    for (const sc of d.steps) {
+      let opt: any = {}; try { opt = JSON.parse(sc.options || "{}"); } catch { /* */ }
+      if (Array.isArray(opt.allowed_tools)) toolKeys = opt.allowed_tools;
+      if (opt.tool_params) Object.assign(tParams, opt.tool_params);
+      if ((sc.system_prompt || "").trim() || ["analyse","decision","action","restitution"].includes(sc.step_type)) {
+        // only add a step node if it has a prompt or is one of the 4 with content
+      }
+    }
+    // Add step nodes that have prompts, in order.
+    for (const sc of d.steps) {
+      if ((sc.system_prompt || "").trim()) {
+        addBlock(sc.step_type);
+        const id2 = lastId; prompts[id2] = sc.system_prompt;
+      }
+    }
+    for (const tk of toolKeys) {
+      if (ALL_BLOCKS[tk]) { addBlock(tk); const id2 = lastId;
+        for (const pk of PARAM_KEYS[tk] ?? []) if (tParams[pk]) { params[id2] = { ...(params[id2]||{}), [pk]: tParams[pk] }; } }
+    }
+    selected = "agent"; resetRun();
+  }
+
+  async function save() {
+    busy = true;
+    try {
+      const r = await api.importToml(buildToml());
+      editingId = r.id;
+      if (loopMinutes > 0) {
+        const checkLine = checks.trim() ? `\n\nVérifie:\n${checks.trim()}` : "";
+        await fetch("/api/schedules", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent_id: r.id, title: `${name} loop`, prompt: (goals.trim() || `Run ${name}`) + checkLine, interval_seconds: loopMinutes * 60 }) });
+      }
+      toast($t("builder.created"), "success");
+      await refreshAgents();
+      return r.id;
+    } catch (e) { toast(e instanceof Error ? e.message : String(e), "error"); }
+    finally { busy = false; }
   }
 
   async function deleteAgent(id: string, ev: Event) {
@@ -93,124 +257,10 @@
     await api.deleteAgent(id);
     if (editingId === id) newAgent();
     await refreshAgents();
-    toast(`${id} ${$t("builder.delete").toLowerCase()}`, "success");
+    toast("Agent supprimé", "success");
   }
 
-  async function loadAgent(id: string) {
-    const d = await api.getAgent(id);
-    editingId = d.agent.id;
-    name = d.agent.name; author = d.agent.author ?? ""; expertise = d.agent.expertise_domain ?? "";
-    description = d.agent.description ?? ""; icon = d.agent.icon || "";
-    autonomy = d.agent.autonomy_level === "full_auto" ? "full_auto" : "confirm_before_action";
-    triggerOn = (d.agent as any).trigger_on ?? "";
-    try { emit = (JSON.parse((d.agent as any).emit ?? "[]") as string[]).join(", "); } catch { emit = ""; }
-    const np: Record<StepKey, string> = { analyse: "", decision: "", action: "", restitution: "" };
-    let nt: string[] = [];
-    for (const sc of d.steps) {
-      if ((STEPS as readonly string[]).includes(sc.step_type)) np[sc.step_type as StepKey] = sc.system_prompt;
-      try {
-        const o = JSON.parse(sc.options || "{}");
-        if (sc.step_type === "action" && Array.isArray(o.allowed_tools)) nt = o.allowed_tools;
-        if (sc.step_type === "action" && o.tool_params) toolParams = { ...toolParams, ...o.tool_params };
-      } catch { /* */ }
-    }
-    prompts = np; tools = nt; selected = "analyse"; resetRun();
-  }
-
-  // ── Svelte Flow graph ──
-  const X = 80;
-  let nodes = $state.raw<Node[]>([
-    { id: "trigger", type: "step", position: { x: X, y: 0 }, data: { label: "Trigger", kind: "trigger" } },
-    { id: "analyse", type: "step", position: { x: X, y: 150 }, data: { label: "Analyse", kind: "step", idx: 1 } },
-    { id: "decision", type: "step", position: { x: X, y: 300 }, data: { label: "Décision", kind: "step", idx: 2 } },
-    { id: "action", type: "step", position: { x: X, y: 450 }, data: { label: "Action", kind: "step", idx: 3 } },
-    { id: "restitution", type: "step", position: { x: X, y: 600 }, data: { label: "Restitution", kind: "step", idx: 4 } },
-    { id: "emit", type: "step", position: { x: X, y: 750 }, data: { label: "Emit", kind: "emit" } },
-  ]);
-  let edges = $state.raw<Edge[]>([
-    { id: "e1", source: "trigger", target: "analyse", animated: true },
-    { id: "e2", source: "analyse", target: "decision", animated: true },
-    { id: "e3", source: "decision", target: "action", animated: true },
-    { id: "e4", source: "action", target: "restitution", animated: true },
-    { id: "e5", source: "restitution", target: "emit", animated: true },
-  ]);
-
-  // Sync editable fields + live status onto the nodes. Read `nodes` via
-  // untrack() so writing it back does not re-trigger this effect (which would
-  // loop forever and crash with effect_update_depth_exceeded).
-  $effect(() => {
-    const tr = triggerOn, em = emit, tl = tools, ss = stepStatus;
-    nodes = untrack(() => nodes).map((n) => {
-      if (n.id === "trigger") return { ...n, data: { ...n.data, sub: tr || "manual" } };
-      if (n.id === "emit") return { ...n, data: { ...n.data, sub: em || "—" } };
-      const base: any = { ...n.data };
-      if (n.id === "action") base.tools = [...tl];
-      if ((STEPS as readonly string[]).includes(n.id)) base.status = ss[n.id] ?? "pending";
-      return { ...n, data: base };
-    });
-  });
-
-  function onNodeClick(e: any) {
-    const id = e?.node?.id ?? e?.detail?.node?.id;
-    if (id) {
-      selected = id;
-      inspectorOpen = true;
-    }
-  }
-  function addTool(tool: string) { if (!tools.includes(tool)) tools = [...tools, tool]; }
-  function removeTool(tool: string) { tools = tools.filter((x) => x !== tool); }
-  function onPaletteDrop(e: DragEvent) {
-    e.preventDefault();
-    const tool = e.dataTransfer?.getData("text/plain");
-    if (tool) { addTool(tool); selected = "action"; }
-  }
-
-  const slug = (s: string) => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "agent";
-
-  function buildToml(): string {
-    const emitArr = emit.split(",").map((e) => e.trim()).filter(Boolean);
-    const desc = (description || goals || "Built in TakoIA.").replace(/\n/g, " ");
-    let toml = `[agent]\nid = "${editingId ?? slug(name)}"\nname = "${name}"\nauthor = "${author}"\nversion = "0.1.0"\n`;
-    toml += `description = ${JSON.stringify(desc)}\nexpertise = "${expertise}"\nautonomy = "${autonomy}"\nicon = "${icon}"\n`;
-    toml += `emit = [${emitArr.map((e) => `"${e}"`).join(", ")}]\n`;
-    if (triggerOn.trim()) toml += `\n[trigger]\non = "${triggerOn.trim()}"\n`;
-    for (const s of STEPS) {
-      const p = prompts[s].trim();
-      const isAction = s === "action";
-      if (!p && !(isAction && tools.length)) continue;
-      toml += `\n[steps.${s}]\n`;
-      if (p) toml += `system_prompt = ${JSON.stringify(p)}\n`;
-      if (isAction && tools.length) toml += `allowed_tools = [${tools.map((x) => `"${x}"`).join(", ")}]\n`;
-      if (isAction && activeParams.length) {
-        const pairs = activeParams
-          .filter((k) => (toolParams[k] ?? "").trim())
-          .map((k) => `${k} = ${JSON.stringify(toolParams[k])}`);
-        if (pairs.length) toml += `tool_params = { ${pairs.join(", ")} }\n`;
-      }
-    }
-    return toml;
-  }
-
-  async function save() {
-    createdMsg = "";
-    busy = true;
-    try {
-    const r = await api.importToml(buildToml());
-    editingId = r.id;
-    if (loopMinutes > 0) {
-      const checkLine = checks.trim() ? `\n\nVerify before finishing:\n${checks.trim()}` : "";
-      await fetch("/api/schedules", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent_id: r.id, title: `${name} loop`, prompt: (goals.trim() || `Run ${name}`) + checkLine, interval_seconds: loopMinutes * 60 }) });
-    }
-    toast($t("builder.created"), "success");
-    await refreshAgents();
-    return r.id;
-    } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), "error");
-    } finally { busy = false; }
-  }
-
-  // ── Live run ──
+  // ── Live run ───────────────────────────────────────────────────────────────
   let runJobId = $state<string | null>(null);
   let runStatus = $state("");
   let stepStatus = $state<Record<string, string>>({});
@@ -224,6 +274,10 @@
     if (pollTimer) clearInterval(pollTimer); pollTimer = null;
   }
 
+  function stepNodeId(stepKey: string): string | undefined {
+    return nodes.find((n) => blockKey(n.id) === stepKey && n.data.kind === "step")?.id;
+  }
+
   async function start() {
     const id = await save();
     if (!id) return;
@@ -232,8 +286,10 @@
     runJobId = res.job_id; runStatus = "queued";
     cleanup = subscribeJob(runJobId, (ev) => {
       const k = ev.kind as string, step = ev.step_type as string | undefined;
-      if (k === "step_started" && step) stepStatus = { ...stepStatus, [step]: "running" };
-      if (k === "step_completed" && step) stepStatus = { ...stepStatus, [step]: "done" };
+      if ((k === "step_started" || k === "step_completed") && step) {
+        const nid = stepNodeId(step);
+        if (nid) stepStatus = { ...stepStatus, [nid]: k === "step_completed" ? "done" : "running" };
+      }
       if (k === "job_status") runStatus = (ev.status as string) ?? runStatus;
       if (ev.message) runLogs = [...runLogs, ev.message as string].slice(-40);
     });
@@ -246,8 +302,7 @@
       const d = await api.getJob(runJobId);
       runStatus = d.job.status;
       const ss: Record<string, string> = {};
-      for (const s of d.steps) ss[s.step_type] = s.status === "done" ? "done" : "running";
-      if (d.job.status === "running") for (const k of STEPS) { if (ss[k] !== "done") { ss[k] = "running"; break; } }
+      for (const s of d.steps) { const nid = stepNodeId(s.step_type); if (nid) ss[nid] = s.status === "done" ? "done" : "running"; }
       stepStatus = ss;
       if (["done", "failed"].includes(d.job.status) && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     } catch { /* */ }
@@ -258,232 +313,181 @@
     if (pollTimer) clearInterval(pollTimer); pollTimer = null;
     runStatus = "stopped";
   }
-
   onDestroy(() => { if (cleanup) cleanup(); if (pollTimer) clearInterval(pollTimer); });
 
-  const isStep = $derived(selected !== null && (STEPS as readonly string[]).includes(selected));
-  const isImg = (s: string) => /^(https?:|data:)/.test(s || "");
-  function emoji(a: Agent): string {
-    if (a.icon) return a.icon;
-    const e = (a.expertise_domain || "").toLowerCase();
-    if (e.includes("trad")) return "📈"; if (e.includes("invoice") || e.includes("fact")) return "🧾";
-    if (e.includes("meteo") || e.includes("weather")) return "🌦️"; if (e.includes("watch") || e.includes("veille")) return "🛰️";
-    return "🐙";
+  // Agent image upload -> data URL.
+  let agentsOpen = $state(true);
+  function onIconFile(e: Event) {
+    const f = (e.target as HTMLInputElement).files?.[0];
+    if (!f) return;
+    const img = new Image();
+    const reader = new FileReader();
+    reader.onload = () => {
+      img.onload = () => {
+        const c = document.createElement("canvas");
+        const s = Math.min(1, 96 / Math.max(img.width, img.height));
+        c.width = img.width * s; c.height = img.height * s;
+        c.getContext("2d")!.drawImage(img, 0, 0, c.width, c.height);
+        icon = c.toDataURL("image/png");
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(f);
   }
 </script>
 
 <div class="dash">
-  <!-- Full-screen canvas underneath everything -->
-  <div class="flowwrap">
-    <SvelteFlow bind:nodes bind:edges {nodeTypes} fitView onnodeclick={onNodeClick}>
-      <Background gap={22} />
-      <Controls />
-      <MiniMap pannable zoomable />
-    </SvelteFlow>
-  </div>
+  <!-- Palette (tools window) -->
+  <aside class="palette card">
+    <h3>{$t("builder.toolbox")}</h3>
+    <p class="hint">{$t("builder.toolboxHint")}</p>
+    {#each PALETTE as g}
+      <div class="pgroup">{g.group}</div>
+      {#each g.items as b}
+        <button class="pblock {b.kind}" draggable="true"
+          ondragstart={(e) => e.dataTransfer?.setData("text/plain", b.key)}
+          onclick={() => addBlock(b.key)}>
+          <span class="pg">{b.glyph}</span> {b.label}
+        </button>
+      {/each}
+    {/each}
+  </aside>
 
-  <!-- Floating top bar -->
-  <div class="topbar card">
-    <button class="ptoggle" onclick={() => (agentsOpen = !agentsOpen)} title={$t("builder.myAgents")}>☰</button>
-    <button class="iconbtn" onclick={() => { selected = "general"; inspectorOpen = true; }} title={$t("builder.general")}>
-      {#if isImg(icon)}<img class="avimg" src={icon} alt="" />{:else}{icon || "🐙"}{/if}
-    </button>
-    <input class="agentname" bind:value={name} />
-    <button class="gear" onclick={() => { selected = "general"; inspectorOpen = true; }} title={$t("builder.general")}>⚙</button>
-    <div class="runctl">
-      {#if busy || runStatus === "queued" || runStatus === "running"}<span class="spinner"></span>{/if}
-      {#if runStatus}<span class="badge {runStatus}">{runStatus}</span>{/if}
-      <button class="start" onclick={start}><Icon name="run" size={14} /> {$t("builder.start")}</button>
-      <button class="stop" onclick={stop} disabled={!runJobId}>■ {$t("builder.stop")}</button>
-      <button class="save" onclick={save}>{$t("builder.save")}</button>
-    </div>
-  </div>
-
-  <!-- Floating agents panel -->
-  {#if agentsOpen}
-    <aside class="panel agents card">
-      <div class="phead">
-        <strong>{$t("builder.myAgents")}</strong>
-        <span>
-          <button class="new" onclick={newAgent} title={$t("builder.newAgent")}>＋</button>
-          <button class="closep" onclick={() => (agentsOpen = false)}>×</button>
-        </span>
+  <!-- Canvas -->
+  <section class="center">
+    <div class="topbar card">
+      <button class="ptoggle" onclick={() => (agentsOpen = !agentsOpen)} title={$t("builder.myAgents")}>☰</button>
+      <span class="aname">{name}</span>
+      <div class="runctl">
+        {#if busy || runStatus === "queued" || runStatus === "running"}<span class="spinner"></span>{/if}
+        {#if runStatus}<span class="badge {runStatus}">{runStatus}</span>{/if}
+        <button class="start" onclick={start}>▶ {$t("builder.start")}</button>
+        <button class="stop" onclick={stop} disabled={!runJobId}>■ {$t("builder.stop")}</button>
+        <button class="save" onclick={save}>{$t("builder.save")}</button>
       </div>
+    </div>
+    <div class="flowwrap card" bind:this={flowEl} ondragover={(e) => e.preventDefault()} ondrop={onDrop}>
+      <SvelteFlow bind:nodes bind:edges {nodeTypes} fitView onnodeclick={onNodeClick}>
+        <Background gap={22} />
+        <Controls />
+        <MiniMap pannable zoomable />
+      </SvelteFlow>
+    </div>
+    {#if runLogs.length}
+      <div class="logfeed card">{#each runLogs.slice(-5) as l}<div class="lf">▸ {l}</div>{/each}</div>
+    {/if}
+  </section>
+
+  <!-- Inspector -->
+  <aside class="inspector card">
+    {#if agentsOpen}
+      <div class="phead"><strong>{$t("builder.myAgents")}</strong><button class="new" onclick={newAgent}>＋</button></div>
       <div class="alist">
         {#each agentList as a}
           <div class="arow" class:on={editingId === a.id}>
             <button class="arow-main" onclick={() => loadAgent(a.id)}>
-              <span class="av">{#if isImg(emoji(a))}<img class="avimg" src={emoji(a)} alt="" />{:else}{emoji(a)}{/if}</span>
-              <span class="an">
-                <span class="anm">{a.name}</span>
-                <span class="asub muted">{a.autonomy_level === "full_auto" ? "auto" : "validation"} · {a.runs_count} exéc.</span>
-              </span>
+              <span class="av">{#if isImg(agentEmoji(a))}<img class="avimg" src={agentEmoji(a)} alt="" />{:else}{agentEmoji(a)}{/if}</span>
+              <span class="anm">{a.name}</span>
             </button>
             <button class="del" onclick={(e) => deleteAgent(a.id, e)} title={$t("builder.delete")}>🗑</button>
           </div>
         {/each}
-        {#if agentList.length === 0}<p class="muted small">{$t("agents.empty")}</p>{/if}
+        {#if agentList.length === 0}<p class="hint">{$t("agents.empty")}</p>{/if}
       </div>
-    </aside>
-  {/if}
-
-  <!-- Floating log feed -->
-  {#if runLogs.length}
-    <div class="logfeed card">
-      {#each runLogs.slice(-6) as l}<div class="lf">▸ {l}</div>{/each}
-    </div>
-  {/if}
-
-  <!-- Floating inspector (opens on node click) -->
-  {#if inspectorOpen}
-  <aside class="panel inspector card">
-    <button class="closep abs" onclick={() => (inspectorOpen = false)}>×</button>
-    {#if isStep}
-      {@const sk = selected as StepKey}
-      <h3>{STEP_LABEL[sk]}</h3>
-      <label class="blk">{$t("builder.systemPrompt")}
-        <textarea rows="6" bind:value={prompts[sk]} placeholder={$t("builder.promptPlaceholder")}></textarea>
-      </label>
-      {#if sk === "action"}
-        <div class="palette" ondragover={(e) => e.preventDefault()} ondrop={onPaletteDrop}>
-          <span class="muted small">{$t("builder.palette")} — {$t("builder.paletteHint")}</span>
-          <div class="chips">
-            {#each TOOLS as tool}
-              <button class="add" draggable="true"
-                ondragstart={(e) => e.dataTransfer?.setData("text/plain", tool)}
-                onclick={() => addTool(tool)} disabled={tools.includes(tool)}>⠿ {tool}</button>
-            {/each}
-          </div>
-          <div class="chosen">
-            {#each tools as tool}<span class="chip">{tool} <button class="x" onclick={() => removeTool(tool)}>×</button></span>{/each}
-          </div>
-        </div>
-        {#if activeParams.length}
-          <div class="params">
-            <span class="muted small">{$t("builder.toolParams")}</span>
-            {#each activeParams as p}
-              <label class="blk">{p}<input bind:value={toolParams[p]} placeholder={PARAM_PLACEHOLDER[p] ?? ""} /></label>
-            {/each}
-          </div>
-        {/if}
-      {/if}
-    {:else if selected === "trigger"}
-      <h3>{$t("builder.node.trigger")}</h3>
-      <p class="muted small">{$t("builder.triggerPick")}</p>
-      <div class="trigtypes">
-        {#each TRIGGER_TYPES as tt}
-          <button class="ttype" class:on={triggerOn === tt.event} onclick={() => (triggerOn = tt.event)}>
-            <span class="tic">{tt.icon}</span>
-            <span class="tn">{tt.label}<span class="muted small"> · {tt.event}</span></span>
-          </button>
-        {/each}
-      </div>
-      <label class="blk">{$t("builder.triggerOn")}<input bind:value={triggerOn} placeholder="invoice.received" /></label>
-    {:else if selected === "emit"}
-      <h3>{$t("builder.node.emit")}</h3>
-      <label class="blk">{$t("builder.emit")}<input bind:value={emit} placeholder="report.ready" /></label>
-    {:else if selected === "general"}
-      <h3>{$t("builder.general")}</h3>
-      <label class="blk">{$t("builder.icon")}</label>
-      <div class="iconpick">
-        {#each ICON_CHOICES as ic}
-          <button class="ic" class:on={icon === ic} onclick={() => (icon = ic)}>{ic}</button>
-        {/each}
-      </div>
-      <label class="blk">{$t("builder.iconImage")}<input bind:value={icon} placeholder="https://…/logo.png" /></label>
-      <label class="blk">{$t("builder.name")}<input bind:value={name} /></label>
-      <label class="blk">{$t("builder.descr")}<textarea rows="3" bind:value={description} placeholder={$t("builder.descrPlaceholder")}></textarea></label>
-      <label class="blk">{$t("builder.author")}<input bind:value={author} /></label>
-      <label class="blk">{$t("builder.expertise")}<input bind:value={expertise} /></label>
-      <label class="blk">{$t("builder.autonomy")}
-        <select bind:value={autonomy}>
-          <option value="confirm_before_action">{$t("builder.confirm")}</option>
-          <option value="full_auto">{$t("builder.fullAuto")}</option>
-        </select>
-      </label>
-      <label class="blk">{$t("builder.loopEvery")}<input type="number" min="0" bind:value={loopMinutes} /></label>
-      <label class="blk">{$t("builder.goals")}<input bind:value={goals} placeholder={$t("builder.goalsPlaceholder")} /></label>
-      <label class="blk">{$t("builder.checks")}<input bind:value={checks} placeholder={$t("builder.checksPlaceholder")} /></label>
+      <hr />
     {/if}
-    {#if createdMsg}<p class="muted small">{createdMsg}</p>{/if}
+
+    {#if selected === "agent"}
+      <h3>{$t("builder.general")}</h3>
+      <div class="iconrow">
+        <span class="bigicon">{#if isImg(icon)}<img class="avimg2" src={icon} alt="" />{:else}{icon || "🐙"}{/if}</span>
+        <label class="upl">{$t("builder.upload")}<input type="file" accept="image/*" onchange={onIconFile} /></label>
+      </div>
+      <div class="iconpick">{#each ["🐙","📈","🧾","🌦️","🛰️","✉️","🤖","🔎","📊","🛒"] as ic}<button class="ic" class:on={icon===ic} onclick={() => (icon=ic)}>{ic}</button>{/each}</div>
+      <label class="blk">{$t("builder.name")}<input bind:value={name} /></label>
+      <label class="blk">{$t("builder.descr")}<textarea rows="2" bind:value={description}></textarea></label>
+      <label class="blk">{$t("builder.autonomy")}
+        <select bind:value={autonomy}><option value="confirm_before_action">{$t("builder.confirm")}</option><option value="full_auto">{$t("builder.fullAuto")}</option></select>
+      </label>
+      <label class="blk">{$t("builder.triggerOn")}<input bind:value={triggerOn} placeholder="invoice.received / email.received / webhook.received" /></label>
+      <label class="blk">{$t("builder.loopEvery")}<input type="number" min="0" bind:value={loopMinutes} /></label>
+      <label class="blk">{$t("builder.goals")}<input bind:value={goals} /></label>
+    {:else if selNode}
+      {@const kind = selNode.data.kind}
+      <div class="phead"><h3>{selNode.data.glyph} {selNode.data.label}</h3><button class="del" onclick={() => removeNode(selNode.id)}>🗑</button></div>
+      {#if kind === "step"}
+        <label class="blk">{$t("builder.systemPrompt")}<textarea rows="6" bind:value={prompts[selected]} placeholder={$t("builder.promptPlaceholder")}></textarea></label>
+      {:else if kind === "tool"}
+        <p class="hint">Outil exécuté à l'étape Action.</p>
+        {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
+          <label class="blk">{pk}<input value={params[selected]?.[pk] ?? ""}
+            oninput={(e) => params = { ...params, [selected]: { ...(params[selected]||{}), [pk]: (e.target as HTMLInputElement).value } }}
+            placeholder={PARAM_PH[pk] ?? ""} /></label>
+        {/each}
+      {:else if kind === "control"}
+        <p class="hint">Bloc logique (visuel) — exécution avancée à venir.</p>
+      {/if}
+    {/if}
   </aside>
-  {/if}
 </div>
 
 <style>
-  /* Canvas fills the whole page; panels float on top. */
-  .dash { position: relative; height: calc(100vh - 90px); width: 100%; }
+  .dash { position: relative; height: calc(100vh - 90px); width: 100%; display: grid; grid-template-columns: 200px 1fr 300px; gap: 0.7rem; padding: 0.7rem; box-sizing: border-box; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
-  .flowwrap { position: absolute; inset: 0; }
-
-  .topbar { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 5;
-    display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0.6rem; box-shadow: 0 8px 24px rgba(0,0,0,0.35); }
-  .ptoggle { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.35rem 0.55rem; cursor: pointer; font-size: 1rem; }
-  .agentname { background: transparent; border: none; color: var(--text); font: inherit; font-size: 1.05rem; font-weight: 600; width: 200px; }
+  .palette { padding: 0.7rem; overflow-y: auto; }
+  .palette h3 { margin: 0 0 0.2rem; font-size: 0.95rem; }
+  .hint { color: var(--muted); font-size: 0.75rem; margin: 0 0 0.6rem; }
+  .pgroup { color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; margin: 0.6rem 0 0.3rem; }
+  .pblock { display: flex; align-items: center; gap: 0.45rem; width: 100%; text-align: left; background: var(--bg); border: 1px solid var(--border); border-radius: 9px; padding: 0.4rem 0.55rem; margin-bottom: 0.3rem; cursor: grab; color: var(--text); font: inherit; font-size: 0.8rem; }
+  .pblock:hover { border-color: var(--accent); }
+  .pblock:active { cursor: grabbing; }
+  .pblock.tool { border-left: 3px solid var(--ok); }
+  .pblock.control { border-left: 3px solid var(--warn); }
+  .pblock.step { border-left: 3px solid var(--accent); }
+  .pg { font-size: 1rem; }
+  .center { display: flex; flex-direction: column; gap: 0.6rem; min-width: 0; }
+  .topbar { display: flex; align-items: center; gap: 0.6rem; padding: 0.45rem 0.7rem; }
+  .ptoggle { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.3rem 0.5rem; cursor: pointer; }
+  .aname { font-weight: 600; flex: 1; }
   .runctl { display: flex; align-items: center; gap: 0.4rem; }
-  .runctl button { display: inline-flex; align-items: center; gap: 0.3rem; border-radius: 8px; padding: 0.4rem 0.7rem; cursor: pointer; font: inherit; font-size: 0.82rem; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  .runctl button { border-radius: 8px; padding: 0.4rem 0.7rem; cursor: pointer; font: inherit; font-size: 0.82rem; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
   .start { background: var(--ok) !important; border-color: var(--ok) !important; color: #04231a !important; font-weight: 600; }
   .stop { background: var(--err) !important; border-color: var(--err) !important; color: #2a0707 !important; }
   .stop:disabled { opacity: 0.5; }
   .save { background: var(--accent) !important; border-color: var(--accent) !important; color: #04231a !important; }
+  .spinner { width: 15px; height: 15px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .badge { font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 20px; background: var(--border); }
   .badge.running, .badge.queued { background: var(--warn); color: #2a2410; }
   .badge.done { background: var(--ok); color: #04231a; }
   .badge.failed { background: var(--err); color: #2a0707; }
-
-  .panel { position: absolute; top: 12px; bottom: 12px; z-index: 6; width: 300px; padding: 0.9rem; overflow-y: auto; box-shadow: 0 8px 28px rgba(0,0,0,0.4); }
-  .panel.agents { left: 12px; }
-  .panel.inspector { right: 12px; }
-  .phead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem; }
-  .closep { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 1.2rem; line-height: 1; }
-  .closep.abs { position: absolute; top: 8px; right: 10px; }
-  .new { width: 26px; height: 26px; border-radius: 8px; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); cursor: pointer; font-size: 1rem; }
-  .alist { display: flex; flex-direction: column; gap: 0.3rem; }
-  .arow { display: flex; align-items: center; gap: 0.2rem; border-radius: 9px; }
-  .arow.on { background: color-mix(in srgb, var(--accent) 16%, transparent); }
-  .arow-main { flex: 1; display: flex; align-items: center; gap: 0.5rem; background: transparent; border: none; border-radius: 9px; padding: 0.45rem 0.5rem; cursor: pointer; text-align: left; color: var(--text); font: inherit; min-width: 0; }
-  .arow-main:hover { background: var(--bg); }
-  .del { background: transparent; border: none; cursor: pointer; opacity: 0.5; padding: 0.3rem; border-radius: 7px; }
-  .del:hover { opacity: 1; background: color-mix(in srgb, var(--err) 18%, transparent); }
-  .av { font-size: 1.2rem; }
-  .an { display: flex; flex-direction: column; min-width: 0; }
-  .anm { font-size: 0.86rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .asub { font-size: 0.72rem; }
-  .logfeed { position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px; z-index: 5; width: 420px; max-width: 50%; padding: 0.5rem 0.8rem; font-family: ui-monospace, monospace; font-size: 0.76rem; max-height: 130px; overflow-y: auto; }
-  .lf { color: var(--muted); padding: 0.1rem 0; }
-  .inspector h3 { margin: 0 0 0.6rem; }
-  .blk { display: block; font-size: 0.8rem; color: var(--muted); margin-top: 0.6rem; }
+  .flowwrap { flex: 1; overflow: hidden; }
+  .logfeed { padding: 0.4rem 0.7rem; font-family: ui-monospace, monospace; font-size: 0.74rem; max-height: 90px; overflow-y: auto; }
+  .lf { color: var(--muted); }
+  .inspector { padding: 0.8rem; overflow-y: auto; }
+  .inspector h3 { margin: 0 0 0.5rem; font-size: 0.95rem; }
+  .phead { display: flex; justify-content: space-between; align-items: center; }
+  .new { width: 24px; height: 24px; border-radius: 7px; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); cursor: pointer; }
+  .alist { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.4rem; }
+  .arow { display: flex; align-items: center; }
+  .arow.on { background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 8px; }
+  .arow-main { flex: 1; display: flex; align-items: center; gap: 0.45rem; background: none; border: none; color: var(--text); font: inherit; cursor: pointer; padding: 0.35rem 0.4rem; text-align: left; }
+  .av { font-size: 1.1rem; }
+  .avimg { width: 20px; height: 20px; border-radius: 50%; object-fit: cover; }
+  .avimg2 { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; }
+  .anm { font-size: 0.84rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .del { background: none; border: none; cursor: pointer; opacity: 0.55; padding: 0.25rem; }
+  .del:hover { opacity: 1; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 0.8rem 0; }
+  .iconrow { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.4rem; }
+  .bigicon { font-size: 2rem; }
+  .upl { font-size: 0.78rem; color: var(--muted); cursor: pointer; }
+  .upl input { display: block; margin-top: 0.2rem; font-size: 0.72rem; }
+  .iconpick { display: flex; gap: 0.25rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+  .ic { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.15rem 0.35rem; cursor: pointer; font-size: 1.15rem; }
+  .ic.on { border-color: var(--accent); }
+  .blk { display: block; font-size: 0.8rem; color: var(--muted); margin-top: 0.5rem; }
   input, select, textarea { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.45rem 0.6rem; font: inherit; margin-top: 0.2rem; }
   .blk textarea { font-family: ui-monospace, monospace; font-size: 0.82rem; }
-  .palette { margin-top: 0.8rem; padding: 0.6rem; border: 1px dashed var(--border); border-radius: 10px; }
-  .chips { display: flex; gap: 0.3rem; flex-wrap: wrap; margin-top: 0.4rem; }
-  .add { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 7px; padding: 0.25rem 0.5rem; cursor: grab; font: inherit; font-size: 0.74rem; }
-  .add:disabled { opacity: 0.4; cursor: default; }
-  .chosen { display: flex; gap: 0.35rem; flex-wrap: wrap; margin-top: 0.5rem; }
-  .chip { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); border-radius: 20px; padding: 0.1rem 0.5rem; font-size: 0.78rem; }
-  .chip .x { background: none; border: none; color: var(--accent); cursor: pointer; }
-  .more { margin-top: 1rem; }
-  .more summary { cursor: pointer; color: var(--muted); font-size: 0.82rem; }
-  .small { font-size: 0.78rem; }
   :global(.svelte-flow__attribution) { display: none; }
-
-  .iconbtn { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.2rem 0.4rem; cursor: pointer; font-size: 1.15rem; }
-  .gear { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.35rem 0.5rem; cursor: pointer; font-size: 0.95rem; }
-  .iconpick { display: flex; gap: 0.3rem; flex-wrap: wrap; margin: 0.2rem 0 0.5rem; }
-  .ic { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.2rem 0.4rem; cursor: pointer; font-size: 1.25rem; line-height: 1.4; }
-  .ic.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
-  .avimg { width: 1.2em; height: 1.2em; border-radius: 50%; object-fit: cover; vertical-align: middle; }
-  .iconbtn .avimg, .av .avimg { width: 22px; height: 22px; }
-  .trigtypes { display: flex; flex-direction: column; gap: 0.3rem; margin: 0.4rem 0 0.6rem; }
-  .ttype { display: flex; align-items: center; gap: 0.5rem; background: var(--bg); border: 1px solid var(--border); border-radius: 9px; padding: 0.45rem 0.6rem; cursor: pointer; color: var(--text); font: inherit; text-align: left; }
-  .ttype:hover { border-color: var(--accent); }
-  .ttype.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
-  .tic { font-size: 1.1rem; }
-  .tn { display: flex; flex-direction: column; font-size: 0.82rem; }
-  .spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; flex: none; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  /* Make the task palette stand out (Scratch-like) */
-  .palette { border: 1.5px dashed var(--accent) !important; background: color-mix(in srgb, var(--accent) 7%, transparent); }
-  .palette > span:first-child { display: block; color: var(--text) !important; font-weight: 700; font-size: 0.85rem; margin-bottom: 0.4rem; }
-  .add { font-size: 0.8rem !important; padding: 0.35rem 0.6rem !important; }
 </style>
