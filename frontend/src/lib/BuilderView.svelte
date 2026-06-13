@@ -528,8 +528,8 @@
             {#each agentList as a}
               <label class="fleetitem">
                 <input type="checkbox" checked={fleetAgents.includes(a.id)} onchange={() => toggleFleetAgent(a.id)} />
-                <span class="av">{#if isImg(agentEmoji(a))}<img class="avimg" src={agentEmoji(a)} alt="" />{:else}{agentEmoji(a)}{/if}</span>
-                <span class="anm">{a.name}</span>
+                <span class="fav">{#if isImg(agentEmoji(a))}<img class="favimg" src={agentEmoji(a)} alt="" />{:else}{agentEmoji(a)}{/if}</span>
+                <span class="fnm">{a.name || a.id}</span>
               </label>
             {/each}
             {#if agentList.length === 0}<p class="hint">{$t("agents.empty")}</p>{/if}
@@ -714,10 +714,12 @@
   .fleetmenu { position: absolute; top: 38px; left: 0; z-index: 41; width: 260px; max-height: 340px; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 0.5rem; box-shadow: 0 12px 40px rgba(0,0,0,0.5); }
   .fleethead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; font-size: 0.82rem; }
   .fleethead .lnk { background: none; border: none; color: var(--accent); cursor: pointer; font: inherit; font-size: 0.76rem; padding: 0 0.2rem; }
-  .fleetitem { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.4rem; border-radius: 8px; cursor: pointer; font-size: 0.84rem; }
+  .fleetitem { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.4rem; border-radius: 8px; cursor: pointer; color: var(--text); }
   .fleetitem:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
-  .fleetitem input { cursor: pointer; flex: 0 0 auto; }
-  .fleetitem .anm { white-space: normal; overflow: visible; text-overflow: clip; word-break: break-word; flex: 1; }
+  .fleetitem input { cursor: pointer; flex: 0 0 auto; width: 16px; height: 16px; }
+  .fav { flex: 0 0 auto; font-size: 1rem; line-height: 1; display: inline-flex; }
+  .favimg { width: 20px; height: 20px; border-radius: 50%; object-fit: cover; }
+  .fnm { flex: 1 1 auto; min-width: 0; color: var(--text); font-size: 0.85rem; white-space: normal; word-break: break-word; }
   .runctl { display: flex; align-items: center; gap: 0.4rem; }
   .runctl button { border-radius: 8px; padding: 0.4rem 0.7rem; cursor: pointer; font: inherit; font-size: 0.82rem; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
   .start { background: var(--ok) !important; border-color: var(--ok) !important; color: #04231a !important; font-weight: 600; }
