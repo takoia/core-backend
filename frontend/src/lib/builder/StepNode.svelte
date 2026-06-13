@@ -8,10 +8,11 @@
     sub?: string;
     idx?: number;
     tools?: string[];
+    status?: "running" | "done" | "pending";
   };
 </script>
 
-<div class="snode {data.kind}">
+<div class="snode {data.kind} {data.status ?? ''}">
   {#if data.kind !== "trigger"}
     <Handle type="target" position={Position.Top} />
   {/if}
@@ -56,6 +57,16 @@
     border-color: var(--accent);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
   }
+  .snode.running {
+    border-color: var(--warn);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 40%, transparent);
+    animation: pulse 1s infinite;
+  }
+  .snode.done {
+    border-color: var(--ok);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--ok) 35%, transparent);
+  }
+  @keyframes pulse { 50% { opacity: 0.6; } }
   .top { display: flex; align-items: center; gap: 0.45rem; }
   .idx {
     width: 20px; height: 20px; border-radius: 50%;

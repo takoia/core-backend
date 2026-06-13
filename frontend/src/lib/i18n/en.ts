@@ -1,6 +1,7 @@
 export const en: Record<string, string> = {
   // Nav
   "nav.tagline": "marketplace of autonomous expert agents",
+  "nav.dashboard": "Dashboard",
   "nav.run": "Run",
   "nav.agents": "Agents",
   "nav.mcp": "MCP",
@@ -258,4 +259,10 @@ export const en: Record<string, string> = {
   "builder.checks": "Checks",
   "builder.checksPlaceholder": "what to verify before finishing",
   "builder.promptPlaceholder": "instructions for this step…",
+  "builder.myAgents": "My agents",
+  "builder.newAgent": "New agent",
+  "builder.start": "Start",
+  "builder.stop": "Stop",
+  "builder.save": "Save",
+  "builder.moreOptions": "More options",
 };

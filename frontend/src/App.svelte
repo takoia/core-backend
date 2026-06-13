@@ -18,8 +18,8 @@
   import logo from "./lib/assets/takoia.png";
   import Icon from "./lib/Icon.svelte";
 
-  type View = "run" | "agents" | "builder" | "canvas" | "video" | "mcp" | "skills" | "memory" | "logs" | "settings" | "usage";
-  let view: View = "run";
+  type View = "dashboard" | "video" | "mcp" | "skills" | "memory" | "logs" | "settings" | "usage";
+  let view: View = "dashboard";
   let healthy = false;
   let token: string | null = localStorage.getItem("auth_token");
 
@@ -77,10 +77,7 @@
         <h1>TakoIA</h1>
       </div>
       <nav>
-        <button class:active={view === "run"} on:click={() => (view = "run")}><Icon name="run" />{$t("nav.run")}</button>
-        <button class:active={view === "agents"} on:click={() => (view = "agents")}><Icon name="agents" />{$t("nav.agents")}</button>
-        <button class:active={view === "builder"} on:click={() => (view = "builder")}><Icon name="builder" />{$t("nav.builder")}</button>
-        <button class:active={view === "canvas"} on:click={() => (view = "canvas")}><Icon name="canvas" />Canvas</button>
+        <button class:active={view === "dashboard"} on:click={() => (view = "dashboard")}><Icon name="builder" />{$t("nav.dashboard")}</button>
         <button class:active={view === "video"} on:click={() => (view = "video")}><Icon name="video" />{$t("nav.video")}</button>
         <button class:active={view === "mcp"} on:click={() => (view = "mcp")}><Icon name="mcp" />{$t("nav.mcp")}</button>
         <button class:active={view === "skills"} on:click={() => (view = "skills")}><Icon name="skills" />{$t("nav.skills")}</button>
@@ -97,15 +94,8 @@
     </div>
   </header>
 
-  {#if view === "canvas"}
-    <CanvasView />
-  {:else}
     <main class="container">
-      {#if view === "run"}
-        <RunView {agents} />
-      {:else if view === "agents"}
-        <AgentsView {agents} onChanged={loadAgents} />
-      {:else if view === "builder"}
+      {#if view === "dashboard"}
         <BuilderView />
       {:else if view === "mcp"}
         <McpView />
@@ -123,7 +113,6 @@
         <UsageView totals={usageTotals} estimatedTotal={usageTotal} />
       {/if}
     </main>
-  {/if}
 {/if}
 
 <style>

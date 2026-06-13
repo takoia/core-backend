@@ -18,6 +18,64 @@ pub async fn run(db: &Db, cipher: &Cipher, config: &Config) -> Result<()> {
     seed_providers(db, cipher, config).await?;
     seed_demo_agent(db).await?;
     seed_invoice_agent(db).await?;
+    seed_example_agents(db).await?;
+    Ok(())
+}
+
+/// Seed a few ready-to-run example agents so the demo has content immediately.
+async fn seed_example_agents(db: &Db) -> Result<()> {
+    // id, name, expertise, autonomy, trigger_on, emit, action_tools
+    let examples = [
+        ("weather-watch", "Weather Watcher", "weather", "full_auto", "schedule.daily", "weather.ready", true),
+        ("market-pulse", "Market Pulse", "market intelligence", "full_auto", "schedule.hourly", "market.ready", true),
+        ("competitor-watch", "Competitor Watch", "competitive intelligence", "confirm_before_action", "", "competitor.report", true),
+        ("social-monitor", "Social Monitor", "social media monitoring", "full_auto", "", "social.summary", true),
+    ];
+    for (id, name, expertise, autonomy, trigger_on, emit, web) in examples {
+        let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM agents WHERE id = ?")
+            .bind(id)
+            .fetch_optional(db)
+            .await?;
+        if exists.is_some() {
+            continue;
+        }
+        let trig = if trigger_on.is_empty() { None } else { Some(trigger_on) };
+        sqlx::query(
+            r#"INSERT INTO agents
+               (id, account_id, name, description, autonomy_level, expertise_domain,
+                author, visibility, trigger_on, emit)
+               VALUES (?, ?, ?, ?, ?, ?, 'TakoIA examples', 'public', ?, ?)"#,
+        )
+        .bind(id)
+        .bind(DEFAULT_ACCOUNT_ID)
+        .bind(name)
+        .bind(format!("Example {expertise} agent — researches and reports."))
+        .bind(autonomy)
+        .bind(expertise)
+        .bind(trig)
+        .bind(format!("[\"{emit}\"]"))
+        .execute(db)
+        .await?;
+        for (pos, step) in StepType::ALL.iter().enumerate() {
+            let options = if *step == StepType::Action && web {
+                serde_json::json!({ "allowed_tools": ["web_search"] })
+            } else {
+                serde_json::json!({})
+            };
+            sqlx::query(
+                r#"INSERT INTO agent_step_configs (id, agent_id, step_type, system_prompt, options, position)
+                   VALUES (?, ?, ?, '', ?, ?)"#,
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(id)
+            .bind(step.as_str())
+            .bind(options.to_string())
+            .bind(pos as i64)
+            .execute(db)
+            .await?;
+        }
+    }
+    tracing::info!("seeded example agents");
     Ok(())
 }
 

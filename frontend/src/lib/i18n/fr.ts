@@ -1,6 +1,7 @@
 export const fr: Record<string, string> = {
   // Nav
   "nav.tagline": "marketplace d'agents experts autonomes",
+  "nav.dashboard": "Tableau de bord",
   "nav.run": "Exécuter",
   "nav.agents": "Agents",
   "nav.mcp": "MCP",
@@ -258,4 +259,10 @@ export const fr: Record<string, string> = {
   "builder.checks": "Vérifications",
   "builder.checksPlaceholder": "ce qu'il faut vérifier avant de finir",
   "builder.promptPlaceholder": "instructions pour cette étape…",
+  "builder.myAgents": "Mes agents",
+  "builder.newAgent": "Nouvel agent",
+  "builder.start": "Lancer",
+  "builder.stop": "Arrêter",
+  "builder.save": "Enregistrer",
+  "builder.moreOptions": "Plus d'options",
 };
