@@ -6,8 +6,12 @@
   import VideoView from "./VideoView.svelte";
   import { api, subscribeJob, type Agent } from "./api";
   import { loadDiscordHooks, discordUrlByName } from "./discordHooks";
-  import { t } from "./i18n";
+  import { t, locale } from "./i18n";
+  import { get } from "svelte/store";
   import { toast, confirmModal } from "./toast";
+
+  // Instruct the LLM to answer in the language currently selected on the site.
+  const langDirective = () => (get(locale) === "fr" ? "Réponds en français." : "Respond in English.");
 
   const nodeTypes = { block: StepNode } as any;
 
@@ -141,26 +145,39 @@
 
   // ── Canvas: starts with ONE agent box; you drag blocks to add steps ────────
   let counter = $state(0);
-  // The agent (root) node, plus a default Manual trigger wired right after it.
+  // The agent (root) node, a default Manual trigger, then the 4 explicit engine
+  // steps so the run is always visible step-by-step (each box spins in turn).
+  // Empty step boxes carry no prompt, so buildToml ignores them until used.
+  const CORE_STEPS = [
+    { id: "analyse", label: "Analyse", glyph: "🔍" },
+    { id: "decision", label: "Décision", glyph: "🧭" },
+    { id: "action", label: "Action", glyph: "⚙️" },
+    { id: "restitution", label: "Restitution", glyph: "📄" },
+  ];
   function freshGraph(): { nodes: Node[]; edges: Edge[] } {
-    return {
-      nodes: [
-        { id: "agent", type: "block", position: { x: 0, y: 0 }, data: { label: name, kind: "trigger", glyph: icon, sub: "agent", root: true } },
-        { id: "trigger-0", type: "block", position: { x: 0, y: 130 }, data: { label: "Manuel", kind: "trigger", glyph: "▶️", sub: "déclencheur" } },
-      ],
-      edges: [{ id: "e-agent-trigger-0", source: "agent", target: "trigger-0", animated: true }],
-    };
+    const nodes: Node[] = [
+      { id: "agent", type: "block", position: { x: 0, y: 0 }, data: { label: name, kind: "trigger", glyph: icon, sub: "agent", root: true } },
+      { id: "trigger-0", type: "block", position: { x: 0, y: 130 }, data: { label: "Manuel", kind: "trigger", glyph: "▶️", sub: "déclencheur" } },
+    ];
+    const edges: Edge[] = [{ id: "e-agent-trigger-0", source: "agent", target: "trigger-0", animated: true }];
+    let prev = "trigger-0";
+    CORE_STEPS.forEach((s, i) => {
+      nodes.push({ id: s.id, type: "block", position: { x: 0, y: 260 + i * 130 }, data: { label: s.label, kind: "step", glyph: s.glyph } } as Node);
+      edges.push({ id: `e-${prev}-${s.id}`, source: prev, target: s.id, animated: true });
+      prev = s.id;
+    });
+    return { nodes, edges };
   }
   const _g0 = freshGraph();
   let nodes = $state.raw<Node[]>(_g0.nodes);
   let edges = $state.raw<Edge[]>(_g0.edges);
-  let lastId = $state("trigger-0");
+  let lastId = $state("restitution");
 
   function newAgent() {
     editingId = null;
     name = "Nouvel agent"; icon = "🐙"; description = ""; author = "You"; expertise = "";
     autonomy = "full_auto"; triggerOn = ""; emit = ""; loopMinutes = defaultLoopMin(); goals = ""; checks = "";
-    prompts = {}; params = { "trigger-0": { event: "manual" } }; counter = 0; lastId = "trigger-0";
+    prompts = {}; params = { "trigger-0": { event: "manual" } }; counter = 0; lastId = "restitution";
     const g = freshGraph();
     nodes = g.nodes;
     edges = g.edges;
@@ -378,13 +395,16 @@
         // only add a step node if it has a prompt or is one of the 4 with content
       }
     }
-    // Add step nodes that have prompts, in order.
+    // The 4 step boxes already exist (freshGraph); just set their prompts on
+    // the matching box (id == step_type) instead of creating duplicates.
+    const corePrompts: Record<string, string> = {};
     for (const sc of d.steps) {
-      if ((sc.system_prompt || "").trim()) {
-        addBlock(sc.step_type);
-        const id2 = lastId; prompts[id2] = sc.system_prompt;
+      if ((sc.system_prompt || "").trim() && CORE_STEPS.some((s) => s.id === sc.step_type)) {
+        corePrompts[sc.step_type] = sc.system_prompt;
       }
     }
+    prompts = { ...prompts, ...corePrompts };
+    // Add tool boxes (chained after the last step) with their params.
     for (const tk of toolKeys) {
       if (ALL_BLOCKS[tk]) { addBlock(tk); const id2 = lastId;
         for (const pk of PARAM_KEYS[tk] ?? []) if (tParams[pk]) { params[id2] = { ...(params[id2]||{}), [pk]: tParams[pk] }; } }
@@ -446,7 +466,8 @@
     const id = await save(true);
     if (!id) return;
     resetRun();
-    const res = await api.createObjective(id, `${name} run`, goals.trim() || `Run ${name}`);
+    const objPrompt = `${langDirective()}\n\n${goals.trim() || `Run ${name}`}`;
+    const res = await api.createObjective(id, `${name} run`, objPrompt);
     runJobId = res.job_id; runStatus = "queued";
     logsOpen = true;
     toast($t("builder.started"), "success");

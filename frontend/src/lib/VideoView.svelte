@@ -1,7 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, type Agent } from "./api";
-  import { t } from "./i18n";
+  import { t, locale } from "./i18n";
+  import { get } from "svelte/store";
+
+  // Answer in the language selected on the site.
+  const langDirective = () => (get(locale) === "fr" ? "Réponds en français." : "Respond in English.");
+  // Instruction stored with the memory telling the agent what to do with it.
+  let improveInstruction = "Utilise ces informations comme démonstration pour t'améliorer lors des prochaines exécutions.";
 
   const MAX_FRAMES = 60;
   const FRAME_WIDTH = 640;
@@ -68,7 +74,7 @@
     busy = true; items = [];
     try {
       status = $t("video.analyzing", { n: 1 });
-      const r = await api.analyzeVideo([imageData], prompt || undefined, targetAgent || undefined);
+      const r = await api.analyzeVideo([imageData], `${langDirective()} ${prompt}`.trim(), targetAgent || undefined);
       items = r.items.map((it) => ({ ...it, ok: null }));
       status = $t("video.done", { n: r.frame_count });
     } catch (e) {
@@ -146,7 +152,7 @@
     try {
       const frames = await extractFrames();
       status = $t("video.analyzing", { n: frames.length });
-      const r = await api.analyzeVideo(frames, prompt || undefined, targetAgent || undefined);
+      const r = await api.analyzeVideo(frames, `${langDirective()} ${prompt}`.trim(), targetAgent || undefined);
       items = r.items.map((it) => ({ ...it, ok: null }));
       status = $t("video.done", { n: r.frame_count });
     } catch (e) {
@@ -163,6 +169,9 @@
     if (!targetAgent || !confirmed.length) return;
     savedMsg = "";
     try {
+      // Store one directive memory telling the agent how to use what follows.
+      const instr = improveInstruction.trim();
+      if (instr) await api.addAgentMemory(targetAgent, instr, "instruction");
       for (const it of confirmed) {
         await api.addAgentMemory(targetAgent, `${it.info}: ${it.detail}`, "demonstration");
       }
@@ -288,6 +297,9 @@
 
     <div class="improve">
       <span class="muted small">{$t("video.improveHint")}</span>
+      <label class="instr">{$t("video.instruction")}
+        <textarea rows="2" bind:value={improveInstruction} placeholder={$t("video.instructionPlaceholder")}></textarea>
+      </label>
       <div class="row">
         <select bind:value={targetAgent}>
           {#each agents as a}<option value={a.id}>{a.name}</option>{/each}

@@ -271,6 +271,8 @@ export const en: Record<string, string> = {
   "video.confirmedCount": "{n} of {total} confirmed",
   "video.duration": "Duration (s)",
   "video.targetAgent": "Agent to improve:",
+  "video.instruction": "Instruction to the agent (what to do with this)",
+  "video.instructionPlaceholder": "e.g. Use this as a demonstration to improve yourself.",
   "video.improveHint": "Add the confirmed info to an agent's memory to improveit:",
   "video.improveBtn": "Improve agent",
   "video.improved": "Added {n} items to the agent's memory",
