@@ -91,6 +91,11 @@ pub fn router(state: AppState) -> Router {
         .route("/tts", post(tts::synthesize))
         // Public marketplace
         .route("/marketplace", get(marketplace::list))
+        .route("/marketplace/earnings", get(marketplace::earnings))
+        // Consumer API keys + public hosted-agent API (token-billed).
+        .route("/keys", get(marketplace::list_keys).post(marketplace::create_key))
+        .route("/keys/:id", delete(marketplace::revoke_key))
+        .route("/v1/agents/:id/invoke", post(marketplace::invoke))
         .with_state(state);
 
     Router::new()

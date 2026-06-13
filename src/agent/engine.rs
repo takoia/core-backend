@@ -44,8 +44,11 @@ struct StepConfigRow {
     options: String,
 }
 
-/// Run (or resume) a job to completion or to an approval pause.
-pub async fn run_job(state: &AppState, job: &ClaimedJob) -> Result<RunOutcome> {
+/// Run (or resume) a job to completion or to an approval pause. When
+/// `read_only_memory` is set (marketplace consumer invokes), the agent recalls
+/// its memory but does NOT write to it, so the publisher's curated expertise is
+/// never polluted by consumer inputs.
+pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool) -> Result<RunOutcome> {
     let bus = &state.events;
     bus.publish(JobEvent::status(&job.id, "running", "job started"));
 
@@ -90,6 +93,7 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob) -> Result<RunOutcome> {
         account_id: &objective.account_id,
         objective_prompt: &objective.prompt,
         session: Vec::new(),
+        read_only: read_only_memory,
     };
 
     // ── Analyse ────────────────────────────────────────────────────────────
@@ -189,13 +193,16 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob) -> Result<RunOutcome> {
     let report = ctx.step(StepType::Restitution, &restitution_input, &done, 3).await?;
 
     // Persist what was learned so the agent gets more expert over time.
-    let summary = report.chars().take(600).collect::<String>();
-    if let Err(e) = state
-        .memory
-        .store(&job.agent_id, "run-summary", &summary)
-        .await
-    {
-        tracing::warn!(error = %e, "failed to persist memory");
+    // Read-only (marketplace) runs never write to the publisher's memory.
+    if !read_only_memory {
+        let summary = report.chars().take(600).collect::<String>();
+        if let Err(e) = state
+            .memory
+            .store(&job.agent_id, "run-summary", &summary)
+            .await
+        {
+            tracing::warn!(error = %e, "failed to persist memory");
+        }
     }
 
     // Discord alert: if the agent uses send_discord and a webhook is set.
@@ -232,6 +239,8 @@ struct RunCtx<'a> {
     /// Accumulated outputs of THIS run's steps, injected into every later step
     /// so the agent keeps a continuous session memory across steps.
     session: Vec<String>,
+    /// Recall memory but never write it (marketplace consumer invokes).
+    read_only: bool,
 }
 
 impl<'a> RunCtx<'a> {
@@ -368,19 +377,22 @@ impl<'a> RunCtx<'a> {
 
         // ── ICM store at the END of every step ─────────────────────────────
         // Persist this step's result so later steps and future runs recall it.
-        let trimmed: String = completion.content.chars().take(500).collect();
-        if let Err(e) = self
-            .state
-            .memory
-            .store(&self.job.agent_id, step.as_str(), &trimmed)
-            .await
-        {
-            tracing::warn!(error = %e, "failed to store step memory");
-        } else {
-            self.state.events.publish(JobEvent::log(
-                &self.job.id,
-                format!("{}: saved to memory", label(step)),
-            ));
+        // Skipped for read-only (marketplace) runs to protect the publisher.
+        if !self.read_only {
+            let trimmed: String = completion.content.chars().take(500).collect();
+            if let Err(e) = self
+                .state
+                .memory
+                .store(&self.job.agent_id, step.as_str(), &trimmed)
+                .await
+            {
+                tracing::warn!(error = %e, "failed to store step memory");
+            } else {
+                self.state.events.publish(JobEvent::log(
+                    &self.job.id,
+                    format!("{}: saved to memory", label(step)),
+                ));
+            }
         }
         // Keep the full step output in the in-run session for the next steps.
         self.session.push(format!(

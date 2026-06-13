@@ -215,6 +215,10 @@ pub struct PublishInput {
     /// "public" or "private".
     pub visibility: String,
     pub price_per_run_usd: Option<f64>,
+    /// Price charged to consumers per 1k outgoing (completion) tokens.
+    pub price_per_1k_output_tokens: Option<f64>,
+    /// Share of revenue paid to the publisher (0..1).
+    pub revenue_share: Option<f64>,
 }
 
 /// `POST /api/agents/:id/publish` — make the expert agent public or private.
@@ -231,12 +235,16 @@ pub async fn publish(
         r#"UPDATE agents SET
              visibility = ?,
              price_per_run_usd = COALESCE(?, price_per_run_usd),
+             price_per_1k_output_tokens = COALESCE(?, price_per_1k_output_tokens),
+             revenue_share = COALESCE(?, revenue_share),
              published_at = CASE WHEN ? = 'public' THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE published_at END,
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
            WHERE id = ?"#,
     )
     .bind(visibility)
     .bind(body.price_per_run_usd)
+    .bind(body.price_per_1k_output_tokens)
+    .bind(body.revenue_share)
     .bind(visibility)
     .bind(&id)
     .execute(&state.db)

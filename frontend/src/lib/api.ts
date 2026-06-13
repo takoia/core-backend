@@ -121,12 +121,27 @@ export const api = {
   updateSteps: (id: string, steps: unknown[]) =>
     req(`/api/agents/${id}/steps`, { method: "PUT", headers: jsonH, body: JSON.stringify({ steps }) }),
   deleteAgent: (id: string) => req(`/api/agents/${id}`, { method: "DELETE" }),
-  publishAgent: (id: string, visibility: string, price?: number) =>
+  publishAgent: (id: string, visibility: string, opts?: { pricePerKTokens?: number; revenueShare?: number }) =>
     req(`/api/agents/${id}/publish`, {
       method: "POST",
       headers: jsonH,
-      body: JSON.stringify({ visibility, price_per_run_usd: price }),
+      body: JSON.stringify({
+        visibility,
+        price_per_1k_output_tokens: opts?.pricePerKTokens,
+        revenue_share: opts?.revenueShare,
+      }),
     }),
+
+  // Marketplace: keys, earnings, and the public invoke API.
+  listKeys: () => req<{ keys: { id: string; name: string; key_prefix: string; revoked: number; last_used_at: string | null }[] }>("/api/keys").then((r) => r.keys),
+  createKey: (name: string) => req<{ key: string; prefix: string }>("/api/keys", { method: "POST", headers: jsonH, body: JSON.stringify({ name }) }),
+  revokeKey: (id: string) => req(`/api/keys/${id}`, { method: "DELETE" }),
+  earnings: () => req<{ invokes: number; output_tokens: number; billed_usd: number; publisher_usd: number }>("/api/marketplace/earnings"),
+  invokeAgent: (id: string, key: string, input: string) =>
+    req<{ agent: string; output: string; usage: { prompt_tokens: number; completion_tokens: number }; cost_usd: number; publisher_earned_usd: number }>(
+      `/api/v1/agents/${id}/invoke`,
+      { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, body: JSON.stringify({ input }) },
+    ),
   importToml: (toml: string) =>
     req<{ id: string }>("/api/agents/import", {
       method: "POST",

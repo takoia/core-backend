@@ -254,6 +254,7 @@ export const fr: Record<string, string> = {
 
   // Video analysis
   "nav.video": "Amélioration",
+  "nav.marketplace": "Marketplace",
   "video.title": "Amélioration d'un agent",
   "video.subtitle": "améliorez la mémoire d'un agent avec une vidéo, une photo ou une description",
   "video.hint": "Vidéo : frames échantillonnées 1/sec et analysées par claude -p (vision). Photo : analyse d'une image. Description : texte libre. Vous confirmez ensuite ce qui est pertinent et l'ajoutez à la mémoire de l'agent.",

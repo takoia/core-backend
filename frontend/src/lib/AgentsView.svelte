@@ -14,7 +14,7 @@
   $: visibleAgents = agents.filter((a) => a.visibility === tab);
 
   async function publish(a: Agent, visibility: string) {
-    await api.publishAgent(a.id, visibility, a.price_per_run_usd);
+    await api.publishAgent(a.id, visibility);
     onChanged();
   }
 

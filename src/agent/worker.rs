@@ -21,7 +21,7 @@ pub fn spawn(state: AppState) {
             match queue::claim_next(&state.db).await {
                 Ok(Some(job)) => {
                     tracing::info!(job_id = %job.id, "claimed job");
-                    if let Err(e) = engine::run_job(&state, &job).await {
+                    if let Err(e) = engine::run_job(&state, &job, false).await {
                         tracing::error!(job_id = %job.id, error = %e, "job run failed");
                         engine::fail(&state, &job.id, &e).await;
                     }

@@ -254,6 +254,7 @@ export const en: Record<string, string> = {
 
   // Video analysis
   "nav.video": "Improve",
+  "nav.marketplace": "Marketplace",
   "video.title": "Improve an agent",
   "video.subtitle": "improve an agent's memory with a video, a photo or a description",
   "video.modeVideo": "Video",

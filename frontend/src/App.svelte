@@ -11,6 +11,7 @@
   import BuilderView from "./lib/BuilderView.svelte";
   import LogsView from "./lib/LogsView.svelte";
   import MemoryView from "./lib/MemoryView.svelte";
+  import MarketplaceView from "./lib/MarketplaceView.svelte";
   import VideoView from "./lib/VideoView.svelte";
   import LoginView from "./lib/LoginView.svelte";
   import Toasts from "./lib/Toasts.svelte";
@@ -20,7 +21,7 @@
   import logo from "./lib/assets/takoia.png";
   import Icon from "./lib/Icon.svelte";
 
-  type View = "dashboard" | "video" | "mcp" | "skills" | "memory" | "logs" | "settings" | "usage";
+  type View = "dashboard" | "video" | "marketplace" | "mcp" | "skills" | "memory" | "logs" | "settings" | "usage";
   let view: View = "dashboard";
   let navCollapsed = false;
   let healthy = false;
@@ -84,6 +85,7 @@
       <nav class:collapsed={navCollapsed}>
         <button class:active={view === "dashboard"} on:click={() => (view = "dashboard")}><Icon name="builder" />{$t("nav.dashboard")}</button>
         <button class:active={view === "video"} on:click={() => (view = "video")}><Icon name="video" />{$t("nav.video")}</button>
+        <button class:active={view === "marketplace"} on:click={() => (view = "marketplace")}>🛒 {$t("nav.marketplace")}</button>
         <button class:active={view === "mcp"} on:click={() => (view = "mcp")}><Icon name="mcp" />{$t("nav.mcp")}</button>
         <button class:active={view === "skills"} on:click={() => (view = "skills")}><Icon name="skills" />{$t("nav.skills")}</button>
         <button class:active={view === "memory"} on:click={() => (view = "memory")}><Icon name="builder" />{$t("nav.memory")}</button>
@@ -110,6 +112,8 @@
         <SkillsView />
       {:else if view === "video"}
         <VideoView />
+      {:else if view === "marketplace"}
+        <MarketplaceView />
       {:else if view === "memory"}
         <MemoryView />
       {:else if view === "logs"}
