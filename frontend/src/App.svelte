@@ -20,6 +20,7 @@
 
   type View = "dashboard" | "video" | "mcp" | "skills" | "memory" | "logs" | "settings" | "usage";
   let view: View = "dashboard";
+  let navCollapsed = false;
   let healthy = false;
   let token: string | null = localStorage.getItem("auth_token");
 
@@ -73,10 +74,11 @@
   <header>
     <div class="container nav">
       <div class="brand">
+        <button class="burger" on:click={() => (navCollapsed = !navCollapsed)} title="menu">☰</button>
         <img class="logo" src={logo} alt="TakoIA" />
         <h1>TakoIA</h1>
       </div>
-      <nav>
+      <nav class:collapsed={navCollapsed}>
         <button class:active={view === "dashboard"} on:click={() => (view = "dashboard")}><Icon name="builder" />{$t("nav.dashboard")}</button>
         <button class:active={view === "video"} on:click={() => (view = "video")}><Icon name="video" />{$t("nav.video")}</button>
         <button class:active={view === "mcp"} on:click={() => (view = "mcp")}><Icon name="mcp" />{$t("nav.mcp")}</button>
@@ -94,10 +96,11 @@
     </div>
   </header>
 
+    {#if view === "dashboard"}
+      <BuilderView />
+    {:else}
     <main class="container">
-      {#if view === "dashboard"}
-        <BuilderView />
-      {:else if view === "mcp"}
+      {#if view === "mcp"}
         <McpView />
       {:else if view === "skills"}
         <SkillsView />
@@ -113,12 +116,15 @@
         <UsageView totals={usageTotals} estimatedTotal={usageTotal} />
       {/if}
     </main>
+    {/if}
 {/if}
 
 <style>
   header { border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 80%, transparent); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px); height: 76px; }
   .nav { display: flex; align-items: center; justify-content: space-between; gap: 1rem; max-width: none; padding: 0.5rem 1.25rem; }
   .brand { display: flex; align-items: center; gap: 0.5rem; flex: 0 0 auto; }
+  .burger { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.25rem 0.5rem; cursor: pointer; font-size: 1rem; }
+  nav.collapsed { display: none; }
   .brand .logo { width: 56px; height: 56px; border-radius: 50%; }
   .brand h1 { margin: 0; font-size: 1.15rem; }
   .brand .tag { color: var(--muted); font-size: 0.8rem; }

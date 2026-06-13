@@ -336,7 +336,7 @@
 </div>
 
 <style>
-  .dash { display: grid; grid-template-columns: 230px 1fr 320px; gap: 0.9rem; height: calc(100vh - 100px); }
+  .dash { display: grid; grid-template-columns: 230px 1fr 320px; gap: 0.8rem; height: calc(100vh - 76px); padding: 0.8rem; box-sizing: border-box; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
   .side { padding: 0.8rem; display: flex; flex-direction: column; overflow: hidden; }
   .side-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem; }
