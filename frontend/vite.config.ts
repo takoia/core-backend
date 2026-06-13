@@ -12,6 +12,13 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    host: process.env.VITE_DEV_HOST || "127.0.0.1",
+    // When served behind Caddy on the VM, allow the public host and point the
+    // HMR websocket at it (wss on 443). Plain local dev leaves these defaults.
+    allowedHosts: process.env.VITE_ALLOWED_HOST ? [process.env.VITE_ALLOWED_HOST] : true,
+    hmr: process.env.VITE_HMR_HOST
+      ? { host: process.env.VITE_HMR_HOST, protocol: "wss", clientPort: 443 }
+      : true,
     proxy: {
       "/api": {
         // Defaults to a local backend; set VITE_API_TARGET to proxy a remote
