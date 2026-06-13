@@ -251,4 +251,11 @@ export const fr: Record<string, string> = {
   "video.improveHint": "Ajoutez les infos confirmées à la mémoire d'un agent pour l'améliorer :",
   "video.improveBtn": "Améliorer l'agent",
   "video.improved": "{n} infos ajoutées à la mémoire de l'agent",
+  "builder.loopTitle": "Boucle récurrente (optionnel)",
+  "builder.loopEvery": "Boucle toutes les (min, 0=off)",
+  "builder.goals": "Objectifs",
+  "builder.goalsPlaceholder": "ce que l'agent doit accomplir",
+  "builder.checks": "Vérifications",
+  "builder.checksPlaceholder": "ce qu'il faut vérifier avant de finir",
+  "builder.promptPlaceholder": "instructions pour cette étape…",
 };

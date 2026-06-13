@@ -1,571 +1,250 @@
 <script lang="ts">
+  import {
+    SvelteFlow,
+    Background,
+    Controls,
+    MiniMap,
+    type Node,
+    type Edge,
+  } from "@xyflow/svelte";
+  import "@xyflow/svelte/dist/style.css";
+  import StepNode from "./builder/StepNode.svelte";
   import { api } from "./api";
   import { t } from "./i18n";
-  import Icon from "./Icon.svelte";
 
-  // ── Visual builder state ───────────────────────────────────────────────────
-  // The page assembles a declarative agent TOML from a Scratch-like visual
-  // pipeline and posts it to the existing /api/agents/import endpoint.
+  const nodeTypes = { step: StepNode } as any;
 
-  type StepKey = "analyse" | "decision" | "action" | "restitution";
+  // The four explicit contest steps + trigger/emit framing.
+  const STEPS = ["analyse", "decision", "action", "restitution"] as const;
+  type StepKey = (typeof STEPS)[number];
+  const TOOLS = ["web_search", "write_report", "send_discord", "send_email", "extract_fields"];
 
-  const PALETTE = [
-    "web_search",
-    "write_report",
-    "send_discord",
-    "extract_fields",
-    "send_email",
-  ];
+  // ── Agent state ────────────────────────────────────────────────────────────
+  let name = $state("Market Watcher");
+  let author = $state("You");
+  let expertise = $state("market intelligence");
+  let autonomy = $state<"full_auto" | "confirm_before_action">("confirm_before_action");
+  let triggerOn = $state("schedule.daily");
+  let emit = $state("report.ready");
 
-  // Top-level agent fields.
-  let name = "Market Watcher";
-  let author = "You";
-  let expertise = "trading";
-  let autonomy: "full_auto" | "confirm_before_action" = "confirm_before_action";
-  let description = "Watches the market and reports interesting setups.";
-  let triggerOn = "schedule.daily";
-  let emit = "report.ready";
+  // Loop / goals / checks (recurring autonomous run).
+  let loopMinutes = $state(0);
+  let goals = $state("");
+  let checks = $state("");
 
-  // Per-step system prompts.
-  let prompts: Record<StepKey, string> = {
-    analyse: "Gather the relevant context and summarise what is happening.",
-    decision: "Decide whether an action is worth taking and which one.",
-    action: "Execute the chosen tools to carry out the decision.",
-    restitution: "Write a clear, human-readable report of what was done.",
+  // Per-step system prompts + action tools.
+  let prompts = $state<Record<StepKey, string>>({
+    analyse: "",
+    decision: "",
+    action: "",
+    restitution: "",
+  });
+  let tools = $state<string[]>(["web_search"]);
+  let selected = $state<string | null>("analyse");
+  let createdMsg = $state("");
+
+  const STEP_LABEL: Record<string, string> = {
+    analyse: "Analyse",
+    decision: "Décision",
+    action: "Action",
+    restitution: "Restitution",
   };
 
-  // Tools chosen for the Action node.
-  let tools: string[] = ["web_search"];
+  // ── Svelte Flow graph ──────────────────────────────────────────────────────
+  const COL = 360;
+  let nodes = $state.raw<Node[]>([
+    { id: "trigger", type: "step", position: { x: COL, y: 0 }, data: { label: "Trigger", kind: "trigger", sub: triggerOn } },
+    { id: "analyse", type: "step", position: { x: COL, y: 150 }, data: { label: STEP_LABEL.analyse, kind: "step", idx: 1 } },
+    { id: "decision", type: "step", position: { x: COL, y: 300 }, data: { label: STEP_LABEL.decision, kind: "step", idx: 2 } },
+    { id: "action", type: "step", position: { x: COL, y: 450 }, data: { label: STEP_LABEL.action, kind: "step", idx: 3, tools } },
+    { id: "restitution", type: "step", position: { x: COL, y: 600 }, data: { label: STEP_LABEL.restitution, kind: "step", idx: 4 } },
+    { id: "emit", type: "step", position: { x: COL, y: 750 }, data: { label: "Emit", kind: "emit", sub: emit } },
+  ]);
+  let edges = $state.raw<Edge[]>([
+    { id: "e1", source: "trigger", target: "analyse", animated: true },
+    { id: "e2", source: "analyse", target: "decision", animated: true },
+    { id: "e3", source: "decision", target: "action", animated: true },
+    { id: "e4", source: "action", target: "restitution", animated: true },
+    { id: "e5", source: "restitution", target: "emit", animated: true },
+  ]);
 
-  // Which node's inline editor is open.
-  let selected: "trigger" | StepKey | "emit" | null = null;
+  // Keep the trigger/emit/action nodes in sync with the editable fields.
+  $effect(() => {
+    nodes = nodes.map((n) => {
+      if (n.id === "trigger") return { ...n, data: { ...n.data, sub: triggerOn } };
+      if (n.id === "emit") return { ...n, data: { ...n.data, sub: emit } };
+      if (n.id === "action") return { ...n, data: { ...n.data, tools: [...tools] } };
+      return n;
+    });
+  });
 
-  // Outcome banner.
-  let createdId = "";
-  let errorMsg = "";
-
-  const STEP_NODES: { key: StepKey; labelKey: string }[] = [
-    { key: "analyse", labelKey: "builder.step.analyse" },
-    { key: "decision", labelKey: "builder.step.decision" },
-    { key: "action", labelKey: "builder.step.action" },
-    { key: "restitution", labelKey: "builder.step.restitution" },
-  ];
-
-  function slug(s: string): string {
-    return (
-      s
-        .toLowerCase()
-        .trim()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "") || "agent"
-    );
+  function onNodeClick(e: any) {
+    const id = e?.node?.id ?? e?.detail?.node?.id;
+    if (id) selected = id;
   }
 
   function addTool(tool: string) {
     if (!tools.includes(tool)) tools = [...tools, tool];
-    selected = "action";
   }
-
   function removeTool(tool: string) {
-    tools = tools.filter((x) => x !== tool);
+    tools = tools.filter((t) => t !== tool);
   }
 
-  // ── Native HTML5 drag-and-drop from palette onto the Action node ───────────
-  let dragTool: string | null = null;
-  let dropHot = false;
-
-  function onDragStart(ev: DragEvent, tool: string) {
-    dragTool = tool;
-    ev.dataTransfer?.setData("text/plain", tool);
-    if (ev.dataTransfer) ev.dataTransfer.effectAllowed = "copy";
-  }
-
-  function onDropTool(ev: DragEvent) {
-    ev.preventDefault();
-    dropHot = false;
-    const tool = ev.dataTransfer?.getData("text/plain") || dragTool;
-    if (tool) addTool(tool);
-    dragTool = null;
-  }
-
-  function tomlList(items: string[]): string {
-    return "[" + items.map((x) => `"${x}"`).join(", ") + "]";
-  }
-
-  function esc(s: string): string {
-    return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  function slug(s: string) {
+    return s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "agent";
   }
 
   function buildToml(): string {
-    const id = slug(name);
-    const emitItems = emit
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean);
-    const lines: string[] = [];
-    lines.push("[agent]");
-    lines.push(`id = "${id}"`);
-    lines.push(`name = "${esc(name)}"`);
-    lines.push(`author = "${esc(author)}"`);
-    lines.push(`version = "0.1.0"`);
-    lines.push(`description = "${esc(description)}"`);
-    lines.push(`expertise = "${esc(expertise)}"`);
-    lines.push(`autonomy = "${autonomy}"`);
-    lines.push(`emit = ${tomlList(emitItems)}`);
-    lines.push("");
-    lines.push("[trigger]");
-    lines.push(`on = "${esc(triggerOn)}"`);
-    lines.push("");
-    for (const { key } of STEP_NODES) {
-      lines.push(`[steps.${key}]`);
-      lines.push(`system_prompt = "${esc(prompts[key])}"`);
-      if (key === "action") lines.push(`allowed_tools = ${tomlList(tools)}`);
-      lines.push("");
+    const emitArr = emit.split(",").map((e) => e.trim()).filter(Boolean);
+    let toml = `[agent]\n`;
+    toml += `id = "${slug(name)}"\n`;
+    toml += `name = "${name}"\n`;
+    toml += `author = "${author}"\n`;
+    toml += `version = "0.1.0"\n`;
+    toml += `description = "${goals ? goals.replace(/\n/g, " ") : "Built visually in TakoIA."}"\n`;
+    toml += `expertise = "${expertise}"\n`;
+    toml += `autonomy = "${autonomy}"\n`;
+    toml += `emit = [${emitArr.map((e) => `"${e}"`).join(", ")}]\n`;
+    if (triggerOn.trim()) toml += `\n[trigger]\non = "${triggerOn.trim()}"\n`;
+    for (const s of STEPS) {
+      const p = prompts[s].trim();
+      const isAction = s === "action";
+      if (!p && !(isAction && tools.length)) continue;
+      toml += `\n[steps.${s}]\n`;
+      if (p) toml += `system_prompt = ${JSON.stringify(p)}\n`;
+      if (isAction && tools.length) toml += `allowed_tools = [${tools.map((x) => `"${x}"`).join(", ")}]\n`;
     }
-    return lines.join("\n");
+    return toml;
   }
 
-  async function createAgent() {
-    createdId = "";
-    errorMsg = "";
+  async function create() {
+    createdMsg = "";
     try {
       const r = await api.importToml(buildToml());
-      createdId = r.id;
-      selected = null;
+      // If a loop interval is set, also create a recurring schedule.
+      if (loopMinutes > 0) {
+        const goal = goals.trim() || "Run the recurring objective.";
+        const checkLine = checks.trim() ? `\n\nVerify before finishing:\n${checks.trim()}` : "";
+        await fetch("/api/schedules", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agent_id: r.id,
+            title: `${name} loop`,
+            prompt: goal + checkLine,
+            interval_seconds: loopMinutes * 60,
+          }),
+        });
+      }
+      createdMsg = $t("builder.created") + ` (${r.id})`;
     } catch (e) {
-      errorMsg = e instanceof Error ? e.message : String(e);
+      createdMsg = e instanceof Error ? e.message : String(e);
     }
   }
 
-  $: previewToml = buildToml();
+  const isStep = $derived(selected !== null && (STEPS as readonly string[]).includes(selected));
 </script>
 
 <div class="builder">
-  <!-- Top form: identity of the agent -->
-  <div class="card head">
-    <div class="head-grid">
-      <label>
-        <span>{$t("builder.name")}</span>
-        <input bind:value={name} placeholder="Market Watcher" />
+  <!-- Top: agent meta + loop -->
+  <div class="card meta">
+    <div class="grid">
+      <label>{$t("builder.name")}<input bind:value={name} /></label>
+      <label>{$t("builder.author")}<input bind:value={author} /></label>
+      <label>{$t("builder.expertise")}<input bind:value={expertise} /></label>
+      <label>{$t("builder.autonomy")}
+        <select bind:value={autonomy}>
+          <option value="confirm_before_action">{$t("builder.confirm")}</option>
+          <option value="full_auto">{$t("builder.fullAuto")}</option>
+        </select>
       </label>
-      <label>
-        <span>{$t("builder.author")}</span>
-        <input bind:value={author} placeholder="You" />
-      </label>
-      <label>
-        <span>{$t("builder.expertise")}</span>
-        <input bind:value={expertise} placeholder="trading" />
-      </label>
-      <label class="auto">
-        <span>{$t("builder.autonomy")}</span>
-        <div class="toggle">
-          <button
-            class:active={autonomy === "confirm_before_action"}
-            on:click={() => (autonomy = "confirm_before_action")}
-            type="button">{$t("builder.confirm")}</button
-          >
-          <button
-            class:active={autonomy === "full_auto"}
-            on:click={() => (autonomy = "full_auto")}
-            type="button">{$t("builder.fullAuto")}</button
-          >
-        </div>
-      </label>
+      <label>{$t("builder.triggerOn")}<input bind:value={triggerOn} placeholder="invoice.received" /></label>
+      <label>{$t("builder.emit")}<input bind:value={emit} placeholder="report.ready" /></label>
+    </div>
+    <div class="loop">
+      <strong class="muted small">{$t("builder.loopTitle")}</strong>
+      <div class="grid3">
+        <label>{$t("builder.loopEvery")}<input type="number" min="0" bind:value={loopMinutes} /></label>
+        <label>{$t("builder.goals")}<input bind:value={goals} placeholder={$t("builder.goalsPlaceholder")} /></label>
+        <label>{$t("builder.checks")}<input bind:value={checks} placeholder={$t("builder.checksPlaceholder")} /></label>
+      </div>
     </div>
   </div>
 
-  <div class="stage">
-    <!-- Palette of draggable task blocks -->
-    <div class="card palette">
-      <h3>{$t("builder.palette")}</h3>
-      <p class="muted small">{$t("builder.paletteHint")}</p>
-      {#each PALETTE as tool}
-        <button
-          class="block"
-          draggable="true"
-          on:dragstart={(e) => onDragStart(e, tool)}
-          on:click={() => addTool(tool)}
-          type="button"
-        >
-          <span class="dot"></span>{tool}
-        </button>
-      {/each}
+  <!-- Canvas + inspector -->
+  <div class="workspace">
+    <div class="flowwrap">
+      <SvelteFlow bind:nodes bind:edges {nodeTypes} fitView onnodeclick={onNodeClick}>
+        <Background gap={22} />
+        <Controls />
+        <MiniMap pannable zoomable />
+      </SvelteFlow>
     </div>
 
-    <!-- 2D node canvas -->
-    <div class="card canvas">
-      <div class="flow">
-        <!-- Trigger node -->
-        <button
-          class="node trigger"
-          class:sel={selected === "trigger"}
-          on:click={() => (selected = "trigger")}
-          type="button"
-        >
-          <div class="node-icon"><Icon name="run" size={16} /></div>
-          <div class="node-title">{$t("builder.node.trigger")}</div>
-          <div class="node-sub">{triggerOn}</div>
-        </button>
-
-        <div class="wire"></div>
-
-        {#each STEP_NODES as node, i}
-          <button
-            class="node step"
-            class:sel={selected === node.key}
-            class:hot={node.key === "action" && dropHot}
-            on:click={() => (selected = node.key)}
-            on:dragover={(e) =>
-              node.key === "action" && (e.preventDefault(), (dropHot = true))}
-            on:dragleave={() => node.key === "action" && (dropHot = false)}
-            on:drop={(e) => node.key === "action" && onDropTool(e)}
-            type="button"
-          >
-            <div class="node-idx">{i + 1}</div>
-            <div class="node-title">{$t(node.labelKey)}</div>
-            {#if node.key === "action"}
-              <div class="chips">
-                {#if tools.length === 0}
-                  <span class="muted small">{$t("builder.dropHere")}</span>
-                {/if}
-                {#each tools as tool}
-                  <span class="chip">
-                    {tool}
-                    <span
-                      class="x"
-                      role="button"
-                      tabindex="0"
-                      on:click|stopPropagation={() => removeTool(tool)}
-                      on:keydown|stopPropagation={(e) =>
-                        e.key === "Enter" && removeTool(tool)}>×</span
-                    >
-                  </span>
-                {/each}
-              </div>
-            {:else}
-              <div class="node-sub">{$t("builder.tapToEdit")}</div>
-            {/if}
-          </button>
-
-          <div class="wire"></div>
-        {/each}
-
-        <!-- Emit node -->
-        <button
-          class="node emit"
-          class:sel={selected === "emit"}
-          on:click={() => (selected = "emit")}
-          type="button"
-        >
-          <div class="node-icon"><Icon name="agents" size={16} /></div>
-          <div class="node-title">{$t("builder.node.emit")}</div>
-          <div class="node-sub">{emit || "—"}</div>
-        </button>
-      </div>
-
-      <div class="actions-bar">
-        <button class="primary" on:click={createAgent} type="button">
-          {$t("builder.create")}
-        </button>
-        {#if createdId}
-          <span class="ok small">{$t("builder.created")}: {createdId}</span>
-        {/if}
-        {#if errorMsg}
-          <span class="err small">{errorMsg}</span>
-        {/if}
-      </div>
-    </div>
-
-    <!-- Inline editor side panel -->
-    <div class="card editor">
-      {#if selected === "trigger"}
-        <h3>{$t("builder.node.trigger")}</h3>
-        <label>
-          <span>{$t("builder.triggerOn")}</span>
-          <input bind:value={triggerOn} placeholder="schedule.daily" />
+    <div class="card inspector">
+      {#if isStep}
+        {@const sk = selected as StepKey}
+        <h3>{STEP_LABEL[sk]}</h3>
+        <label class="blk">{$t("builder.systemPrompt")}
+          <textarea rows="7" bind:value={prompts[sk]} placeholder={$t("builder.promptPlaceholder")}></textarea>
         </label>
+        {#if sk === "action"}
+          <div class="palette">
+            <span class="muted small">{$t("builder.palette")}</span>
+            <div class="chips">
+              {#each TOOLS as tool}
+                <button class="add" onclick={() => addTool(tool)} disabled={tools.includes(tool)}>+ {tool}</button>
+              {/each}
+            </div>
+            <div class="chosen">
+              {#each tools as tool}
+                <span class="chip">{tool} <button class="x" onclick={() => removeTool(tool)}>×</button></span>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      {:else if selected === "trigger"}
+        <h3>{$t("builder.node.trigger")}</h3>
+        <label class="blk">{$t("builder.triggerOn")}<input bind:value={triggerOn} /></label>
         <p class="muted small">{$t("builder.triggerHint")}</p>
       {:else if selected === "emit"}
         <h3>{$t("builder.node.emit")}</h3>
-        <label>
-          <span>{$t("builder.emit")}</span>
-          <input bind:value={emit} placeholder="report.ready" />
-        </label>
+        <label class="blk">{$t("builder.emit")}<input bind:value={emit} /></label>
         <p class="muted small">{$t("builder.emitHint")}</p>
-      {:else if selected === "analyse" || selected === "decision" || selected === "action" || selected === "restitution"}
-        <h3>{$t(`builder.step.${selected}`)}</h3>
-        <label>
-          <span>{$t("builder.systemPrompt")}</span>
-          <textarea rows="6" bind:value={prompts[selected]}></textarea>
-        </label>
-        {#if selected === "action"}
-          <p class="muted small">{$t("builder.actionHint")}</p>
-        {/if}
       {:else}
-        <h3>{$t("builder.previewTitle")}</h3>
-        <p class="muted small">{$t("builder.previewHint")}</p>
-        <pre class="preview">{previewToml}</pre>
+        <p class="muted">{$t("builder.tapToEdit")}</p>
       {/if}
+
+      <button class="primary create" onclick={create}>{$t("builder.create")}</button>
+      {#if createdMsg}<p class="muted small">{createdMsg}</p>{/if}
     </div>
   </div>
 </div>
 
 <style>
-  .builder {
-    padding: 1.2rem;
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
+  .builder { display: flex; flex-direction: column; gap: 1rem; }
+  .meta .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.6rem 1rem; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.6rem 1rem; margin-top: 0.4rem; }
+  .loop { margin-top: 0.9rem; padding-top: 0.8rem; border-top: 1px solid var(--border); }
+  label { display: block; font-size: 0.8rem; color: var(--muted); }
+  input, select, textarea {
+    width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 0.45rem 0.6rem; font: inherit; margin-top: 0.2rem;
   }
-  .head-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 0.8rem;
-  }
-  label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-    font-size: 0.8rem;
-  }
-  label > span {
-    color: var(--muted);
-  }
-  input,
-  textarea {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text);
-    border-radius: 8px;
-    padding: 0.5rem 0.6rem;
-    font: inherit;
-    font-size: 0.85rem;
-  }
-  textarea {
-    font-family: ui-monospace, monospace;
-    font-size: 0.8rem;
-    resize: vertical;
-  }
-  .toggle {
-    display: flex;
-    gap: 0.3rem;
-  }
-  .toggle button {
-    flex: 1;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--muted);
-    border-radius: 8px;
-    padding: 0.45rem;
-    cursor: pointer;
-    font: inherit;
-    font-size: 0.78rem;
-  }
-  .toggle button.active {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-
-  .stage {
-    display: grid;
-    grid-template-columns: 180px 1fr 280px;
-    gap: 1rem;
-    align-items: start;
-  }
-  h3 {
-    margin: 0 0 0.6rem;
-    font-size: 0.95rem;
-  }
-
-  /* Palette */
-  .palette .block {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.45rem;
-    border: 1px solid var(--border);
-    background: var(--panel);
-    color: var(--text);
-    border-radius: 10px;
-    padding: 0.5rem 0.6rem;
-    cursor: grab;
-    font: inherit;
-    font-size: 0.8rem;
-    text-align: left;
-    transition: border-color 0.12s;
-  }
-  .palette .block:hover {
-    border-color: var(--accent);
-  }
-  .palette .block:active {
-    cursor: grabbing;
-  }
-  .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--accent);
-    flex: none;
-  }
-
-  /* Canvas + flow */
-  .canvas {
-    overflow: auto;
-    min-height: 600px;
-    display: flex;
-    flex-direction: column;
-  }
-  .flow {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0;
-    padding: 1.5rem 0.5rem;
-    flex: 1;
-  }
-  .node {
-    border: 1.5px solid var(--border);
-    background: var(--panel);
-    color: var(--text);
-    border-radius: 16px;
-    padding: 1rem 1.2rem;
-    width: 280px;
-    max-width: 90%;
-    min-height: 64px;
-    cursor: pointer;
-    font: inherit;
-    text-align: center;
-    flex: none;
-    transition:
-      border-color 0.12s,
-      box-shadow 0.12s,
-      transform 0.12s;
-  }
-  .node:hover {
-    transform: translateY(-1px);
-  }
-  .node:hover {
-    border-color: var(--accent);
-  }
-  .node.sel {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
-  }
-  .node.trigger,
-  .node.emit {
-    background: color-mix(in srgb, var(--accent) 14%, var(--panel));
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-  }
-  .node.hot {
-    border-color: var(--ok);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--ok) 40%, transparent);
-  }
-  .node-icon {
-    color: var(--accent);
-    margin-bottom: 0.2rem;
-  }
-  .node-idx {
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    background: var(--accent);
-    color: #fff;
-    display: grid;
-    place-items: center;
-    font-size: 0.75rem;
-    font-weight: 600;
-    margin-bottom: 0.35rem;
-  }
-  .node-title {
-    font-weight: 600;
-    font-size: 0.85rem;
-  }
-  .node-sub {
-    color: var(--muted);
-    font-size: 0.72rem;
-    margin-top: 0.2rem;
-  }
-  .wire {
-    width: 2px;
-    height: 34px;
-    background: linear-gradient(var(--border), var(--accent), var(--border));
-    flex: none;
-  }
-  .chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.3rem;
-    margin-top: 0.4rem;
-    max-width: 150px;
-  }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 20px;
-    padding: 0.12rem 0.45rem;
-    font-size: 0.7rem;
-  }
-  .chip .x {
-    cursor: pointer;
-    color: var(--muted);
-    font-size: 0.85rem;
-    line-height: 1;
-  }
-  .chip .x:hover {
-    color: var(--err);
-  }
-
-  .actions-bar {
-    display: flex;
-    align-items: center;
-    gap: 0.9rem;
-    margin-top: 0.4rem;
-    flex-wrap: wrap;
-  }
-  .primary {
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: #fff;
-    border-radius: 9px;
-    padding: 0.55rem 1.1rem;
-    cursor: pointer;
-    font: inherit;
-    font-weight: 600;
-  }
-  .ok {
-    color: var(--ok);
-  }
-  .err {
-    color: var(--err);
-  }
-
-  /* Editor */
-  .editor label {
-    margin-bottom: 0.5rem;
-  }
-  .preview {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.6rem;
-    font-family: ui-monospace, monospace;
-    font-size: 0.72rem;
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 360px;
-    overflow: auto;
-  }
-  .small {
-    font-size: 0.75rem;
-  }
-  @media (max-width: 1000px) {
-    .stage {
-      grid-template-columns: 1fr;
-    }
-  }
+  .workspace { display: grid; grid-template-columns: 1fr 320px; gap: 1rem; align-items: stretch; }
+  .flowwrap { height: 70vh; min-height: 520px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--bg); }
+  .inspector { display: flex; flex-direction: column; }
+  .inspector h3 { margin: 0 0 0.6rem; }
+  .blk { display: block; }
+  .blk textarea { font-family: ui-monospace, monospace; font-size: 0.82rem; }
+  .palette { margin-top: 0.8rem; }
+  .chips { display: flex; gap: 0.3rem; flex-wrap: wrap; margin-top: 0.3rem; }
+  .add { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 7px; padding: 0.2rem 0.5rem; cursor: pointer; font: inherit; font-size: 0.75rem; }
+  .add:disabled { opacity: 0.4; cursor: default; }
+  .chosen { display: flex; gap: 0.35rem; flex-wrap: wrap; margin-top: 0.5rem; }
+  .chip { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); border-radius: 20px; padding: 0.1rem 0.5rem; font-size: 0.78rem; }
+  .chip .x { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 0.9rem; padding: 0; }
+  .create { margin-top: auto; background: var(--accent); border: 1px solid var(--accent); color: #04231a; font-weight: 600; border-radius: 8px; padding: 0.6rem; cursor: pointer; font: inherit; }
+  .small { font-size: 0.78rem; }
+  :global(.svelte-flow__attribution) { display: none; }
 </style>
