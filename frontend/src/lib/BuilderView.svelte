@@ -428,7 +428,7 @@
       <label class="blk">{$t("builder.goals")}<input bind:value={goals} /></label>
     {:else if selNode}
       {@const kind = selNode.data.kind}
-      <div class="phead"><h3>{selNode.data.glyph} {selNode.data.label}</h3><button class="del" onclick={() => removeNode(selNode.id)}>🗑</button></div>
+      <div class="phead"><h3>{#if isImg(selNode.data.glyph)}<img class="hicon" src={selNode.data.glyph} alt="" />{:else}{selNode.data.glyph}{/if} {selNode.data.label}</h3><button class="del" onclick={() => removeNode(selNode.id)}>🗑</button></div>
       {#if kind === "step"}
         <label class="blk">{$t("builder.systemPrompt")}<textarea rows="6" bind:value={prompts[selected]} placeholder={$t("builder.promptPlaceholder")}></textarea></label>
       {:else if kind === "tool"}
@@ -495,6 +495,7 @@
   hr { border: none; border-top: 1px solid var(--border); margin: 0.8rem 0; }
   .iconrow { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.4rem; }
   .bigicon { font-size: 2rem; }
+  .hicon { width: 24px; height: 24px; border-radius: 6px; object-fit: cover; vertical-align: middle; }
   .upl { font-size: 0.78rem; color: var(--muted); cursor: pointer; }
   .upl input { display: block; margin-top: 0.2rem; font-size: 0.72rem; }
   .iconpick { display: flex; gap: 0.25rem; flex-wrap: wrap; margin-bottom: 0.5rem; }

@@ -9,12 +9,17 @@
     sub?: string;
     status?: "running" | "done" | "pending";
   };
+
+  // A glyph can be an emoji/text OR an uploaded image (data: URL or http URL).
+  $: isImage = !!data.glyph && /^(data:|https?:|\/)/.test(data.glyph);
 </script>
 
 <div class="snode {data.kind} {data.status ?? ''}">
   {#if data.kind !== "trigger"}<Handle type="target" position={Position.Top} />{/if}
   <div class="top">
-    {#if data.glyph}<span class="glyph">{data.glyph}</span>{/if}
+    {#if data.glyph}
+      {#if isImage}<img class="glyph-img" src={data.glyph} alt="" />{:else}<span class="glyph">{data.glyph}</span>{/if}
+    {/if}
     <span class="title">{data.label}</span>
   </div>
   {#if data.sub}<div class="sub">{data.sub}</div>{/if}
@@ -36,6 +41,7 @@
   @keyframes pulse { 50% { opacity: 0.6; } }
   .top { display: flex; align-items: center; gap: 0.45rem; }
   .glyph { font-size: 1.1rem; }
+  .glyph-img { width: 22px; height: 22px; border-radius: 6px; object-fit: cover; flex: 0 0 auto; }
   .title { font-weight: 600; font-size: 0.88rem; }
   .sub { color: var(--muted); font-size: 0.74rem; margin-top: 0.25rem; }
 </style>
