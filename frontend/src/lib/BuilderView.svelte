@@ -176,7 +176,7 @@
   let lastId = $state("restitution");
 
   function newAgent() {
-    editingId = null;
+    editingId = null; agentVisible = false;
     name = "Nouvel agent"; icon = "🐙"; description = ""; author = "You"; expertise = "";
     autonomy = "full_auto"; triggerOn = ""; emit = ""; loopMinutes = defaultLoopMin(); goals = ""; checks = "";
     prompts = {}; params = { "trigger-0": { event: "manual" } }; counter = 0; lastId = "restitution";
@@ -391,6 +391,7 @@
     const d = await api.getAgent(id);
     newAgent();
     editingId = d.agent.id;
+    agentVisible = (d.agent as any).visibility === "public";
     localStorage.setItem("takoia.lastAgent", id);
     name = d.agent.name; icon = d.agent.icon || ""; description = d.agent.description ?? "";
     author = d.agent.author ?? ""; expertise = d.agent.expertise_domain ?? "";
@@ -581,52 +582,19 @@
   let paletteOpen = $state(true);
   let inspectorOpen = $state(true);
   let modalOpen = $state(false);
-  // Fleet view: display 1..n agents' graphs read-only on the canvas.
-  let fleetAgents = $state<string[]>([]);
-  let fleetNodes = $state.raw<Node[]>([]);
-  let fleetEdges = $state.raw<Edge[]>([]);
 
-  function collectFleetToolKeys(steps: any[]): string[] {
-    const keys: string[] = [];
-    for (const sc of steps) {
-      let opt: any = {}; try { opt = JSON.parse(sc.options || "{}"); } catch { /* */ }
-      if (Array.isArray(opt.allowed_tools)) for (const k of opt.allowed_tools) if (!keys.includes(k)) keys.push(k);
-    }
-    return keys;
+  // Marketplace visibility of the agent currently being edited (public = visible).
+  let agentVisible = $state(false);
+  async function toggleAgentVisible() {
+    if (!editingId) return;
+    const next = agentVisible ? "private" : "public";
+    try {
+      await api.publishAgent(editingId, next);
+      agentVisible = !agentVisible;
+      toast(agentVisible ? "Agent visible (public)" : "Agent privé", "success");
+      await refreshAgents();
+    } catch (e) { toast(e instanceof Error ? e.message : String(e), "error"); }
   }
-  async function composeFleet() {
-    if (!fleetAgents.length) { fleetNodes = []; fleetEdges = []; return; }
-    const defs = await Promise.all(fleetAgents.map((id) => api.getAgent(id).catch(() => null)));
-    const ns: Node[] = []; const es: Edge[] = [];
-    defs.filter(Boolean).forEach((d: any, col) => {
-      const x = col * 300;
-      const aid = d.agent.id;
-      const agId = `f:${aid}:agent`;
-      ns.push({ id: agId, type: "block", position: { x, y: 0 }, data: { label: d.agent.name, kind: "trigger", glyph: d.agent.icon || "🐙", sub: "agent", root: true } } as Node);
-      let prev = agId; let row = 1;
-      for (const sc of d.steps) {
-        if (!(sc.system_prompt || "").trim()) continue;
-        const b = ALL_BLOCKS[sc.step_type];
-        const nid = `f:${aid}:s:${row}`;
-        ns.push({ id: nid, type: "block", position: { x, y: row * 110 }, data: { label: b?.label ?? sc.step_type, kind: "step", glyph: b?.glyph ?? "•" } } as Node);
-        es.push({ id: `fe:${nid}`, source: prev, target: nid, animated: true }); prev = nid; row++;
-      }
-      for (const tk of collectFleetToolKeys(d.steps)) {
-        const b = ALL_BLOCKS[tk]; if (!b) continue;
-        const nid = `f:${aid}:t:${row}`;
-        ns.push({ id: nid, type: "block", position: { x, y: row * 110 }, data: { label: b.label, kind: "tool", glyph: b.glyph } } as Node);
-        es.push({ id: `fe:${nid}`, source: prev, target: nid }); prev = nid; row++;
-      }
-    });
-    fleetNodes = ns; fleetEdges = es;
-  }
-  let fleetMenuOpen = $state(false);
-  function toggleFleetAgent(id: string) {
-    fleetAgents = fleetAgents.includes(id) ? fleetAgents.filter((x) => x !== id) : [...fleetAgents, id];
-    composeFleet();
-  }
-  function fleetAll() { fleetAgents = agentList.map((a) => a.id); composeFleet(); }
-  function exitFleet() { fleetAgents = []; fleetNodes = []; fleetEdges = []; }
   function onIconFile(e: Event) {
     const f = (e.target as HTMLInputElement).files?.[0];
     if (!f) return;
@@ -709,37 +677,13 @@
   <section class="center">
     <div class="topbar card">
       <button class="ptoggle" onclick={() => (picking = true)} title={$t("builder.myAgents")}>☰</button>
-      {#if fleetNodes.length}
-        <span class="aname">👥 {fleetAgents.length} {$t("builder.fleetView")}</span>
-        <button class="ptoggle" onclick={exitFleet} title={$t("builder.fleetExit")}>✕</button>
-      {:else}
-        <span class="aname">{name}</span>
+      <span class="aname">{name}</span>
+      {#if editingId}
+        <label class="visck" title={$t("builder.visibleHint")}>
+          <input type="checkbox" checked={agentVisible} onchange={toggleAgentVisible} />
+          {$t("builder.visible")}
+        </label>
       {/if}
-      <div class="fleetwrap">
-        <button class="fleetbtn" class:on={fleetMenuOpen || fleetAgents.length} onclick={() => (fleetMenuOpen = !fleetMenuOpen)} title={$t("builder.fleetPick")}>
-          👥 {$t("builder.fleetSelect")}{#if fleetAgents.length} · {fleetAgents.length}{/if} ▾
-        </button>
-        {#if fleetMenuOpen}
-          <div class="fleetback" onclick={() => (fleetMenuOpen = false)} role="presentation"></div>
-          <div class="fleetmenu">
-            <div class="fleethead">
-              <strong>{$t("builder.fleetPick")}</strong>
-              <span>
-                <button class="lnk" onclick={fleetAll}>{$t("builder.fleetAll")}</button>
-                <button class="lnk" onclick={exitFleet}>{$t("builder.fleetNone")}</button>
-              </span>
-            </div>
-            {#each agentList as a}
-              <label class="fleetitem">
-                <input type="checkbox" checked={fleetAgents.includes(a.id)} onchange={() => toggleFleetAgent(a.id)} />
-                <span class="fav">{#if isImg(agentEmoji(a))}<img class="favimg" src={agentEmoji(a)} alt="" />{:else}{agentEmoji(a)}{/if}</span>
-                <span class="fnm">{a.name || a.id}</span>
-              </label>
-            {/each}
-            {#if agentList.length === 0}<p class="hint">{$t("agents.empty")}</p>{/if}
-          </div>
-        {/if}
-      </div>
       <div class="runctl">
         {#if busy || runStatus === "queued" || runStatus === "running"}<span class="spinner"></span>{/if}
         {#if runStatus}<span class="badge {runStatus}">{runStatus}</span>{/if}
@@ -749,15 +693,6 @@
         <button class="save" onclick={() => save()}>{$t("builder.save")}</button>
       </div>
     </div>
-    {#if fleetNodes.length}
-      <div class="flowwrap card">
-        <SvelteFlow bind:nodes={fleetNodes} bind:edges={fleetEdges} {nodeTypes} fitView nodesDraggable={false} elementsSelectable={false}>
-          <Background gap={22} />
-          <Controls />
-          <MiniMap pannable zoomable />
-        </SvelteFlow>
-      </div>
-    {:else}
     <div class="flowwrap card" bind:this={flowEl} ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; }} ondrop={onDrop}>
       <SvelteFlow bind:nodes bind:edges bind:viewport {nodeTypes} fitView onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu} onedgecontextmenu={onEdgeContextMenu} onpanecontextmenu={onPaneContextMenu} onconnect={onConnect}>
         <Background gap={22} />
@@ -765,7 +700,6 @@
         <MiniMap pannable zoomable />
       </SvelteFlow>
     </div>
-    {/if}
     <!-- Per-agent execution log panel (collapsible, like the toolbox/inspector) -->
     <div class="logpanel card" class:open={logsOpen}>
       <button class="logbar" onclick={() => (logsOpen = !logsOpen)}>
@@ -929,7 +863,9 @@
   .center { display: flex; flex-direction: column; gap: 0.6rem; min-width: 0; }
   .topbar { display: flex; align-items: center; gap: 0.6rem; padding: 0.45rem 0.7rem; }
   .ptoggle { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.3rem 0.5rem; cursor: pointer; }
-  .aname { font-weight: 600; flex: 1; }
+  .aname { font-weight: 600; }
+  .visck { display: inline-flex; align-items: center; gap: 0.35rem; flex: 1; font-size: 0.8rem; color: var(--muted); cursor: pointer; }
+  .visck input { cursor: pointer; }
   .fleetwrap { position: relative; flex: 0 0 auto; }
   .fleetbtn { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.35rem 0.6rem; cursor: pointer; font: inherit; font-size: 0.82rem; white-space: nowrap; }
   .fleetbtn:hover, .fleetbtn.on { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 14%, var(--bg)); }

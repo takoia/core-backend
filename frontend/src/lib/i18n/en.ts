@@ -295,6 +295,8 @@ export const en: Record<string, string> = {
   "builder.checksPlaceholder": "what to verify before finishing",
   "builder.promptPlaceholder": "instructions for this step…",
   "builder.myAgents": "My agents",
+  "builder.visible": "Visible",
+  "builder.visibleHint": "Make the agent public (visible and callable in the marketplace).",
   "builder.execLogs": "Execution logs",
   "builder.execLogsEmpty": "No logs yet — run the agent with ▶ Start.",
   "builder.fleetView": "agents shown",
