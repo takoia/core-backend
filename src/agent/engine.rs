@@ -152,12 +152,19 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob) -> Result<RunOutcome> {
     }
     if allowed.iter().any(|t| t == "web_search") {
         let provider = registry.resolve(ctx.provider_for(StepType::Action).as_deref());
-        bus.publish(JobEvent::log(&job.id, "running tool: web_search"));
-        let search = match tools::execute(&provider, "web_search", &objective.prompt).await {
+        // Restrict to a specific site when the web_search tool has a `site` param.
+        let site = params.get("site").and_then(|v| v.as_str()).unwrap_or("");
+        let query = if site.trim().is_empty() {
+            objective.prompt.clone()
+        } else {
+            format!("{} site:{}", objective.prompt, site.trim())
+        };
+        bus.publish(JobEvent::log(&job.id, format!("running tool: web_search{}", if site.is_empty() { String::new() } else { format!(" ({site})") })));
+        let search = match tools::execute(&provider, "web_search", &query).await {
             Ok(out) => out,
             Err(e) => {
                 tracing::warn!(error = %e, "web_search failed, using canned fallback");
-                tools::execute(&registry.canned(), "web_search", &objective.prompt).await?
+                tools::execute(&registry.canned(), "web_search", &query).await?
             }
         };
         ctx.record_usage(&provider.name(), "web_search", search.usage).await;

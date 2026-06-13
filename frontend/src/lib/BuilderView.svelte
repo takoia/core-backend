@@ -40,14 +40,28 @@
     PALETTE.flatMap((g) => g.items).map((b) => [b.key, b]),
   );
   const PARAM_KEYS: Record<string, string[]> = {
+    web_search: ["site"],
     market_data: ["symbol"],
     send_discord: ["discord_webhook"],
-    send_email: ["recipient"],
-    write_calendar: ["calendar_url"],
+    send_email: ["recipient", "subject"],
+    write_file: ["filename"],
+    write_calendar: ["calendar_url", "title"],
+    analyse_video: ["source_url"],
+    analyse_image: ["source_url"],
+    analyse_sound: ["source_url"],
+    analyse_text: ["source_url"],
   };
   const PARAM_PH: Record<string, string> = {
+    site: "ex. windguru.com (laisser vide = tout le web)",
     symbol: "^IXIC, AAPL, NVDA…", discord_webhook: "https://discord.com/api/webhooks/…",
-    recipient: "name@example.com", calendar_url: "ICS / CalDAV URL",
+    recipient: "name@example.com", subject: "Objet de l'email",
+    filename: "rapport.md", calendar_url: "ICS / CalDAV URL", title: "Titre de l'événement",
+    source_url: "URL du média (ou laisser vide)",
+  };
+  const PARAM_LABEL: Record<string, string> = {
+    site: "Site web", symbol: "Symbole", discord_webhook: "URL Webhook", recipient: "Destinataire",
+    subject: "Objet", filename: "Nom du fichier", calendar_url: "URL calendrier", title: "Titre",
+    source_url: "URL source",
   };
 
   // ── Agent state ────────────────────────────────────────────────────────────
@@ -420,7 +434,7 @@
       {:else if kind === "tool"}
         <p class="hint">Outil exécuté à l'étape Action.</p>
         {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
-          <label class="blk">{pk}<input value={params[selected]?.[pk] ?? ""}
+          <label class="blk">{PARAM_LABEL[pk] ?? pk}<input value={params[selected]?.[pk] ?? ""}
             oninput={(e) => params = { ...params, [selected]: { ...(params[selected]||{}), [pk]: (e.target as HTMLInputElement).value } }}
             placeholder={PARAM_PH[pk] ?? ""} /></label>
         {/each}
