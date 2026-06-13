@@ -454,10 +454,12 @@
     });
     fleetNodes = ns; fleetEdges = es;
   }
-  function onFleetPick(e: Event) {
-    fleetAgents = Array.from((e.target as HTMLSelectElement).selectedOptions).map((o) => o.value);
+  let fleetMenuOpen = $state(false);
+  function toggleFleetAgent(id: string) {
+    fleetAgents = fleetAgents.includes(id) ? fleetAgents.filter((x) => x !== id) : [...fleetAgents, id];
     composeFleet();
   }
+  function fleetAll() { fleetAgents = agentList.map((a) => a.id); composeFleet(); }
   function exitFleet() { fleetAgents = []; fleetNodes = []; fleetEdges = []; }
   function onIconFile(e: Event) {
     const f = (e.target as HTMLInputElement).files?.[0];
@@ -509,9 +511,31 @@
       {:else}
         <span class="aname">{name}</span>
       {/if}
-      <select multiple class="fleetsel" onchange={onFleetPick} title={$t("builder.fleetPick")}>
-        {#each agentList as a}<option value={a.id} selected={fleetAgents.includes(a.id)}>{a.name}</option>{/each}
-      </select>
+      <div class="fleetwrap">
+        <button class="fleetbtn" class:on={fleetMenuOpen || fleetAgents.length} onclick={() => (fleetMenuOpen = !fleetMenuOpen)} title={$t("builder.fleetPick")}>
+          👥 {$t("builder.fleetSelect")}{#if fleetAgents.length} · {fleetAgents.length}{/if} ▾
+        </button>
+        {#if fleetMenuOpen}
+          <div class="fleetback" onclick={() => (fleetMenuOpen = false)} role="presentation"></div>
+          <div class="fleetmenu">
+            <div class="fleethead">
+              <strong>{$t("builder.fleetPick")}</strong>
+              <span>
+                <button class="lnk" onclick={fleetAll}>{$t("builder.fleetAll")}</button>
+                <button class="lnk" onclick={exitFleet}>{$t("builder.fleetNone")}</button>
+              </span>
+            </div>
+            {#each agentList as a}
+              <label class="fleetitem">
+                <input type="checkbox" checked={fleetAgents.includes(a.id)} onchange={() => toggleFleetAgent(a.id)} />
+                <span class="av">{#if isImg(agentEmoji(a))}<img class="avimg" src={agentEmoji(a)} alt="" />{:else}{agentEmoji(a)}{/if}</span>
+                <span class="anm">{a.name}</span>
+              </label>
+            {/each}
+            {#if agentList.length === 0}<p class="hint">{$t("agents.empty")}</p>{/if}
+          </div>
+        {/if}
+      </div>
       <div class="runctl">
         {#if busy || runStatus === "queued" || runStatus === "running"}<span class="spinner"></span>{/if}
         {#if runStatus}<span class="badge {runStatus}">{runStatus}</span>{/if}
@@ -682,9 +706,17 @@
   .center { display: flex; flex-direction: column; gap: 0.6rem; min-width: 0; }
   .topbar { display: flex; align-items: center; gap: 0.6rem; padding: 0.45rem 0.7rem; }
   .ptoggle { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.3rem 0.5rem; cursor: pointer; }
-  .aname { font-weight: 600; }
-  .fleetsel { flex: 1; min-width: 120px; max-width: 280px; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.2rem 0.4rem; font: inherit; font-size: 0.78rem; height: 30px; }
-  .fleetsel:focus { height: auto; max-height: 120px; }
+  .aname { font-weight: 600; flex: 1; }
+  .fleetwrap { position: relative; flex: 0 0 auto; }
+  .fleetbtn { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.35rem 0.6rem; cursor: pointer; font: inherit; font-size: 0.82rem; white-space: nowrap; }
+  .fleetbtn:hover, .fleetbtn.on { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 14%, var(--bg)); }
+  .fleetback { position: fixed; inset: 0; z-index: 40; }
+  .fleetmenu { position: absolute; top: 38px; left: 0; z-index: 41; width: 260px; max-height: 340px; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 0.5rem; box-shadow: 0 12px 40px rgba(0,0,0,0.5); }
+  .fleethead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; font-size: 0.82rem; }
+  .fleethead .lnk { background: none; border: none; color: var(--accent); cursor: pointer; font: inherit; font-size: 0.76rem; padding: 0 0.2rem; }
+  .fleetitem { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.4rem; border-radius: 8px; cursor: pointer; font-size: 0.84rem; }
+  .fleetitem:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .fleetitem input { cursor: pointer; }
   .runctl { display: flex; align-items: center; gap: 0.4rem; }
   .runctl button { border-radius: 8px; padding: 0.4rem 0.7rem; cursor: pointer; font: inherit; font-size: 0.82rem; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
   .start { background: var(--ok) !important; border-color: var(--ok) !important; color: #04231a !important; font-weight: 600; }
