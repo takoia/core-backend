@@ -7,8 +7,14 @@
   export let connectors: Connector[] = [];
   export let onChanged: () => void = () => {};
 
-  type Tab = "appearance" | "providers" | "integrations" | "expert" | "account";
+  type Tab = "appearance" | "agents" | "providers" | "integrations" | "expert" | "account";
   let tab: Tab = "appearance";
+
+  // Agents: default loop interval (minutes) for newly built agents.
+  let defaultLoopMin = parseInt(localStorage.getItem("takoia.defaultLoopMin") ?? "5", 10) || 5;
+  function saveAgentDefaults() {
+    localStorage.setItem("takoia.defaultLoopMin", String(defaultLoopMin > 0 ? defaultLoopMin : 5));
+  }
 
   // Provider form
   let name = "";
@@ -73,6 +79,7 @@ allowed_tools = ["web_search"]
 
 <div class="tabs">
   <button class:active={tab === "appearance"} on:click={() => (tab = "appearance")}>{$t("settings.tab.appearance")}</button>
+  <button class:active={tab === "agents"} on:click={() => (tab = "agents")}>{$t("settings.tab.agents")}</button>
   <button class:active={tab === "providers"} on:click={() => (tab = "providers")}>{$t("settings.tab.providers")}</button>
   <button class:active={tab === "integrations"} on:click={() => (tab = "integrations")}>{$t("settings.tab.integrations")}</button>
   <button class:active={tab === "expert"} on:click={() => (tab = "expert")}>{$t("settings.tab.expert")}</button>
@@ -94,6 +101,17 @@ allowed_tools = ["web_search"]
           {th.name}
         </button>
       {/each}
+    </div>
+  </div>
+
+{:else if tab === "agents"}
+  <div class="card">
+    <h2>{$t("settings.agents.title")}</h2>
+    <p class="muted small">{$t("settings.agents.hint")}</p>
+    <div class="form">
+      <label>{$t("settings.agents.loopDefault")}
+        <input type="number" min="1" bind:value={defaultLoopMin} on:change={saveAgentDefaults} on:blur={saveAgentDefaults} />
+      </label>
     </div>
   </div>
 

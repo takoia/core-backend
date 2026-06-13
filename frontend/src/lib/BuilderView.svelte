@@ -55,7 +55,7 @@
   );
   const PARAM_KEYS: Record<string, string[]> = {
     trigger_manual: ["event"], trigger_email: ["event"], trigger_webhook: ["event"],
-    trigger_ftp: ["event"], trigger_schedule: ["event"],
+    trigger_ftp: ["event"], trigger_schedule: ["interval_min"],
     web_search: ["site"],
     market_data: ["symbol"],
     send_discord: ["discord_webhook"],
@@ -69,6 +69,7 @@
   };
   const PARAM_PH: Record<string, string> = {
     event: "ex. email.received, webhook.received, schedule",
+    interval_min: "ex. 60 → relance toutes les 60 min",
     site: "ex. windguru.com (laisser vide = tout le web)",
     symbol: "^IXIC, AAPL, NVDA…", discord_webhook: "https://discord.com/api/webhooks/…",
     recipient: "name@example.com", subject: "Objet de l'email",
@@ -77,6 +78,7 @@
   };
   const PARAM_LABEL: Record<string, string> = {
     event: "Événement déclencheur",
+    interval_min: "Relancer toutes les (min)",
     site: "Site web", symbol: "Symbole", discord_webhook: "URL Webhook", recipient: "Destinataire",
     subject: "Objet", filename: "Nom du fichier", calendar_url: "URL calendrier", title: "Titre",
     source_url: "URL source",
@@ -92,7 +94,9 @@
   let autonomy = $state<"full_auto" | "confirm_before_action">("full_auto");
   let triggerOn = $state("");
   let emit = $state("");
-  let loopMinutes = $state(0);
+  // Default loop interval (minutes) for new agents — adjustable in Settings.
+  const defaultLoopMin = () => parseInt(localStorage.getItem("takoia.defaultLoopMin") ?? "5", 10) || 5;
+  let loopMinutes = $state(defaultLoopMin());
   let goals = $state("");
   let checks = $state("");
 
@@ -100,9 +104,9 @@
   let prompts = $state<Record<string, string>>({});
   let params = $state<Record<string, Record<string, string>>>({ "trigger-0": { event: "manual" } });
 
-  let selected = $state<string | null>("agent");
+  let selected = $state<string>("agent");
   let busy = $state(false);
-  const isImg = (s: string) => /^(https?:|data:)/.test(s || "");
+  const isImg = (s: unknown) => typeof s === "string" && /^(https?:|data:)/.test(s);
 
   // ── Agent list ─────────────────────────────────────────────────────────────
   let agentList = $state<Agent[]>([]);
@@ -138,7 +142,7 @@
   function newAgent() {
     editingId = null;
     name = "Nouvel agent"; icon = "🐙"; description = ""; author = "You"; expertise = "";
-    autonomy = "full_auto"; triggerOn = ""; emit = ""; loopMinutes = 0; goals = ""; checks = "";
+    autonomy = "full_auto"; triggerOn = ""; emit = ""; loopMinutes = defaultLoopMin(); goals = ""; checks = "";
     prompts = {}; params = { "trigger-0": { event: "manual" } }; counter = 0; lastId = "trigger-0";
     const g = freshGraph();
     nodes = g.nodes;
@@ -187,10 +191,9 @@
   function onNodeClick(e: any) {
     const id = e?.node?.id ?? e?.detail?.node?.id;
     if (!id) return;
+    // Left-click only selects: the properties show in the inspector panel.
+    // The modal is opened on demand via the right-click "Modify" menu.
     selected = id;
-    // The agent (trigger) node is edited in the inspector; every other node
-    // opens the properties modal so it works even with panels collapsed.
-    if (id !== "agent") modalOpen = true;
   }
 
   // Right-click context menu: on the canvas it adds a block (New); on a node
@@ -326,10 +329,14 @@
     try {
       const r = await api.importToml(buildToml());
       editingId = r.id;
-      if (loopMinutes > 0) {
+      // A scheduled trigger node's interval overrides the global loop field.
+      const schedNode = nodes.find((n) => blockKey(n.id) === "trigger_schedule");
+      const schedMin = schedNode ? parseInt(params[schedNode.id]?.interval_min ?? "", 10) : NaN;
+      const effLoopMin = Number.isFinite(schedMin) && schedMin > 0 ? schedMin : loopMinutes;
+      if (effLoopMin > 0) {
         const checkLine = checks.trim() ? `\n\nVérifie:\n${checks.trim()}` : "";
         await fetch("/api/schedules", { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ agent_id: r.id, title: `${name} loop`, prompt: (goals.trim() || `Run ${name}`) + checkLine, interval_seconds: loopMinutes * 60 }) });
+          body: JSON.stringify({ agent_id: r.id, title: `${name} loop`, prompt: (goals.trim() || `Run ${name}`) + checkLine, interval_seconds: effLoopMin * 60 }) });
       }
       toast($t("builder.created"), "success");
       await refreshAgents();
@@ -512,10 +519,11 @@
         <label class="blk">{$t("builder.triggerOn")}<input bind:value={triggerOn} placeholder="invoice.received / email.received / webhook.received" /></label>
       {/if}
       <label class="blk">{$t("builder.loopEvery")}<input type="number" min="0" bind:value={loopMinutes} /></label>
-      <label class="blk">{$t("builder.goals")}<input bind:value={goals} /></label>
+      <label class="blk">{$t("builder.goals")}<input bind:value={goals} placeholder={$t("builder.goalsPlaceholder")} /></label>
+      <p class="hint">{$t("builder.goalsHint")}</p>
     {:else if selNode}
       {@const kind = selNode.data.kind}
-      <div class="phead"><h3>{#if isImg(selNode.data.glyph)}<img class="hicon" src={selNode.data.glyph} alt="" />{:else}{selNode.data.glyph}{/if} {selNode.data.label}</h3><button class="del" onclick={() => removeNode(selNode.id)}>🗑</button></div>
+      <div class="phead"><h3>{#if isImg(selNode.data.glyph)}<img class="hicon" src={selNode.data.glyph as string} alt="" />{:else}{selNode.data.glyph}{/if} {selNode.data.label}</h3><button class="del" onclick={() => removeNode(selNode.id)}>🗑</button></div>
       {#if kind === "step"}
         <label class="blk">{$t("builder.systemPrompt")}<textarea rows="6" bind:value={prompts[selected]} placeholder={$t("builder.promptPlaceholder")}></textarea></label>
       {:else if kind === "tool"}
@@ -539,7 +547,7 @@
     <div class="overlay" onclick={() => (modalOpen = false)} role="presentation">
       <div class="nmodal" class:wide={isVideoTool} onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         <div class="nmhead">
-          <h3>{#if isImg(selNode.data.glyph)}<img class="hicon" src={selNode.data.glyph} alt="" />{:else}{selNode.data.glyph}{/if} {selNode.data.label}</h3>
+          <h3>{#if isImg(selNode.data.glyph)}<img class="hicon" src={selNode.data.glyph as string} alt="" />{:else}{selNode.data.glyph}{/if} {selNode.data.label}</h3>
           <button class="x" onclick={() => (modalOpen = false)} aria-label="close">×</button>
         </div>
         <div class="nmbody">

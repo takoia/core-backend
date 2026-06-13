@@ -14,6 +14,12 @@
   // Configurable analysis window (seconds), one frame per second.
   let durationSec = 30;
 
+  // Improvement source: screen/video frames, a single photo, or free text.
+  let mode: "video" | "photo" | "description" = "video";
+  let imageUrl: string | null = null;
+  let imageData = "";
+  let descText = "";
+
   // Improve-an-agent target.
   let agents: Agent[] = [];
   let targetAgent = "";
@@ -46,6 +52,37 @@
   function onFile(e: Event) {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (file) setVideo(file);
+  }
+
+  // Photo mode: read a single image and analyze it as one frame.
+  function onPhoto(e: Event) {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => { imageData = reader.result as string; imageUrl = imageData; items = []; };
+    reader.readAsDataURL(file);
+  }
+
+  async function analyzePhoto() {
+    if (!imageData) return;
+    busy = true; items = [];
+    try {
+      status = $t("video.analyzing", { n: 1 });
+      const r = await api.analyzeVideo([imageData], prompt || undefined);
+      items = r.items.map((it) => ({ ...it, ok: null }));
+      status = $t("video.done", { n: r.frame_count });
+    } catch (e) {
+      status = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Description mode: each non-empty line becomes a confirmable memory item.
+  function applyDescription() {
+    const lines = descText.split("\n").map((l) => l.trim()).filter(Boolean);
+    const src = lines.length ? lines : [descText.trim()].filter(Boolean);
+    items = src.map((l) => ({ info: l, detail: "", ok: true as boolean | null }));
   }
 
   async function startRecording() {
@@ -165,29 +202,58 @@
   <h2>{$t("video.title")} <span class="muted small">— {$t("video.subtitle")}</span></h2>
   <p class="muted small">{$t("video.hint")}</p>
 
-  <div class="sources">
-    {#if !recording}
-      <button class="rec" on:click={startRecording}>● {$t("video.record")}</button>
-    {:else}
-      <button class="stop" on:click={stopRecording}>■ {$t("video.stop")}</button>
-    {/if}
-    <span class="muted small">{$t("video.or")}</span>
-    <input type="file" accept="video/*" on:change={onFile} />
+  <div class="modes">
+    <button class:on={mode === "video"} on:click={() => (mode = "video")}>🎥 {$t("video.modeVideo")}</button>
+    <button class:on={mode === "photo"} on:click={() => (mode = "photo")}>🖼️ {$t("video.modePhoto")}</button>
+    <button class:on={mode === "description"} on:click={() => (mode = "description")}>📝 {$t("video.modeText")}</button>
   </div>
 
-  {#if videoUrl}
-    <video bind:this={videoEl} src={videoUrl} controls preload="auto" muted></video>
-    <div class="opts">
+  {#if mode === "video"}
+    <div class="sources">
+      {#if !recording}
+        <button class="rec" on:click={startRecording}>● {$t("video.record")}</button>
+      {:else}
+        <button class="stop" on:click={stopRecording}>■ {$t("video.stop")}</button>
+      {/if}
+      <span class="muted small">{$t("video.or")}</span>
+      <input type="file" accept="video/*" on:change={onFile} />
+    </div>
+
+    {#if videoUrl}
+      <video bind:this={videoEl} src={videoUrl} controls preload="auto" muted></video>
+      <div class="opts">
+        <label>{$t("video.prompt")}
+          <textarea rows="2" bind:value={prompt} placeholder={$t("video.promptPlaceholder")}></textarea>
+        </label>
+        <label class="dur">{$t("video.duration")}
+          <input type="number" min="5" max={MAX_FRAMES} bind:value={durationSec} />
+        </label>
+      </div>
+      <div class="row">
+        <button class="primary" on:click={analyze} disabled={busy}>{busy ? "…" : $t("video.analyze")}</button>
+        {#if status}<span class="muted small">{status}</span>{/if}
+      </div>
+    {/if}
+  {:else if mode === "photo"}
+    <div class="sources">
+      <input type="file" accept="image/*" on:change={onPhoto} />
+    </div>
+    {#if imageUrl}
+      <img class="photo" src={imageUrl} alt="" />
       <label>{$t("video.prompt")}
         <textarea rows="2" bind:value={prompt} placeholder={$t("video.promptPlaceholder")}></textarea>
       </label>
-      <label class="dur">{$t("video.duration")}
-        <input type="number" min="5" max={MAX_FRAMES} bind:value={durationSec} />
-      </label>
-    </div>
+      <div class="row">
+        <button class="primary" on:click={analyzePhoto} disabled={busy}>{busy ? "…" : $t("video.analyze")}</button>
+        {#if status}<span class="muted small">{status}</span>{/if}
+      </div>
+    {/if}
+  {:else}
+    <label>{$t("video.descLabel")}
+      <textarea rows="5" bind:value={descText} placeholder={$t("video.descPlaceholder")}></textarea>
+    </label>
     <div class="row">
-      <button class="primary" on:click={analyze} disabled={busy}>{busy ? "…" : $t("video.analyze")}</button>
-      {#if status}<span class="muted small">{status}</span>{/if}
+      <button class="primary" on:click={applyDescription} disabled={!descText.trim()}>{$t("video.useText")}</button>
     </div>
   {/if}
 </div>
@@ -228,6 +294,10 @@
 {/if}
 
 <style>
+  .modes { display: flex; gap: 0.4rem; margin: 0.8rem 0 0.2rem; flex-wrap: wrap; }
+  .modes button { background: var(--bg); border: 1px solid var(--border); color: var(--muted); border-radius: 8px; padding: 0.4rem 0.7rem; cursor: pointer; font: inherit; font-size: 0.84rem; }
+  .modes button.on { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); color: var(--text); }
+  .photo { max-width: 100%; max-height: 360px; border-radius: 10px; border: 1px solid var(--border); margin-top: 0.6rem; display: block; }
   .sources { display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap; margin: 0.8rem 0; }
   input[type="file"] { color: var(--muted); }
   .rec, .stop { border: 1px solid var(--err); background: color-mix(in srgb, var(--err) 18%, transparent); color: var(--err); border-radius: 8px; padding: 0.5rem 0.9rem; cursor: pointer; font: inherit; font-weight: 600; }
