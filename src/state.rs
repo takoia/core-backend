@@ -23,12 +23,13 @@ impl AppState {
     pub fn new(db: Db, config: Config) -> Self {
         let cipher = Cipher::new(config.master_key);
         let memory = Memory::new(db.clone(), config.icm_db_path.clone());
+        let events = EventBus::new(db.clone());
         Self {
             db,
             config: Arc::new(config),
             cipher,
             memory,
-            events: EventBus::new(),
+            events,
         }
     }
 

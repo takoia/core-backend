@@ -167,7 +167,7 @@
 </div>
 
 <style>
-  .canvas-page { position: fixed; inset: 56px 0 0 0; display: flex; flex-direction: column; background: #0b0e14; }
+  .canvas-page { position: fixed; inset: 76px 0 0 0; display: flex; flex-direction: column; background: var(--bg); }
   .bar { display: flex; justify-content: space-between; align-items: center; padding: 0.7rem 1.5rem; border-bottom: 1px solid var(--border); }
   select { background: #0b0e14; border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.4rem 0.6rem; font: inherit; }
   canvas { flex: 1; width: 100%; }

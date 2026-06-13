@@ -8,13 +8,15 @@
   import McpView from "./lib/McpView.svelte";
   import SkillsView from "./lib/SkillsView.svelte";
   import CanvasView from "./lib/CanvasView.svelte";
+  import BuilderView from "./lib/BuilderView.svelte";
+  import LogsView from "./lib/LogsView.svelte";
   import LoginView from "./lib/LoginView.svelte";
   import { t, locale, setLocale } from "./lib/i18n";
   import "./lib/theme"; // applies the persisted theme on load
   import logo from "./lib/assets/takoia.png";
   import Icon from "./lib/Icon.svelte";
 
-  type View = "run" | "agents" | "canvas" | "mcp" | "skills" | "settings" | "usage";
+  type View = "run" | "agents" | "builder" | "canvas" | "mcp" | "skills" | "logs" | "settings" | "usage";
   let view: View = "run";
   let healthy = false;
   let token: string | null = localStorage.getItem("auth_token");
@@ -75,9 +77,11 @@
       <nav>
         <button class:active={view === "run"} on:click={() => (view = "run")}><Icon name="run" />{$t("nav.run")}</button>
         <button class:active={view === "agents"} on:click={() => (view = "agents")}><Icon name="agents" />{$t("nav.agents")}</button>
+        <button class:active={view === "builder"} on:click={() => (view = "builder")}><Icon name="builder" />{$t("nav.builder")}</button>
         <button class:active={view === "canvas"} on:click={() => (view = "canvas")}><Icon name="canvas" />Canvas</button>
         <button class:active={view === "mcp"} on:click={() => (view = "mcp")}><Icon name="mcp" />{$t("nav.mcp")}</button>
         <button class:active={view === "skills"} on:click={() => (view = "skills")}><Icon name="skills" />{$t("nav.skills")}</button>
+        <button class:active={view === "logs"} on:click={() => (view = "logs")}><Icon name="logs" />{$t("nav.logs")}</button>
         <button class:active={view === "settings"} on:click={() => (view = "settings")}><Icon name="settings" />{$t("nav.settings")}</button>
         <button class:active={view === "usage"} on:click={() => (view = "usage")}><Icon name="usage" />{$t("nav.usage")}</button>
         <span class="sep"></span>
@@ -97,10 +101,14 @@
         <RunView {agents} />
       {:else if view === "agents"}
         <AgentsView {agents} onChanged={loadAgents} />
+      {:else if view === "builder"}
+        <BuilderView />
       {:else if view === "mcp"}
         <McpView />
       {:else if view === "skills"}
         <SkillsView />
+      {:else if view === "logs"}
+        <LogsView />
       {:else if view === "settings"}
         <SettingsView {connectors} onChanged={loadConnectors} />
       {:else if view === "usage"}
@@ -111,10 +119,10 @@
 {/if}
 
 <style>
-  header { border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 80%, transparent); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px); height: 56px; }
+  header { border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 80%, transparent); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px); height: 76px; }
   .nav { display: flex; align-items: center; justify-content: space-between; padding: 0.7rem 1.5rem; }
   .brand { display: flex; align-items: center; gap: 0.5rem; }
-  .brand .logo { width: 30px; height: 30px; border-radius: 50%; }
+  .brand .logo { width: 60px; height: 60px; border-radius: 50%; }
   .brand h1 { margin: 0; font-size: 1.2rem; }
   .brand .tag { color: var(--muted); font-size: 0.8rem; }
   nav { display: flex; align-items: center; gap: 0.35rem; }

@@ -6,7 +6,9 @@ mod approvals;
 mod auth;
 mod connectors;
 mod health;
+mod integrations;
 mod jobs;
+mod logs;
 mod marketplace;
 mod mcp;
 mod objectives;
@@ -72,6 +74,9 @@ pub fn router(state: AppState) -> Router {
         .route("/skills/github", get(skills::github))
         // Usage metering (billing basis)
         .route("/usage", get(usage::get))
+        // Audit logs + external integrations
+        .route("/logs", get(logs::list))
+        .route("/integrations/email/test", post(integrations::email_test))
         // Public marketplace
         .route("/marketplace", get(marketplace::list))
         .with_state(state);

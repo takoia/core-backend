@@ -79,6 +79,17 @@ export interface UsageTotal {
   calls: number;
 }
 
+export interface LogEntry {
+  id: string;
+  job_id: string;
+  kind: string;
+  step_type: string | null;
+  status: string | null;
+  message: string;
+  data: string | null;
+  created_at: string;
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
@@ -146,6 +157,28 @@ export const api = {
 
   usage: () =>
     req<{ totals: UsageTotal[]; estimated_total_usd: number }>("/api/usage"),
+
+  logs: (params: {
+    job_id?: string;
+    kind?: string;
+    q?: string;
+    limit?: number;
+    offset?: number;
+  } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return req<{ logs: LogEntry[]; total: number }>(`/api/logs${suffix}`);
+  },
+
+  testEmailIntegration: (to: string, subject?: string, body?: string) =>
+    req<{ ok: boolean; message: string }>("/api/integrations/email/test", {
+      method: "POST",
+      headers: jsonH,
+      body: JSON.stringify({ to, subject, body }),
+    }),
 
   mcpCatalog: () => req<{ servers: McpServer[] }>("/api/mcp/catalog").then((r) => r.servers),
   mcpInstalled: () =>

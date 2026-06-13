@@ -1,5 +1,6 @@
 //! Real-time job events broadcast to SSE subscribers (and later Discord).
 
+use crate::db::Db;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
@@ -30,30 +31,59 @@ pub struct JobEvent {
 }
 
 /// A cloneable broadcast bus. SSE handlers subscribe and filter by `job_id`.
+/// Every published event is also persisted to `event_log` for the audit trail.
 #[derive(Clone)]
 pub struct EventBus {
     tx: broadcast::Sender<JobEvent>,
+    db: Db,
 }
 
 impl EventBus {
-    pub fn new() -> Self {
+    pub fn new(db: Db) -> Self {
         let (tx, _rx) = broadcast::channel(1024);
-        Self { tx }
+        Self { tx, db }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<JobEvent> {
         self.tx.subscribe()
     }
 
-    /// Publish an event. Ignores the "no subscribers" case.
+    /// Publish an event: broadcast to live subscribers, then persist it to the
+    /// `event_log` audit trail in the background.
     pub fn publish(&self, event: JobEvent) {
-        let _ = self.tx.send(event);
+        let _ = self.tx.send(event.clone());
+        self.persist(event);
     }
-}
 
-impl Default for EventBus {
-    fn default() -> Self {
-        Self::new()
+    /// Insert the event into `event_log`. Spawned so persistence never blocks
+    /// the caller; failures are logged but do not affect the broadcast.
+    fn persist(&self, event: JobEvent) {
+        let db = self.db.clone();
+        tokio::spawn(async move {
+            let id = uuid::Uuid::new_v4().to_string();
+            // Serialize the kind enum to its snake_case wire string.
+            let kind = serde_json::to_value(event.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default();
+            let data = event.data.as_ref().map(|d| d.to_string());
+            let res = sqlx::query(
+                r#"INSERT INTO event_log (id, job_id, kind, step_type, status, message, data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+            )
+            .bind(&id)
+            .bind(&event.job_id)
+            .bind(&kind)
+            .bind(&event.step_type)
+            .bind(&event.status)
+            .bind(&event.message)
+            .bind(&data)
+            .execute(&db)
+            .await;
+            if let Err(e) = res {
+                tracing::warn!("failed to persist event to event_log: {e}");
+            }
+        });
     }
 }
 
