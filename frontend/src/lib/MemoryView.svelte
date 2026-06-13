@@ -3,6 +3,7 @@
   import { api } from "./api";
   import { t } from "./i18n";
   import Icon from "./Icon.svelte";
+  import MemoryGraph from "./MemoryGraph.svelte";
 
   let stats: Record<string, string> = {};
   let topics: { topic: string; count: number }[] = [];
@@ -53,6 +54,8 @@
     <div class="stat"><span class="n small">{stats.newest ?? "—"}</span><span class="l">{$t("memory.newest")}</span></div>
   </div>
 </div>
+
+<MemoryGraph />
 
 <div class="card">
   <h2>{$t("memory.topicsTitle")}</h2>

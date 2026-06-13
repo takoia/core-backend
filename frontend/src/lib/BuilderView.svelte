@@ -3,6 +3,7 @@
   import { SvelteFlow, Background, Controls, MiniMap, type Node, type Edge } from "@xyflow/svelte";
   import "@xyflow/svelte/dist/style.css";
   import StepNode from "./builder/StepNode.svelte";
+  import VideoView from "./VideoView.svelte";
   import { api, subscribeJob, type Agent } from "./api";
   import { t } from "./i18n";
   import { toast, confirmModal } from "./toast";
@@ -513,8 +514,9 @@
   <!-- Per-node properties modal (modify / remove on click) -->
   {#if modalOpen && selNode && selected !== "agent"}
     {@const mkind = selNode.data.kind}
+    {@const isVideoTool = mkind === "tool" && blockKey(selected) === "analyse_video"}
     <div class="overlay" onclick={() => (modalOpen = false)} role="presentation">
-      <div class="nmodal" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+      <div class="nmodal" class:wide={isVideoTool} onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         <div class="nmhead">
           <h3>{#if isImg(selNode.data.glyph)}<img class="hicon" src={selNode.data.glyph} alt="" />{:else}{selNode.data.glyph}{/if} {selNode.data.label}</h3>
           <button class="x" onclick={() => (modalOpen = false)} aria-label="close">×</button>
@@ -529,6 +531,9 @@
                 oninput={(e) => params = { ...params, [selected]: { ...(params[selected]||{}), [pk]: (e.target as HTMLInputElement).value } }}
                 placeholder={PARAM_PH[pk] ?? ""} /></label>
             {/each}
+          {:else if isVideoTool}
+            <p class="hint">Uploade ou enregistre une vidéo : elle est échantillonnée puis analysée par l'agent.</p>
+            <VideoView />
           {:else if mkind === "tool"}
             <p class="hint">Outil exécuté à l'étape Action.</p>
             {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
@@ -607,6 +612,8 @@
   /* Per-node properties modal */
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1100; display: flex; align-items: center; justify-content: center; }
   .nmodal { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; width: 380px; max-width: 92vw; box-shadow: 0 20px 60px rgba(0,0,0,0.5); overflow: hidden; }
+  .nmodal.wide { width: 760px; }
+  .nmodal.wide .nmbody { max-height: 72vh; overflow-y: auto; }
   .nmhead { display: flex; align-items: center; justify-content: space-between; padding: 0.8rem 1rem; border-bottom: 1px solid var(--border); }
   .nmhead h3 { margin: 0; font-size: 0.98rem; display: flex; align-items: center; gap: 0.4rem; }
   .nmhead .x { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1.3rem; line-height: 1; }
