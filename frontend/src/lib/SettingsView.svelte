@@ -3,6 +3,7 @@
   import { t } from "./i18n";
   import { THEMES, themeId, setTheme } from "./theme";
   import IntegrationsView from "./IntegrationsView.svelte";
+  import { loadDiscordHooks, saveDiscordHooks } from "./discordHooks";
 
   export let connectors: Connector[] = [];
   export let onChanged: () => void = () => {};
@@ -14,6 +15,21 @@
   let defaultLoopMin = parseInt(localStorage.getItem("takoia.defaultLoopMin") ?? "5", 10) || 5;
   function saveAgentDefaults() {
     localStorage.setItem("takoia.defaultLoopMin", String(defaultLoopMin > 0 ? defaultLoopMin : 5));
+  }
+
+  // Global named Discord webhooks (reusable by name in the builder).
+  let discordHooks = loadDiscordHooks();
+  let hookName = "";
+  let hookUrl = "";
+  function addHook() {
+    if (!hookName.trim() || !hookUrl.trim()) return;
+    discordHooks = [...discordHooks.filter((h) => h.name !== hookName.trim()), { name: hookName.trim(), url: hookUrl.trim() }];
+    saveDiscordHooks(discordHooks);
+    hookName = ""; hookUrl = "";
+  }
+  function removeHook(i: number) {
+    discordHooks = discordHooks.filter((_, idx) => idx !== i);
+    saveDiscordHooks(discordHooks);
   }
 
   // Provider form
@@ -112,6 +128,30 @@ allowed_tools = ["web_search"]
       <label>{$t("settings.agents.loopDefault")}
         <input type="number" min="1" bind:value={defaultLoopMin} on:change={saveAgentDefaults} on:blur={saveAgentDefaults} />
       </label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>{$t("settings.discord.title")}</h2>
+    <p class="muted small">{$t("settings.discord.hint")}</p>
+    {#if discordHooks.length}
+      <table>
+        <thead><tr><th>{$t("settings.discord.name")}</th><th>URL</th><th></th></tr></thead>
+        <tbody>
+          {#each discordHooks as h, i}
+            <tr>
+              <td><strong>{h.name}</strong></td>
+              <td class="small">…{h.url.slice(-18)}</td>
+              <td><button class="danger" on:click={() => removeHook(i)}>🗑</button></td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+    <div class="form">
+      <label>{$t("settings.discord.name")} <input bind:value={hookName} placeholder="ex. Équipe Trading" /></label>
+      <label>{$t("settings.discord.url")} <input bind:value={hookUrl} placeholder="https://discord.com/api/webhooks/…" /></label>
+      <button class="primary" on:click={addHook} disabled={!hookName.trim() || !hookUrl.trim()}>{$t("settings.discord.add")}</button>
     </div>
   </div>
 

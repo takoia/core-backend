@@ -22,6 +22,11 @@
   let offset = 0;
   let loading = false;
   let error = "";
+  let expanded: string | null = null;
+
+  function prettyData(d: string): string {
+    try { return JSON.stringify(JSON.parse(d), null, 2); } catch { return d; }
+  }
 
   $: page = Math.floor(offset / PAGE_SIZE) + 1;
   $: pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -121,13 +126,16 @@
     </thead>
     <tbody>
       {#each logs as l (l.id)}
-        <tr>
+        <tr class="logrow" class:has-detail={!!l.data} on:click={() => (expanded === l.id ? (expanded = null) : (expanded = l.id))}>
           <td class="mono nowrap">{fmtTime(l.created_at)}</td>
           <td><span class="badge">{l.kind}</span></td>
           <td class="muted">{l.step_type ?? "—"}</td>
           <td>{l.status ?? "—"}</td>
-          <td title={l.job_id}>{l.message}</td>
+          <td title={l.job_id}>{l.data ? (expanded === l.id ? "▾ " : "▸ ") : ""}{l.message}</td>
         </tr>
+        {#if expanded === l.id && l.data}
+          <tr class="detailrow"><td colspan="5"><pre>{prettyData(l.data)}</pre><div class="jobid">job: {l.job_id}</div></td></tr>
+        {/if}
       {/each}
       {#if logs.length === 0 && !loading}
         <tr><td colspan="5" class="muted">{$t("logs.empty")}</td></tr>
@@ -182,4 +190,9 @@
   .err { color: var(--err); font-size: 0.85rem; }
   .pager { display: flex; align-items: center; gap: 0.8rem; margin-top: 0.9rem; }
   .small { font-size: 0.78rem; }
+  .logrow.has-detail { cursor: pointer; }
+  .logrow.has-detail:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .detailrow td { background: var(--bg); }
+  .detailrow pre { margin: 0; padding: 0.6rem 0.8rem; font-family: ui-monospace, monospace; font-size: 0.74rem; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto; }
+  .detailrow .jobid { color: var(--muted); font-size: 0.7rem; padding: 0 0.8rem 0.5rem; }
 </style>

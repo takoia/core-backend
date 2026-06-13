@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from "svelte";
-  import { SvelteFlow, Background, Controls, MiniMap, type Node, type Edge } from "@xyflow/svelte";
+  import { SvelteFlow, Background, Controls, MiniMap, addEdge, type Node, type Edge, type Connection } from "@xyflow/svelte";
   import "@xyflow/svelte/dist/style.css";
   import StepNode from "./builder/StepNode.svelte";
   import VideoView from "./VideoView.svelte";
   import { api, subscribeJob, type Agent } from "./api";
+  import { loadDiscordHooks, discordUrlByName } from "./discordHooks";
   import { t } from "./i18n";
   import { toast, confirmModal } from "./toast";
 
@@ -43,6 +44,12 @@
       { key: "write_calendar", label: "Calendrier", glyph: "📅", kind: "tool" },
     ]},
   ];
+  // Control blocks expose multiple labeled output handles → distinct paths.
+  const BRANCHES: Record<string, { id: string; label: string }[]> = {
+    if: [{ id: "then", label: "Alors" }, { id: "else", label: "Sinon" }],
+    for: [{ id: "each", label: "Pour chaque" }, { id: "done", label: "Fin" }],
+    loop: [{ id: "body", label: "Répéter" }, { id: "done", label: "Fin" }],
+  };
   // Default event each trigger block emits as `[trigger] on = "..."`.
   const TRIGGER_EVENT: Record<string, string> = {
     trigger_manual: "manual", trigger_email: "email.received",
@@ -56,7 +63,7 @@
   const PARAM_KEYS: Record<string, string[]> = {
     trigger_manual: ["event"], trigger_email: ["event"], trigger_webhook: ["event"],
     trigger_ftp: ["event"], trigger_schedule: ["interval_min"],
-    if: ["condition", "then", "else"], for: ["each_of"], loop: ["repeat"],
+    if: ["condition"], for: ["each_of"], loop: ["repeat"],
     web_search: ["site"],
     market_data: ["symbol"],
     send_discord: ["discord_webhook"],
@@ -94,6 +101,8 @@
 
   // ── Agent state ────────────────────────────────────────────────────────────
   let editingId = $state<string | null>(null);
+  // Landing state: show the agent picker, not a blank new agent, on arrival.
+  let picking = $state(true);
   let name = $state("Nouvel agent");
   let icon = $state("🐙");
   let description = $state("");
@@ -156,6 +165,7 @@
     nodes = g.nodes;
     edges = g.edges;
     selected = "agent"; resetRun();
+    picking = false;
   }
 
   function addBlock(key: string, pos?: { x: number; y: number }) {
@@ -165,7 +175,9 @@
     const id = `${key}-${counter}`;
     const position = pos ?? { x: 0, y: 130 + counter * 120 };
     const node: Node = { id, type: "block", position, data: { label: b.label, kind: b.kind, glyph: b.glyph } };
-    const edge: Edge = { id: `e-${lastId}-${id}`, source: lastId, target: id, animated: true };
+    // Auto-edge from the previous node; if it branches, leave from its 1st path.
+    const srcBranch = BRANCHES[blockKey(lastId)]?.[0]?.id;
+    const edge: Edge = { id: `e-${lastId}-${id}`, source: lastId, target: id, animated: true, ...(srcBranch ? { sourceHandle: srcBranch } : {}) };
     nodes = [...nodes, node];
     edges = [...edges, edge];
     lastId = id;
@@ -177,6 +189,11 @@
       if (ev && ev !== "manual") triggerOn = ev;
     }
     return id;
+  }
+
+  // Let the user draw their own links between handles (e.g. then/else paths).
+  function onConnect(conn: Connection) {
+    edges = addEdge({ ...conn, animated: true }, edges);
   }
 
   function removeNode(id: string) {
@@ -257,6 +274,9 @@
   // field is hidden to avoid duplication.
   const hasTriggerNode = $derived(nodes.some((n) => n.data.kind === "trigger" && n.id !== "agent"));
   function blockKey(id: string): string { return id.replace(/-\d+$/, ""); }
+  function setParam(nodeId: string, pk: string, val: string) {
+    params = { ...params, [nodeId]: { ...(params[nodeId] || {}), [pk]: val } };
+  }
 
   // ── Build TOML from the graph ──────────────────────────────────────────────
   const slug = (s: string) => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "agent";
@@ -264,13 +284,26 @@
     const stepNodes = nodes.filter((n) => n.data.kind === "step");
     const toolNodes = nodes.filter((n) => n.data.kind === "tool");
     // Control blocks become natural-language rules the LLM agent must honor.
+    // Branch targets are read from the edges leaving each labeled handle.
+    const labelOf = (id: string) => nodes.find((nn) => nn.id === id)?.data?.label ?? id;
+    const branchTargets = (srcId: string, handle: string) =>
+      edges.filter((e) => e.source === srcId && (e as any).sourceHandle === handle).map((e) => labelOf(e.target));
     const rules = nodes
       .filter((n) => n.data.kind === "control")
       .map((n) => {
         const k = blockKey(n.id); const p = params[n.id] ?? {};
-        if (k === "if" && p.condition) return `If ${p.condition}, then ${p.then || "act accordingly"}${p.else ? `, otherwise ${p.else}` : ""}.`;
-        if (k === "for" && p.each_of) return `For each ${p.each_of}, repeat the steps.`;
-        if (k === "loop" && p.repeat) return `Repeat: ${p.repeat}.`;
+        if (k === "if" && p.condition) {
+          const th = branchTargets(n.id, "then"); const el = branchTargets(n.id, "else");
+          return `If ${p.condition}, then ${th.join(" and ") || "continue"}${el.length ? `, otherwise ${el.join(" and ")}` : ""}.`;
+        }
+        if (k === "for" && p.each_of) {
+          const each = branchTargets(n.id, "each");
+          return `For each ${p.each_of}, do ${each.join(" and ") || "the steps"}.`;
+        }
+        if (k === "loop" && p.repeat) {
+          const body = branchTargets(n.id, "body");
+          return `Repeat (${p.repeat}) ${body.join(" and ") || "the steps"}.`;
+        }
         return "";
       })
       .filter(Boolean);
@@ -388,6 +421,7 @@
   let runStatus = $state("");
   let stepStatus = $state<Record<string, string>>({});
   let runLogs = $state<string[]>([]);
+  let logsOpen = $state(true);
   let cleanup: (() => void) | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -414,7 +448,8 @@
         if (nid) stepStatus = { ...stepStatus, [nid]: k === "step_completed" ? "done" : "running" };
       }
       if (k === "job_status") runStatus = (ev.status as string) ?? runStatus;
-      if (ev.message) runLogs = [...runLogs, ev.message as string].slice(-40);
+      // Logs are rebuilt from polling (reliable through the proxy); SSE here
+      // only drives the live step animation above.
     });
     pollTimer = setInterval(pollRun, 2500); pollRun();
   }
@@ -427,6 +462,17 @@
       const ss: Record<string, string> = {};
       for (const s of d.steps) { const nid = stepNodeId(s.step_type); if (nid) ss[nid] = s.status === "done" ? "done" : "running"; }
       stepStatus = ss;
+      // Build a readable execution log from the steps (reliable via polling,
+      // independent of SSE which can be buffered behind a proxy).
+      const lines = [...d.steps]
+        .sort((a, b) => a.position - b.position)
+        .map((s) => {
+          const icon = s.status === "done" ? "✓" : s.status === "failed" ? "✗" : "⏳";
+          const out = (s.output || "").trim().replace(/\s+/g, " ").slice(0, 240);
+          return `${icon} ${s.step_type}${out ? ` — ${out}` : ` (${s.status})`}`;
+        });
+      if (d.report) lines.push(`📄 ${d.report.trim().slice(0, 600)}`);
+      if (lines.length) runLogs = lines;
       if (["done", "failed"].includes(d.job.status) && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     } catch { /* */ }
   }
@@ -509,6 +555,44 @@
   }
 </script>
 
+{#snippet paramField(pk: string)}
+  {#if pk === "discord_webhook" && loadDiscordHooks().length}
+    <label class="blk">{PARAM_LABEL[pk] ?? pk}
+      <select value={loadDiscordHooks().find((h) => h.url === params[selected]?.[pk])?.name ?? ""}
+        onchange={(e) => setParam(selected, pk, discordUrlByName((e.target as HTMLSelectElement).value))}>
+        <option value="">— Webhook —</option>
+        {#each loadDiscordHooks() as h}<option value={h.name}>{h.name}</option>{/each}
+      </select>
+    </label>
+  {:else}
+    <label class="blk">{PARAM_LABEL[pk] ?? pk}<input value={params[selected]?.[pk] ?? ""}
+      oninput={(e) => setParam(selected, pk, (e.target as HTMLInputElement).value)}
+      placeholder={PARAM_PH[pk] ?? ""} /></label>
+  {/if}
+{/snippet}
+
+{#if picking}
+  <div class="welcome">
+    <div class="welcome-card card">
+      <div class="wtop">
+        <h2>{$t("builder.myAgents")}</h2>
+        <button class="newbig" onclick={newAgent}>＋ {$t("builder.newAgent")}</button>
+      </div>
+      <div class="walist">
+        {#each agentList as a}
+          <div class="warow">
+            <button class="warow-main" onclick={() => loadAgent(a.id)}>
+              <span class="fav">{#if isImg(agentEmoji(a))}<img class="favimg" src={agentEmoji(a)} alt="" />{:else}{agentEmoji(a)}{/if}</span>
+              <span class="fnm">{a.name || a.id}</span>
+            </button>
+            <button class="del" onclick={(e) => deleteAgent(a.id, e)} title={$t("builder.delete")}>🗑</button>
+          </div>
+        {/each}
+        {#if agentList.length === 0}<p class="hint">{$t("agents.empty")}</p>{/if}
+      </div>
+    </div>
+  </div>
+{:else}
 <div class="dash" style="grid-template-columns: {paletteOpen ? '200px' : '36px'} 1fr {inspectorOpen ? '300px' : '36px'};">
   <!-- Palette (tools window) -->
   {#if paletteOpen}
@@ -533,7 +617,7 @@
   <!-- Canvas -->
   <section class="center">
     <div class="topbar card">
-      <button class="ptoggle" onclick={() => (agentsOpen = !agentsOpen)} title={$t("builder.myAgents")}>☰</button>
+      <button class="ptoggle" onclick={() => (picking = true)} title={$t("builder.myAgents")}>☰</button>
       {#if fleetAgents.length}
         <span class="aname">👥 {fleetAgents.length} {$t("builder.fleetView")}</span>
         <button class="ptoggle" onclick={exitFleet} title={$t("builder.fleetExit")}>✕</button>
@@ -583,16 +667,31 @@
       </div>
     {:else}
     <div class="flowwrap card" bind:this={flowEl} ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; }} ondrop={onDrop} oncontextmenu={onContextMenu}>
-      <SvelteFlow bind:nodes bind:edges bind:viewport {nodeTypes} fitView onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu}>
+      <SvelteFlow bind:nodes bind:edges bind:viewport {nodeTypes} fitView onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu} onconnect={onConnect}>
         <Background gap={22} />
         <Controls />
         <MiniMap pannable zoomable />
       </SvelteFlow>
     </div>
     {/if}
-    {#if runLogs.length}
-      <div class="logfeed card">{#each runLogs.slice(-5) as l}<div class="lf">▸ {l}</div>{/each}</div>
-    {/if}
+    <!-- Per-agent execution log panel (collapsible, like the toolbox/inspector) -->
+    <div class="logpanel card" class:open={logsOpen}>
+      <button class="logbar" onclick={() => (logsOpen = !logsOpen)}>
+        <span class="logchev">{logsOpen ? "▾" : "▸"}</span>
+        <strong>{$t("builder.execLogs")} — {name}</strong>
+        {#if busy || runStatus === "queued" || runStatus === "running"}<span class="spinner"></span>{/if}
+        {#if runStatus}<span class="badge {runStatus}">{runStatus}</span>{/if}
+        {#if runLogs.length}<span class="logcount">{runLogs.length}</span>{/if}
+        <span class="logspacer"></span>
+        {#if runLogs.length}<button class="lnk" onclick={(e) => { e.stopPropagation(); runLogs = []; }}>clear</button>{/if}
+      </button>
+      {#if logsOpen}
+        <div class="loglist">
+          {#each runLogs as l}<div class="lf">▸ {l}</div>{/each}
+          {#if !runLogs.length}<p class="hint">{$t("builder.execLogsEmpty")}</p>{/if}
+        </div>
+      {/if}
+    </div>
   </section>
 
   <!-- Inspector -->
@@ -601,23 +700,6 @@
   {:else}
   <aside class="inspector card">
     <div class="phead insp-top"><strong>{$t("builder.properties")}</strong><button class="collapse" onclick={() => (inspectorOpen = false)} title="Réduire">»</button></div>
-    {#if agentsOpen}
-      <div class="phead"><strong>{$t("builder.myAgents")}</strong><button class="new" onclick={newAgent}>＋</button></div>
-      <div class="alist">
-        {#each agentList as a}
-          <div class="arow" class:on={editingId === a.id}>
-            <button class="arow-main" onclick={() => loadAgent(a.id)}>
-              <span class="av">{#if isImg(agentEmoji(a))}<img class="avimg" src={agentEmoji(a)} alt="" />{:else}{agentEmoji(a)}{/if}</span>
-              <span class="anm">{a.name}</span>
-            </button>
-            <button class="del" onclick={(e) => deleteAgent(a.id, e)} title={$t("builder.delete")}>🗑</button>
-          </div>
-        {/each}
-        {#if agentList.length === 0}<p class="hint">{$t("agents.empty")}</p>{/if}
-      </div>
-      <hr />
-    {/if}
-
     {#if selected === "agent"}
       <h3>{$t("builder.general")}</h3>
       <div class="iconrow">
@@ -644,16 +726,12 @@
       {:else if kind === "tool"}
         <p class="hint">Outil exécuté à l'étape Action.</p>
         {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
-          <label class="blk">{PARAM_LABEL[pk] ?? pk}<input value={params[selected]?.[pk] ?? ""}
-            oninput={(e) => params = { ...params, [selected]: { ...(params[selected]||{}), [pk]: (e.target as HTMLInputElement).value } }}
-            placeholder={PARAM_PH[pk] ?? ""} /></label>
+          {@render paramField(pk)}
         {/each}
       {:else if kind === "control"}
         <p class="hint">Logique : {selNode.data.label}.</p>
         {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
-          <label class="blk">{PARAM_LABEL[pk] ?? pk}<input value={params[selected]?.[pk] ?? ""}
-            oninput={(e) => params = { ...params, [selected]: { ...(params[selected]||{}), [pk]: (e.target as HTMLInputElement).value } }}
-            placeholder={PARAM_PH[pk] ?? ""} /></label>
+          {@render paramField(pk)}
         {/each}
       {/if}
     {/if}
@@ -676,9 +754,7 @@
           {:else if mkind === "trigger"}
             <p class="hint">Déclencheur branché après l'agent.</p>
             {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
-              <label class="blk">{PARAM_LABEL[pk] ?? pk}<input value={params[selected]?.[pk] ?? ""}
-                oninput={(e) => params = { ...params, [selected]: { ...(params[selected]||{}), [pk]: (e.target as HTMLInputElement).value } }}
-                placeholder={PARAM_PH[pk] ?? ""} /></label>
+              {@render paramField(pk)}
             {/each}
           {:else if isVideoTool}
             <p class="hint">Uploade ou enregistre une vidéo : elle est échantillonnée puis analysée par l'agent.</p>
@@ -686,17 +762,13 @@
           {:else if mkind === "tool"}
             <p class="hint">Outil exécuté à l'étape Action.</p>
             {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
-              <label class="blk">{PARAM_LABEL[pk] ?? pk}<input value={params[selected]?.[pk] ?? ""}
-                oninput={(e) => params = { ...params, [selected]: { ...(params[selected]||{}), [pk]: (e.target as HTMLInputElement).value } }}
-                placeholder={PARAM_PH[pk] ?? ""} /></label>
+              {@render paramField(pk)}
             {/each}
             {#if (PARAM_KEYS[blockKey(selected)] ?? []).length === 0}<p class="hint">Aucune propriété pour cet outil.</p>{/if}
           {:else if mkind === "control"}
             <p class="hint">Logique : {selNode.data.label}.</p>
             {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
-              <label class="blk">{PARAM_LABEL[pk] ?? pk}<input value={params[selected]?.[pk] ?? ""}
-                oninput={(e) => params = { ...params, [selected]: { ...(params[selected]||{}), [pk]: (e.target as HTMLInputElement).value } }}
-                placeholder={PARAM_PH[pk] ?? ""} /></label>
+              {@render paramField(pk)}
             {/each}
           {/if}
         </div>
@@ -727,6 +799,7 @@
     </div>
   {/if}
 </div>
+{/if}
 
 <style>
   .dash { position: relative; height: calc(100vh - 90px); width: 100%; display: grid; grid-template-columns: 200px 1fr 300px; gap: 0.7rem; padding: 0.7rem; box-sizing: border-box; }
@@ -772,6 +845,15 @@
   .badge.done { background: var(--ok); color: #04231a; }
   .badge.failed { background: var(--err); color: #2a0707; }
   .flowwrap { flex: 1; overflow: hidden; }
+  .logpanel { flex: 0 0 auto; display: flex; flex-direction: column; overflow: hidden; }
+  .logpanel.open { max-height: 230px; }
+  .logbar { display: flex; align-items: center; gap: 0.5rem; width: 100%; background: none; border: none; color: var(--text); font: inherit; cursor: pointer; padding: 0.5rem 0.7rem; text-align: left; }
+  .logchev { color: var(--muted); }
+  .logbar strong { font-size: 0.85rem; }
+  .logcount { font-size: 0.7rem; padding: 0.05rem 0.4rem; border-radius: 20px; background: var(--border); }
+  .logspacer { flex: 1; }
+  .logbar .lnk { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 0.76rem; }
+  .loglist { padding: 0.2rem 0.7rem 0.6rem; font-family: ui-monospace, monospace; font-size: 0.74rem; overflow-y: auto; }
   .logfeed { padding: 0.4rem 0.7rem; font-family: ui-monospace, monospace; font-size: 0.74rem; max-height: 90px; overflow-y: auto; }
   .lf { color: var(--muted); }
   .inspector { padding: 0.8rem; overflow-y: auto; }
@@ -825,4 +907,15 @@
   input, select, textarea { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.45rem 0.6rem; font: inherit; margin-top: 0.2rem; }
   .blk textarea { font-family: ui-monospace, monospace; font-size: 0.82rem; }
   :global(.svelte-flow__attribution) { display: none; }
+  /* Landing / agent picker */
+  .welcome { display: flex; align-items: flex-start; justify-content: center; padding: 3rem 1rem; height: calc(100vh - 90px); box-sizing: border-box; }
+  .welcome-card { width: 560px; max-width: 92vw; padding: 1.5rem; }
+  .wtop { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.2rem; gap: 1rem; }
+  .wtop h2 { margin: 0; }
+  .newbig { background: var(--accent); border: none; color: #04231a; font-weight: 700; border-radius: 10px; padding: 0.6rem 1rem; cursor: pointer; font: inherit; font-size: 0.9rem; white-space: nowrap; }
+  .walist { display: flex; flex-direction: column; gap: 0.4rem; }
+  .warow { display: flex; align-items: center; gap: 0.4rem; border: 1px solid var(--border); border-radius: 10px; padding: 0.2rem 0.5rem; }
+  .warow:hover { border-color: var(--accent); }
+  .warow-main { flex: 1; display: flex; align-items: center; gap: 0.6rem; background: none; border: none; color: var(--text); font: inherit; cursor: pointer; padding: 0.5rem 0.3rem; text-align: left; }
+  .warow-main .fnm { font-size: 0.95rem; }
 </style>
