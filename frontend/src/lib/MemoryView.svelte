@@ -9,6 +9,7 @@
   let topics: { topic: string; count: number }[] = [];
   let agentMemories: { key: string; content: string; created_at?: string }[] = [];
   let selectedTopic: string | null = null;
+  let expandedMem: number | null = null;
   let busy = false;
 
   function agentId(topic: string): string | null {
@@ -86,10 +87,14 @@
     {#if agentMemories.length === 0}
       <p class="muted small">{$t("memory.noEntries")}</p>
     {:else}
-      {#each agentMemories as m}
-        <div class="mem">
-          <span class="muted small">{m.key}{m.created_at ? " · " + m.created_at.slice(0, 19).replace("T", " ") : ""}</span>
-          <div>{m.content.slice(0, 280)}</div>
+      {#each agentMemories as m, i}
+        <div class="mem" class:open={expandedMem === i} on:click={() => (expandedMem = expandedMem === i ? null : i)} role="button" tabindex="0">
+          <span class="muted small">{expandedMem === i ? "▾" : "▸"} {m.key}{m.created_at ? " · " + m.created_at.slice(0, 19).replace("T", " ") : ""}</span>
+          {#if expandedMem === i}
+            <pre class="memfull">{m.content}</pre>
+          {:else}
+            <div class="memshort">{m.content.slice(0, 160)}{m.content.length > 160 ? "…" : ""}</div>
+          {/if}
         </div>
       {/each}
     {/if}
@@ -110,6 +115,10 @@
   .actions { display: flex; gap: 0.4rem; }
   button { display: inline-flex; align-items: center; gap: 0.3rem; border: 1px solid var(--border); background: #1a2133; color: var(--text); border-radius: 7px; padding: 0.3rem 0.6rem; cursor: pointer; font: inherit; font-size: 0.78rem; }
   button.danger { background: var(--err); border-color: var(--err); color: #2a0707; }
-  .mem { padding: 0.5rem 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent); }
+  .mem { padding: 0.5rem 0.4rem; border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent); cursor: pointer; border-radius: 8px; }
+  .mem:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .mem.open { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  .memshort { font-size: 0.85rem; }
+  .memfull { margin: 0.4rem 0 0; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, monospace; font-size: 0.78rem; max-height: 340px; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem; }
   .small { font-size: 0.78rem; }
 </style>

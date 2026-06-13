@@ -247,9 +247,9 @@
     selected = id;
   }
 
-  // Right-click context menu: on the canvas it adds a block (New); on a node
-  // it offers Modify / Delete.
-  let ctxMenu = $state<{ sx: number; sy: number; cx: number; cy: number; nodeId?: string } | null>(null);
+  // Right-click context menu: on the canvas it adds a block (New); on a node or
+  // an edge it offers Delete only.
+  let ctxMenu = $state<{ sx: number; sy: number; cx: number; cy: number; nodeId?: string; edgeId?: string } | null>(null);
   function onContextMenu(e: MouseEvent) {
     e.preventDefault();
     const fc = flowCoords(e.clientX, e.clientY);
@@ -262,16 +262,20 @@
     if (!id) return;
     ctxMenu = { sx: (ev as MouseEvent).clientX, sy: (ev as MouseEvent).clientY, cx: 0, cy: 0, nodeId: id };
   }
+  function onEdgeContextMenu(e: any) {
+    const ev: MouseEvent = e?.event ?? e;
+    const id: string = e?.edge?.id ?? e?.detail?.edge?.id;
+    ev?.preventDefault?.();
+    if (!id) return;
+    ctxMenu = { sx: (ev as MouseEvent).clientX, sy: (ev as MouseEvent).clientY, cx: 0, cy: 0, edgeId: id };
+  }
   function addFromMenu(key: string) {
     if (ctxMenu) addBlock(key, { x: ctxMenu.cx, y: ctxMenu.cy });
     ctxMenu = null;
   }
-  function editFromMenu() {
-    if (ctxMenu?.nodeId) { selected = ctxMenu.nodeId; if (ctxMenu.nodeId !== "agent") modalOpen = true; }
-    ctxMenu = null;
-  }
   function deleteFromMenu() {
     if (ctxMenu?.nodeId) removeNode(ctxMenu.nodeId);
+    else if (ctxMenu?.edgeId) edges = edges.filter((e) => e.id !== ctxMenu!.edgeId);
     ctxMenu = null;
   }
 
@@ -702,7 +706,7 @@
       </div>
     {:else}
     <div class="flowwrap card" bind:this={flowEl} ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; }} ondrop={onDrop} oncontextmenu={onContextMenu}>
-      <SvelteFlow bind:nodes bind:edges bind:viewport {nodeTypes} fitView onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu} onconnect={onConnect}>
+      <SvelteFlow bind:nodes bind:edges bind:viewport {nodeTypes} fitView onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu} onedgecontextmenu={onEdgeContextMenu} onconnect={onConnect}>
         <Background gap={22} />
         <Controls />
         <MiniMap pannable zoomable />
@@ -819,9 +823,10 @@
   {#if ctxMenu}
     <div class="ctxback" onclick={() => (ctxMenu = null)} oncontextmenu={(e) => { e.preventDefault(); ctxMenu = null; }} role="presentation"></div>
     <div class="ctxmenu" style="left: {ctxMenu.sx}px; top: {ctxMenu.sy}px;">
-      {#if ctxMenu.nodeId}
-        <button class="ctxitem" onclick={editFromMenu}>✏️ Modifier</button>
-        {#if ctxMenu.nodeId !== "agent"}<button class="ctxitem danger" onclick={deleteFromMenu}>🗑 Supprimer</button>{/if}
+      {#if ctxMenu.edgeId}
+        <button class="ctxitem danger" onclick={deleteFromMenu}>🗑 Supprimer le lien</button>
+      {:else if ctxMenu.nodeId}
+        {#if ctxMenu.nodeId === "agent"}<span class="ctxgroup">Agent (non supprimable)</span>{:else}<button class="ctxitem danger" onclick={deleteFromMenu}>🗑 Supprimer</button>{/if}
       {:else}
         <div class="ctxgroup">＋ Nouveau bloc</div>
         {#each PALETTE as g}
