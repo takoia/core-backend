@@ -17,6 +17,7 @@ pub async fn run(db: &Db, cipher: &Cipher, config: &Config) -> Result<()> {
     ensure_account(db).await?;
     seed_providers(db, cipher, config).await?;
     seed_demo_agent(db).await?;
+    seed_invoice_agent(db).await?;
     Ok(())
 }
 
@@ -139,5 +140,78 @@ async fn seed_demo_agent(db: &Db) -> Result<()> {
     }
 
     tracing::info!(agent_id = %agent_id, "seeded demo agent 'Tech Watch Expert'");
+    Ok(())
+}
+
+/// Seed the invoice-extraction agent triggered by the `invoice.received`
+/// webhook. Full-auto so inbound invoices are processed automatically; it learns
+/// from corrections over time.
+async fn seed_invoice_agent(db: &Db) -> Result<()> {
+    let id = "invoice-extractor";
+    let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM agents WHERE id = ?")
+        .bind(id)
+        .fetch_optional(db)
+        .await?;
+    if exists.is_some() {
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"INSERT INTO agents
+           (id, account_id, name, description, autonomy_level, expertise_domain,
+            author, visibility, trigger_on, emit)
+           VALUES (?, ?, ?, ?, 'full_auto', 'invoice data extraction',
+                   'TakoIA demo', 'public', 'invoice.received', '["invoice.extracted"]')"#,
+    )
+    .bind(id)
+    .bind(DEFAULT_ACCOUNT_ID)
+    .bind("Invoice Extractor")
+    .bind("Receives invoices via webhook and returns the extracted text fields. Improves from corrections.")
+    .execute(db)
+    .await?;
+
+    let prompts = [
+        (
+            StepType::Analyse,
+            "Identify which invoice fields are present in the payload: supplier, \
+             invoice number, date, line items, totals, taxes, currency.",
+            serde_json::json!({}),
+        ),
+        (
+            StepType::Decision,
+            "Decide how to map the payload to a clean structured extraction. \
+             Apply any past corrections provided.",
+            serde_json::json!({}),
+        ),
+        (
+            StepType::Action,
+            "Extract the fields from the input. Do not search the web.",
+            serde_json::json!({ "allowed_tools": [] }),
+        ),
+        (
+            StepType::Restitution,
+            "Return the extracted invoice as clean text with one field per line: \
+             Supplier, Invoice number, Date, Currency, Line items, Subtotal, Tax, \
+             Total. Use 'unknown' for any missing field. No commentary.",
+            serde_json::json!({}),
+        ),
+    ];
+    for (pos, (step, prompt, options)) in prompts.iter().enumerate() {
+        sqlx::query(
+            r#"INSERT INTO agent_step_configs
+               (id, agent_id, step_type, system_prompt, options, position)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(id)
+        .bind(step.as_str())
+        .bind(prompt)
+        .bind(options.to_string())
+        .bind(pos as i64)
+        .execute(db)
+        .await?;
+    }
+
+    tracing::info!("seeded invoice-extractor agent");
     Ok(())
 }

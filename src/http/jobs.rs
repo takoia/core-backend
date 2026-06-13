@@ -100,6 +100,52 @@ pub async fn get(
     })))
 }
 
+/// `POST /api/jobs/:id/feedback` — submit a correction for a job's output. The
+/// correction is recorded in the agent's memory (ICM feedback) so future runs
+/// improve. This is the "detect an error and improve the agent" loop.
+pub async fn feedback(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<FeedbackInput>,
+) -> AppResult<Json<Value>> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        r#"SELECT j.agent_id, COALESCE(o.prompt, '')
+           FROM jobs j LEFT JOIN objectives o ON o.id = j.objective_id
+           WHERE j.id = ?"#,
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((agent_id, context)) = row else {
+        return Err(crate::error::AppError::NotFound("job not found".into()));
+    };
+
+    state
+        .memory
+        .record_feedback(
+            &agent_id,
+            &context.chars().take(400).collect::<String>(),
+            &body.predicted,
+            &body.corrected,
+            body.reason.as_deref().unwrap_or(""),
+        )
+        .await
+        .map_err(crate::error::AppError::Other)?;
+
+    state
+        .events
+        .publish(crate::agent::JobEvent::log(&id, "correction recorded — agent will improve"));
+    Ok(Json(json!({ "ok": true, "agent_id": agent_id })))
+}
+
+#[derive(serde::Deserialize)]
+pub struct FeedbackInput {
+    pub predicted: String,
+    pub corrected: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 /// `GET /api/jobs/:id/events` — Server-Sent Events stream of live progress.
 pub async fn events(
     State(state): State<AppState>,

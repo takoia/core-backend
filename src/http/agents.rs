@@ -265,6 +265,19 @@ pub async fn export_toml(
     ))
 }
 
+/// `DELETE /api/agents/:id` — remove an agent and its configs (cascade).
+pub async fn delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    sqlx::query("DELETE FROM agents WHERE id = ? AND account_id = ?")
+        .bind(&id)
+        .bind(DEFAULT_ACCOUNT_ID)
+        .execute(&state.db)
+        .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 /// `GET /api/agents/:id/memories` — the agent's accumulated expertise.
 pub async fn memories(
     State(state): State<AppState>,

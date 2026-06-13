@@ -120,6 +120,68 @@ impl Memory {
         Ok(())
     }
 
+    /// Record a correction (what the agent predicted vs the correct answer) so
+    /// the agent improves next time. Backed by ICM feedback, mirrored to DB.
+    pub async fn record_feedback(
+        &self,
+        agent_id: &str,
+        context: &str,
+        predicted: &str,
+        corrected: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let icm = Command::new("icm")
+            .arg("feedback")
+            .arg("record")
+            .arg("--topic")
+            .arg(Self::topic(agent_id))
+            .arg("--context")
+            .arg(context)
+            .arg("--predicted")
+            .arg(predicted)
+            .arg("--corrected")
+            .arg(corrected)
+            .arg("--reason")
+            .arg(reason)
+            .arg("--source")
+            .arg("user")
+            .arg("--db")
+            .arg(&self.icm_db_path)
+            .arg("--no-embeddings")
+            .output()
+            .await;
+        if let Err(e) = &icm {
+            tracing::warn!(agent_id, error = %e, "icm feedback record failed");
+        }
+
+        // Mirror as a high-signal memory so it is recalled at the Analyse step.
+        let lesson = format!(
+            "CORRECTION — when: {context}. Wrong: {predicted}. Correct: {corrected}. Reason: {reason}"
+        );
+        self.store(agent_id, "correction", &lesson).await
+    }
+
+    /// Recall past corrections relevant to `query` (ICM feedback search).
+    pub async fn recall_feedback(&self, agent_id: &str, query: &str, limit: usize) -> String {
+        let output = Command::new("icm")
+            .arg("feedback")
+            .arg("search")
+            .arg(query)
+            .arg("--topic")
+            .arg(Self::topic(agent_id))
+            .arg("--limit")
+            .arg(limit.to_string())
+            .arg("--db")
+            .arg(&self.icm_db_path)
+            .arg("--no-embeddings")
+            .output()
+            .await;
+        match output {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => String::new(),
+        }
+    }
+
     /// List stored memories for an agent (UI).
     pub async fn list(&self, agent_id: &str) -> Result<Vec<MemoryEntry>> {
         let rows = sqlx::query_as::<_, MemoryEntry>(

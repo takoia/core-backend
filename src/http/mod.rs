@@ -12,6 +12,7 @@ mod objectives;
 mod schedules;
 mod skills;
 mod usage;
+mod webhooks;
 
 use crate::state::AppState;
 use axum::http::{HeaderValue, Method, StatusCode};
@@ -35,7 +36,7 @@ pub fn router(state: AppState) -> Router {
         // Agents + per-step customization + marketplace publishing
         .route("/agents", get(agents::list).post(agents::create))
         .route("/agents/import", post(agents::import_toml))
-        .route("/agents/:id", get(agents::get).put(agents::update))
+        .route("/agents/:id", get(agents::get).put(agents::update).delete(agents::delete))
         .route("/agents/:id/steps", put(agents::update_steps))
         .route("/agents/:id/publish", post(agents::publish))
         .route("/agents/:id/export", get(agents::export_toml))
@@ -46,6 +47,9 @@ pub fn router(state: AppState) -> Router {
         .route("/jobs", get(jobs::list))
         .route("/jobs/:id", get(jobs::get))
         .route("/jobs/:id/events", get(jobs::events))
+        .route("/jobs/:id/feedback", post(jobs::feedback))
+        // Inbound webhooks (e.g. invoice received -> trigger agent)
+        .route("/webhooks/:event", post(webhooks::receive))
         // Human-in-the-loop
         .route("/approvals/:id", post(approvals::decide))
         // Recurring schedules (autonomous learning loop)

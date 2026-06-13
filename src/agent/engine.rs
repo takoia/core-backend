@@ -75,6 +75,11 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob) -> Result<RunOutcome> {
     if !memory_ctx.trim().is_empty() {
         bus.publish(JobEvent::log(&job.id, "recalled expertise from memory"));
     }
+    // Past corrections (learn from detected errors).
+    let corrections = state.memory.recall_feedback(&job.agent_id, &objective.prompt, 5).await;
+    if !corrections.trim().is_empty() {
+        bus.publish(JobEvent::log(&job.id, "applying past corrections"));
+    }
 
     let mut ctx = RunCtx {
         state,
@@ -87,10 +92,11 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob) -> Result<RunOutcome> {
 
     // ── Analyse ────────────────────────────────────────────────────────────
     let analyse_input = format!(
-        "Objective: {}\n\n{}\n\nRelevant memory:\n{}",
+        "Objective: {}\n\n{}\n\nRelevant memory:\n{}\n\nPast corrections to apply:\n{}",
         objective.title,
         objective.prompt,
-        if memory_ctx.trim().is_empty() { "(none)" } else { &memory_ctx }
+        if memory_ctx.trim().is_empty() { "(none)" } else { &memory_ctx },
+        if corrections.trim().is_empty() { "(none)" } else { &corrections }
     );
     let analysis = ctx.step(StepType::Analyse, &analyse_input, &done, 0).await?;
 
@@ -128,23 +134,30 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob) -> Result<RunOutcome> {
     }
 
     // ── Action (tool execution via sandbox) ────────────────────────────────
-    let provider = registry.resolve(ctx.provider_for(StepType::Action).as_deref());
-    bus.publish(JobEvent::step_started(&job.id, "action"));
-    bus.publish(JobEvent::log(&job.id, "running tool: web_search"));
-    let search = match tools::execute(&provider, "web_search", &objective.prompt).await {
-        Ok(out) => out,
-        Err(e) => {
-            tracing::warn!(error = %e, "web_search failed, using canned fallback");
-            tools::execute(&registry.canned(), "web_search", &objective.prompt).await?
-        }
+    // Only run web_search when the agent's Action step allows it; extraction
+    // agents (e.g. invoices) process the given payload without searching.
+    let allowed = ctx.allowed_tools(StepType::Action);
+    let action_input = if allowed.iter().any(|t| t == "web_search") {
+        let provider = registry.resolve(ctx.provider_for(StepType::Action).as_deref());
+        bus.publish(JobEvent::step_started(&job.id, "action"));
+        bus.publish(JobEvent::log(&job.id, "running tool: web_search"));
+        let search = match tools::execute(&provider, "web_search", &objective.prompt).await {
+            Ok(out) => out,
+            Err(e) => {
+                tracing::warn!(error = %e, "web_search failed, using canned fallback");
+                tools::execute(&registry.canned(), "web_search", &objective.prompt).await?
+            }
+        };
+        ctx.record_usage(&provider.name(), "web_search", search.usage).await;
+        format!("Plan:\n{}\n\nTool web_search results:\n{}", decision, search.output)
+    } else {
+        format!(
+            "Plan:\n{}\n\nInput to process:\n{}",
+            decision, objective.prompt
+        )
     };
-    ctx.record_usage(&provider.name(), "web_search", search.usage).await;
-    let action_input = format!(
-        "Plan:\n{}\n\nTool web_search results:\n{}",
-        decision, search.output
-    );
     let action = ctx
-        .step_with_extra(StepType::Action, &action_input, &done, 2, search.usage)
+        .step_with_extra(StepType::Action, &action_input, &done, 2, TokenUsage::default())
         .await?;
 
     // ── Restitution (final deliverable + memory write) ─────────────────────
@@ -193,6 +206,14 @@ impl<'a> RunCtx<'a> {
             .get(step.as_str())
             .and_then(|c| serde_json::from_str::<StepOptions>(&c.options).ok())
             .and_then(|o| o.provider)
+    }
+
+    fn allowed_tools(&self, step: StepType) -> Vec<String> {
+        self.configs
+            .get(step.as_str())
+            .and_then(|c| serde_json::from_str::<StepOptions>(&c.options).ok())
+            .map(|o| o.allowed_tools)
+            .unwrap_or_default()
     }
 
     fn system_prompt(&self, step: StepType) -> String {
