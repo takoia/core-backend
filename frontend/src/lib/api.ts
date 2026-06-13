@@ -173,6 +173,16 @@ export const api = {
     return req<{ logs: LogEntry[]; total: number }>(`/api/logs${suffix}`);
   },
 
+  memoryOverview: () =>
+    req<{ stats: Record<string, string>; topics: { topic: string; count: number }[] }>(
+      "/api/memory/overview",
+    ),
+  memoryPurge: (topic: string) =>
+    req<{ ok: boolean }>(`/api/memory/purge?topic=${encodeURIComponent(topic)}`, {
+      method: "POST",
+      headers: jsonH,
+    }),
+
   testEmailIntegration: (to: string, subject?: string, body?: string) =>
     req<{ ok: boolean; message: string }>("/api/integrations/email/test", {
       method: "POST",

@@ -10,6 +10,7 @@ mod integrations;
 mod jobs;
 mod logs;
 mod marketplace;
+mod memory;
 mod mcp;
 mod objectives;
 mod schedules;
@@ -77,6 +78,9 @@ pub fn router(state: AppState) -> Router {
         // Audit logs + external integrations
         .route("/logs", get(logs::list))
         .route("/integrations/email/test", post(integrations::email_test))
+        // Permanent memory (ICM) management
+        .route("/memory/overview", get(memory::overview))
+        .route("/memory/purge", post(memory::purge))
         // Public marketplace
         .route("/marketplace", get(marketplace::list))
         .with_state(state);

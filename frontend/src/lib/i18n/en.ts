@@ -206,4 +206,21 @@ export const en: Record<string, string> = {
   "integrations.saved": "saved",
   "integrations.sendTest": "Send a test email",
   "integrations.sendTestBtn": "Send test",
+
+  // Memory (ICM)
+  "memory.title": "Permanent memory",
+  "memory.subtitle": "ICM — what your agents have learned",
+  "memory.memories": "memories",
+  "memory.topics": "topics",
+  "memory.avgWeight": "avg weight",
+  "memory.newest": "newest",
+  "memory.topicsTitle": "Memory by agent / organization",
+  "memory.empty": "No memory yet — it grows as agents run.",
+  "memory.topic": "Agent / topic",
+  "memory.count": "Entries",
+  "memory.viewBtn": "View",
+  "memory.purge": "Purge",
+  "memory.confirmPurge": "Purge all memories for:",
+  "memory.entriesTitle": "Memories",
+  "memory.noEntries": "No entries.",
 };

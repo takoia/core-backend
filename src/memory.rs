@@ -182,6 +182,72 @@ impl Memory {
         }
     }
 
+    /// Global ICM statistics (memory count, topics, age).
+    pub async fn stats(&self) -> serde_json::Value {
+        let out = Command::new("icm")
+            .arg("stats")
+            .arg("--db")
+            .arg(&self.icm_db_path)
+            .output()
+            .await;
+        let text = match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            _ => String::new(),
+        };
+        let mut map = serde_json::Map::new();
+        for line in text.lines() {
+            if let Some((k, v)) = line.split_once(':') {
+                map.insert(
+                    k.trim().to_lowercase().replace(' ', "_"),
+                    serde_json::json!(v.trim()),
+                );
+            }
+        }
+        serde_json::Value::Object(map)
+    }
+
+    /// List ICM topics with their memory counts (org-wide memory map).
+    pub async fn topics(&self) -> Vec<serde_json::Value> {
+        let out = Command::new("icm")
+            .arg("topics")
+            .arg("--db")
+            .arg(&self.icm_db_path)
+            .output()
+            .await;
+        let text = match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            _ => return Vec::new(),
+        };
+        text.lines()
+            .filter(|l| l.contains('/')) // topic rows contain the slug path
+            .filter_map(|l| {
+                let count = l.split_whitespace().last()?.parse::<i64>().ok()?;
+                let topic = l.rsplitn(2, char::is_whitespace).nth(1)?.trim().to_string();
+                Some(serde_json::json!({ "topic": topic, "count": count }))
+            })
+            .collect()
+    }
+
+    /// Purge all memories in a topic (ICM forget --topic) and the DB mirror.
+    pub async fn forget_topic(&self, topic: &str) -> Result<()> {
+        let _ = Command::new("icm")
+            .arg("forget")
+            .arg("--topic")
+            .arg(topic)
+            .arg("--db")
+            .arg(&self.icm_db_path)
+            .output()
+            .await;
+        // Mirror: if it's an agent topic, clear the DB memories too.
+        if let Some(agent_id) = topic.strip_prefix("takoia/agent/") {
+            sqlx::query("DELETE FROM memories WHERE agent_id = ?")
+                .bind(agent_id)
+                .execute(&self.db)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// List stored memories for an agent (UI).
     pub async fn list(&self, agent_id: &str) -> Result<Vec<MemoryEntry>> {
         let rows = sqlx::query_as::<_, MemoryEntry>(
