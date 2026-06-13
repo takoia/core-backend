@@ -55,7 +55,13 @@ pub async fn send_discord(webhook_url: &str, content: &str) -> Result<()> {
         return Err(anyhow!("no discord webhook configured"));
     }
     let body = serde_json::json!({ "content": content.chars().take(1900).collect::<String>() });
-    let resp = reqwest::Client::new().post(webhook_url).json(&body).send().await?;
+    // Discord's Cloudflare rejects requests with no User-Agent (error 1010).
+    let resp = reqwest::Client::new()
+        .post(webhook_url)
+        .header("User-Agent", "TakoIA-bot/1.0 (+https://takoia.szymkowiak.fr)")
+        .json(&body)
+        .send()
+        .await?;
     if !resp.status().is_success() {
         return Err(anyhow!("discord webhook returned {}", resp.status()));
     }
