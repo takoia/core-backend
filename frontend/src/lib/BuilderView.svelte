@@ -716,7 +716,8 @@
   .fleethead .lnk { background: none; border: none; color: var(--accent); cursor: pointer; font: inherit; font-size: 0.76rem; padding: 0 0.2rem; }
   .fleetitem { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.4rem; border-radius: 8px; cursor: pointer; font-size: 0.84rem; }
   .fleetitem:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
-  .fleetitem input { cursor: pointer; }
+  .fleetitem input { cursor: pointer; flex: 0 0 auto; }
+  .fleetitem .anm { white-space: normal; overflow: visible; text-overflow: clip; word-break: break-word; flex: 1; }
   .runctl { display: flex; align-items: center; gap: 0.4rem; }
   .runctl button { border-radius: 8px; padding: 0.4rem 0.7rem; cursor: pointer; font: inherit; font-size: 0.82rem; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
   .start { background: var(--ok) !important; border-color: var(--ok) !important; color: #04231a !important; font-weight: 600; }
