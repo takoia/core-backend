@@ -124,13 +124,14 @@
 
 <style>
   header { border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 80%, transparent); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px); height: 76px; }
-  .nav { display: flex; align-items: center; justify-content: space-between; padding: 0.7rem 1.5rem; }
-  .brand { display: flex; align-items: center; gap: 0.5rem; }
-  .brand .logo { width: 60px; height: 60px; border-radius: 50%; }
-  .brand h1 { margin: 0; font-size: 1.2rem; }
+  .nav { display: flex; align-items: center; justify-content: space-between; gap: 1rem; max-width: none; padding: 0.5rem 1.25rem; }
+  .brand { display: flex; align-items: center; gap: 0.5rem; flex: 0 0 auto; }
+  .brand .logo { width: 56px; height: 56px; border-radius: 50%; }
+  .brand h1 { margin: 0; font-size: 1.15rem; }
   .brand .tag { color: var(--muted); font-size: 0.8rem; }
-  nav { display: flex; align-items: center; gap: 0.35rem; }
-  nav button { display: inline-flex; align-items: center; gap: 0.35rem; background: transparent; border: 1px solid transparent; color: var(--muted); padding: 0.4rem 0.7rem; border-radius: 8px; cursor: pointer; font: inherit; }
+  nav { display: flex; align-items: center; gap: 0.2rem; overflow-x: auto; min-width: 0; scrollbar-width: none; }
+  nav::-webkit-scrollbar { display: none; }
+  nav button { display: inline-flex; align-items: center; gap: 0.3rem; flex: 0 0 auto; white-space: nowrap; background: transparent; border: 1px solid transparent; color: var(--muted); padding: 0.35rem 0.55rem; border-radius: 8px; cursor: pointer; font: inherit; font-size: 0.88rem; }
   nav button:hover { color: var(--text); }
   nav button.active { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--border); color: var(--text); }
   .sep { width: 1px; height: 20px; background: var(--border); margin: 0 0.3rem; }

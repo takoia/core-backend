@@ -97,7 +97,6 @@
 
   <form class="box" on:submit|preventDefault={submit}>
     <img class="logo" src={logo} alt="TakoIA" />
-    <h1>TakoIA</h1>
     <h2>{$t("login.title")}</h2>
     <p class="muted small">{$t("login.subtitle")}</p>
 
@@ -122,9 +121,8 @@
   .wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; }
   .bg { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
   .box { position: relative; z-index: 1; background: color-mix(in srgb, var(--panel) 78%, transparent); border: 1px solid var(--border); border-radius: 16px; padding: 2rem; width: 360px; max-width: 90vw; text-align: center; backdrop-filter: blur(10px); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45); }
-  .logo { width: 92px; height: 92px; border-radius: 50%; box-shadow: 0 0 30px color-mix(in srgb, var(--accent) 45%, transparent); }
-  h1 { margin: 0.6rem 0 0; font-size: 1.7rem; letter-spacing: 0.04em; }
-  h2 { margin: 0.5rem 0 0.2rem; font-size: 1.05rem; }
+  .logo { width: 120px; height: 120px; border-radius: 50%; box-shadow: 0 0 34px color-mix(in srgb, var(--accent) 45%, transparent); }
+  h2 { margin: 0.8rem 0 0.2rem; font-size: 1.15rem; }
   label { display: block; font-size: 0.85rem; color: var(--muted); margin-top: 0.9rem; text-align: left; }
   input { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.55rem 0.7rem; font: inherit; margin-top: 0.25rem; }
   button.primary { width: 100%; margin-top: 1.2rem; background: var(--accent); border: 1px solid var(--accent); color: #04231a; font-weight: 600; border-radius: 8px; padding: 0.6rem; cursor: pointer; font: inherit; }

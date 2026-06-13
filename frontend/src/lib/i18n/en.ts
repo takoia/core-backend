@@ -169,6 +169,10 @@ export const en: Record<string, string> = {
   "builder.created": "Agent created",
   "builder.node.trigger": "Trigger",
   "builder.node.emit": "Emit",
+  "builder.step.analyse": "Analyse",
+  "builder.step.decision": "Decision",
+  "builder.step.action": "Action",
+  "builder.step.restitution": "Restitution",
   "builder.previewTitle": "TOML preview",
   "builder.previewHint": "The declarative agent that will be created",
 
