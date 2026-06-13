@@ -2,16 +2,11 @@
   import { onDestroy } from "svelte";
   import { api, subscribeJob, type Agent, type JobDetail } from "./api";
   import { renderMarkdown } from "./markdown";
+  import { t } from "./i18n";
 
   export let agents: Agent[] = [];
 
   const STEPS = ["analyse", "decision", "action", "restitution"];
-  const STEP_LABEL: Record<string, string> = {
-    analyse: "Analyse",
-    decision: "Decision",
-    action: "Action",
-    restitution: "Restitution",
-  };
 
   let agentId = "";
   let title = "Weekly AI agents watch";
@@ -97,8 +92,8 @@
 
 <div class="grid">
   <div class="card">
-    <h2>Launch an objective</h2>
-    <label>Agent
+    <h2>{$t("run.launch")}</h2>
+    <label>{$t("run.agent")}
       <select bind:value={agentId}>
         {#each agents as a}
           <option value={a.id}>{a.name} · {a.autonomy_level}</option>
@@ -108,36 +103,36 @@
     {#if selectedAgent}
       <p class="muted small">
         {selectedAgent.expertise_domain || "general"} ·
-        {selectedAgent.autonomy_level === "full_auto" ? "fully autonomous" : "human-in-the-loop"}
+        {selectedAgent.autonomy_level === "full_auto" ? $t("run.autonomous") : $t("run.hitl")}
       </p>
     {/if}
-    <label>Title <input bind:value={title} /></label>
-    <label>Objective
+    <label>{$t("run.title")} <input bind:value={title} /></label>
+    <label>{$t("run.objective")}
       <textarea rows="4" bind:value={prompt}></textarea>
     </label>
-    <button class="primary" on:click={launch} disabled={!agentId}>▶ Run agent</button>
+    <button class="primary" on:click={launch} disabled={!agentId}>{$t("run.runAgent")}</button>
   </div>
 
   <div class="card">
-    <h2>Live run {#if jobStatus}<span class="badge {jobStatus}">{jobStatus}</span>{/if}</h2>
+    <h2>{$t("run.liveRun")} {#if jobStatus}<span class="badge {jobStatus}">{$t("status." + jobStatus)}</span>{/if}</h2>
     {#if !jobId}
-      <p class="muted">Launch an objective to watch the four steps execute live.</p>
+      <p class="muted">{$t("run.empty")}</p>
     {:else}
       <div class="timeline">
         {#each STEPS as s}
           <div class="tl-step {stepStatus[s] ?? 'pending'}">
             <span class="tl-dot"></span>
-            <span class="tl-label">{STEP_LABEL[s]}</span>
+            <span class="tl-label">{$t("step." + s)}</span>
           </div>
         {/each}
       </div>
 
       {#if pendingApprovalId}
         <div class="approval">
-          <strong>Approval required</strong> — the agent wants to act.
+          <strong>{$t("run.approvalRequired")}</strong>
           <div class="row">
-            <button class="ok" on:click={() => decide("approve")}>✓ Approve</button>
-            <button class="danger" on:click={() => decide("reject")}>✗ Reject</button>
+            <button class="ok" on:click={() => decide("approve")}>{$t("run.approve")}</button>
+            <button class="danger" on:click={() => decide("reject")}>{$t("run.reject")}</button>
           </div>
         </div>
       {/if}
@@ -151,7 +146,7 @@
 
 {#if report}
   <div class="card report">
-    <h2>Deliverable</h2>
+    <h2>{$t("run.deliverable")}</h2>
     <div class="md">{@html renderMarkdown(report)}</div>
   </div>
 {/if}

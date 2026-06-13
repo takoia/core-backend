@@ -76,7 +76,7 @@ Two-terminal variant: `make dev-api` and `make dev-web`.
 
 ## Configuration
 
-All config is environment-driven (see `.env.example`). LLM providers are
+All config is environment-driven (see `.env-sample`). LLM providers are
 configured (encrypted) from the Settings UI; the `*_BASE_URL/_API_KEY/_MODEL`
 vars only **seed** the `connectors` table on first boot so the demo runs without
 opening the UI. The four supported providers are all OpenAI-compatible:

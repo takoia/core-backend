@@ -1,10 +1,12 @@
 :root {
-  --bg: #0b0e14;
-  --panel: #131826;
-  --border: #232b3d;
-  --text: #e6e9f0;
-  --muted: #8a93a6;
-  --accent: #6c8cff;
+  /* Ocean theme defaults (TakoIA branding); overridden at runtime by theme.ts */
+  --bg: #07141f;
+  --bg-glow: #0e3346;
+  --panel: #0c2230;
+  --border: #17414f;
+  --text: #dff3f7;
+  --muted: #7fa3b0;
+  --accent: #2fc4d6;
   --ok: #36d399;
   --warn: #fbbd23;
   --err: #f87272;
@@ -22,6 +24,9 @@
 body {
   margin: 0;
   min-height: 100vh;
+  background:
+    radial-gradient(1200px 600px at 50% -10%, var(--bg-glow), transparent 70%),
+    var(--bg);
 }
 
 a {

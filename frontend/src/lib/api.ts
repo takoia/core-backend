@@ -95,6 +95,13 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => req<Health>("/api/health"),
 
+  login: (username: string, password: string) =>
+    req<{ token: string; username: string }>("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    }),
+
   listAgents: () => req<{ agents: Agent[] }>("/api/agents").then((r) => r.agents),
   getAgent: (id: string) => req<{ agent: Agent; steps: StepConfig[] }>(`/api/agents/${id}`),
   createAgent: (body: Record<string, unknown>) =>

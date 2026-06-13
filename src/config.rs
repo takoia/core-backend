@@ -29,6 +29,12 @@ pub struct Config {
     /// Neutral working directory for agent `claude -p` subprocesses, isolated
     /// from the host project (no CLAUDE.md / project ICM contamination).
     pub agent_workdir: String,
+    /// Admin username for the login page.
+    pub admin_username: String,
+    /// Admin password (from ADMIN_PASSWORD or generated and logged at startup).
+    pub admin_password: String,
+    /// Opaque session token returned on successful login.
+    pub session_token: String,
 }
 
 impl Config {
@@ -50,6 +56,13 @@ impl Config {
         // does not walk up to the host CLAUDE.md or trigger project ICM recall.
         let agent_workdir = env_or("AGENT_WORKDIR", "/tmp/takoia-agent-workspace");
 
+        let admin_username = env_or("ADMIN_USERNAME", "admin");
+        let admin_password = std::env::var("ADMIN_PASSWORD")
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+            .unwrap_or_else(|| random_token(9));
+        let session_token = random_token(24);
+
         Ok(Self {
             bind_addr,
             frontend_dev_origin,
@@ -61,8 +74,20 @@ impl Config {
             icm_db_path,
             claude_max_token,
             agent_workdir,
+            admin_username,
+            admin_password,
+            session_token,
         })
     }
+}
+
+/// Generate a URL-safe random token of roughly `bytes * 4/3` characters.
+fn random_token(bytes: usize) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use rand::RngCore;
+    let mut buf = vec![0u8; bytes];
+    rand::thread_rng().fill_bytes(&mut buf);
+    URL_SAFE_NO_PAD.encode(buf)
 }
 
 fn env_or(key: &str, default: &str) -> String {

@@ -18,7 +18,7 @@ help:
 
 setup:
 	cd frontend && bun install
-	@test -f .env || (sed 's|REPLACE_ME_WITH_openssl_rand_base64_32|'"$$(openssl rand -base64 32)"'|' .env.example > .env && echo "created .env with a fresh MASTER_KEY")
+	@test -f .env || (sed 's|REPLACE_ME_WITH_openssl_rand_base64_32|'"$$(openssl rand -base64 32)"'|' .env-sample > .env && echo "created .env with a fresh MASTER_KEY")
 
 # Run both dev servers; Ctrl-C stops both.
 dev:

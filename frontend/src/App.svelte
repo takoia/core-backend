@@ -7,10 +7,16 @@
   import UsageView from "./lib/UsageView.svelte";
   import McpView from "./lib/McpView.svelte";
   import SkillsView from "./lib/SkillsView.svelte";
+  import CanvasView from "./lib/CanvasView.svelte";
+  import LoginView from "./lib/LoginView.svelte";
+  import { t, locale, setLocale } from "./lib/i18n";
+  import "./lib/theme"; // applies the persisted theme on load
+  import logo from "./lib/assets/takoia.png";
 
-  type View = "run" | "agents" | "mcp" | "skills" | "settings" | "usage";
+  type View = "run" | "agents" | "canvas" | "mcp" | "skills" | "settings" | "usage";
   let view: View = "run";
   let healthy = false;
+  let token: string | null = localStorage.getItem("auth_token");
 
   let agents: Agent[] = [];
   let connectors: Connector[] = [];
@@ -29,7 +35,7 @@
     usageTotal = u.estimated_total_usd;
   }
 
-  onMount(async () => {
+  async function boot() {
     try {
       await api.health();
       healthy = true;
@@ -37,57 +43,88 @@
       healthy = false;
     }
     await Promise.all([loadAgents(), loadConnectors(), loadUsage()]);
+  }
+
+  function onAuthed(tk: string) {
+    token = tk;
+    boot();
+  }
+
+  function logout() {
+    localStorage.removeItem("auth_token");
+    token = null;
+  }
+
+  onMount(() => {
+    if (token) boot();
   });
 
-  // Refresh usage when switching to it.
   $: if (view === "usage") void loadUsage();
 </script>
 
-<header>
-  <div class="container nav">
-    <div class="brand">
-      <h1>TakoIA</h1>
-      <span class="tag">marketplace of autonomous expert agents</span>
+{#if !token}
+  <LoginView {onAuthed} />
+{:else}
+  <header>
+    <div class="container nav">
+      <div class="brand">
+        <img class="logo" src={logo} alt="TakoIA" />
+        <h1>TakoIA</h1>
+      </div>
+      <nav>
+        <button class:active={view === "run"} on:click={() => (view = "run")}>{$t("nav.run")}</button>
+        <button class:active={view === "agents"} on:click={() => (view = "agents")}>{$t("nav.agents")}</button>
+        <button class:active={view === "canvas"} on:click={() => (view = "canvas")}>Canvas</button>
+        <button class:active={view === "mcp"} on:click={() => (view = "mcp")}>{$t("nav.mcp")}</button>
+        <button class:active={view === "skills"} on:click={() => (view = "skills")}>{$t("nav.skills")}</button>
+        <button class:active={view === "settings"} on:click={() => (view = "settings")}>{$t("nav.settings")}</button>
+        <button class:active={view === "usage"} on:click={() => (view = "usage")}>{$t("nav.usage")}</button>
+        <span class="sep"></span>
+        <button class="lang" class:on={$locale === "fr"} on:click={() => setLocale("fr")}>FR</button>
+        <button class="lang" class:on={$locale === "en"} on:click={() => setLocale("en")}>EN</button>
+        <button class="logout" on:click={logout} title={$t("login.logout")}>⎋</button>
+        <span class="dot" class:ok={healthy} title={healthy ? $t("nav.online") : $t("nav.offline")}></span>
+      </nav>
     </div>
-    <nav>
-      <button class:active={view === "run"} on:click={() => (view = "run")}>Run</button>
-      <button class:active={view === "agents"} on:click={() => (view = "agents")}>Agents</button>
-      <button class:active={view === "mcp"} on:click={() => (view = "mcp")}>MCP</button>
-      <button class:active={view === "skills"} on:click={() => (view = "skills")}>Skills</button>
-      <button class:active={view === "settings"} on:click={() => (view = "settings")}>Settings</button>
-      <button class:active={view === "usage"} on:click={() => (view = "usage")}>Usage</button>
-      <span class="dot" class:ok={healthy} title={healthy ? "backend online" : "backend offline"}></span>
-    </nav>
-  </div>
-</header>
+  </header>
 
-<main class="container">
-  {#if view === "run"}
-    <RunView {agents} />
-  {:else if view === "agents"}
-    <AgentsView {agents} onChanged={loadAgents} />
-  {:else if view === "mcp"}
-    <McpView />
-  {:else if view === "skills"}
-    <SkillsView />
-  {:else if view === "settings"}
-    <SettingsView {connectors} onChanged={loadConnectors} />
-  {:else if view === "usage"}
-    <UsageView totals={usageTotals} estimatedTotal={usageTotal} />
+  {#if view === "canvas"}
+    <CanvasView />
+  {:else}
+    <main class="container">
+      {#if view === "run"}
+        <RunView {agents} />
+      {:else if view === "agents"}
+        <AgentsView {agents} onChanged={loadAgents} />
+      {:else if view === "mcp"}
+        <McpView />
+      {:else if view === "skills"}
+        <SkillsView />
+      {:else if view === "settings"}
+        <SettingsView {connectors} onChanged={loadConnectors} />
+      {:else if view === "usage"}
+        <UsageView totals={usageTotals} estimatedTotal={usageTotal} />
+      {/if}
+    </main>
   {/if}
-</main>
+{/if}
 
 <style>
-  header { border-bottom: 1px solid var(--border); background: #0d111a; position: sticky; top: 0; z-index: 10; }
-  .nav { display: flex; align-items: center; justify-content: space-between; padding: 0.9rem 1.5rem; }
-  nav { display: flex; align-items: center; gap: 0.4rem; }
-  nav button {
-    background: transparent; border: 1px solid transparent; color: var(--muted);
-    padding: 0.4rem 0.8rem; border-radius: 8px; cursor: pointer; font: inherit;
-  }
+  header { border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 80%, transparent); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px); height: 56px; }
+  .nav { display: flex; align-items: center; justify-content: space-between; padding: 0.7rem 1.5rem; }
+  .brand { display: flex; align-items: center; gap: 0.5rem; }
+  .brand .logo { width: 30px; height: 30px; border-radius: 50%; }
+  .brand h1 { margin: 0; font-size: 1.2rem; }
+  .brand .tag { color: var(--muted); font-size: 0.8rem; }
+  nav { display: flex; align-items: center; gap: 0.35rem; }
+  nav button { background: transparent; border: 1px solid transparent; color: var(--muted); padding: 0.4rem 0.75rem; border-radius: 8px; cursor: pointer; font: inherit; }
   nav button:hover { color: var(--text); }
-  nav button.active { background: #1a2133; border-color: var(--border); color: var(--text); }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--err); margin-left: 0.5rem; }
+  nav button.active { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--border); color: var(--text); }
+  .sep { width: 1px; height: 20px; background: var(--border); margin: 0 0.3rem; }
+  .lang { font-size: 0.72rem; padding: 0.25rem 0.5rem !important; }
+  .lang.on { color: var(--accent); }
+  .logout { font-size: 0.9rem; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--err); margin-left: 0.4rem; }
   .dot.ok { background: var(--ok); }
   main { padding-top: 1.5rem; padding-bottom: 3rem; display: flex; flex-direction: column; gap: 1.25rem; }
   main > :global(.card) { margin-top: 0; }

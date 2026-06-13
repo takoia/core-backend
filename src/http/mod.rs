@@ -3,6 +3,7 @@
 
 mod agents;
 mod approvals;
+mod auth;
 mod connectors;
 mod health;
 mod jobs;
@@ -33,6 +34,7 @@ pub fn router(state: AppState) -> Router {
 
     let api = Router::new()
         .route("/health", get(health::health))
+        .route("/login", post(auth::login))
         // Agents + per-step customization + marketplace publishing
         .route("/agents", get(agents::list).post(agents::create))
         .route("/agents/import", post(agents::import_toml))
