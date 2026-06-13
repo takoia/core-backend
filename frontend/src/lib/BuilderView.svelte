@@ -258,10 +258,13 @@
   // Right-click context menu: on the canvas it adds a block (New); on a node or
   // an edge it offers Delete only.
   let ctxMenu = $state<{ sx: number; sy: number; cx: number; cy: number; nodeId?: string; edgeId?: string } | null>(null);
-  function onContextMenu(e: MouseEvent) {
-    e.preventDefault();
-    const fc = flowCoords(e.clientX, e.clientY);
-    ctxMenu = { sx: e.clientX, sy: e.clientY, cx: fc.x, cy: fc.y };
+  // Right-click on the empty pane (SvelteFlow native event — the wrapper div's
+  // oncontextmenu is swallowed by the pane, so we must use onpanecontextmenu).
+  function onPaneContextMenu(e: any) {
+    const ev: MouseEvent = e?.event ?? e;
+    ev?.preventDefault?.();
+    const fc = flowCoords(ev.clientX, ev.clientY);
+    ctxMenu = { sx: ev.clientX, sy: ev.clientY, cx: fc.x, cy: fc.y };
   }
   function onNodeContextMenu(e: any) {
     const ev: MouseEvent = e?.event ?? e;
@@ -758,8 +761,8 @@
         </SvelteFlow>
       </div>
     {:else}
-    <div class="flowwrap card" bind:this={flowEl} ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; }} ondrop={onDrop} oncontextmenu={onContextMenu}>
-      <SvelteFlow bind:nodes bind:edges bind:viewport {nodeTypes} fitView onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu} onedgecontextmenu={onEdgeContextMenu} onconnect={onConnect}>
+    <div class="flowwrap card" bind:this={flowEl} ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; }} ondrop={onDrop}>
+      <SvelteFlow bind:nodes bind:edges bind:viewport {nodeTypes} fitView onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu} onedgecontextmenu={onEdgeContextMenu} onpanecontextmenu={onPaneContextMenu} onconnect={onConnect}>
         <Background gap={22} />
         <Controls />
         <MiniMap pannable zoomable />
