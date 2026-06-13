@@ -245,5 +245,6 @@ export const fr: Record<string, string> = {
   "video.done": "Terminé — {n} frames analysées",
   "video.extracted": "Informations extraites",
   "video.confirmHint": "confirmez ce qui est pertinent",
+  "video.listen": "Écouter",
   "video.confirmedCount": "{n} sur {total} confirmées",
 };

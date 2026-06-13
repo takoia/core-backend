@@ -15,6 +15,7 @@ mod mcp;
 mod objectives;
 mod schedules;
 mod skills;
+mod tts;
 mod usage;
 mod video;
 mod webhooks;
@@ -84,6 +85,8 @@ pub fn router(state: AppState) -> Router {
         .route("/memory/purge", post(memory::purge))
         // Video analysis (frames -> claude -p vision)
         .route("/video/analyze", post(video::analyze))
+        // Text-to-speech (OpenAI audio/speech)
+        .route("/tts", post(tts::synthesize))
         // Public marketplace
         .route("/marketplace", get(marketplace::list))
         .with_state(state);

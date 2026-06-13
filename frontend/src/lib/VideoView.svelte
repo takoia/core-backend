@@ -102,6 +102,31 @@
   }
 
   $: confirmed = items.filter((i) => i.ok === true);
+
+  let speaking = false;
+  // Speak the AI's understanding aloud via the backend OpenAI TTS endpoint.
+  async function speak() {
+    const chosen = confirmed.length ? confirmed : items;
+    const text = chosen.map((i) => `${i.info}. ${i.detail}`).join(". ");
+    if (!text) return;
+    speaking = true;
+    try {
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const url = URL.createObjectURL(await res.blob());
+      const audio = new Audio(url);
+      audio.onended = () => URL.revokeObjectURL(url);
+      await audio.play();
+    } catch (e) {
+      status = e instanceof Error ? e.message : String(e);
+    } finally {
+      speaking = false;
+    }
+  }
 </script>
 
 <div class="card">
@@ -132,7 +157,10 @@
 
 {#if items.length}
   <div class="card">
-    <h2>{$t("video.extracted")} <span class="muted small">— {$t("video.confirmHint")}</span></h2>
+    <div class="head">
+      <h2>{$t("video.extracted")} <span class="muted small">— {$t("video.confirmHint")}</span></h2>
+      <button class="listen" on:click={speak} disabled={speaking}>🔊 {$t("video.listen")}</button>
+    </div>
     {#each items as it}
       <div class="item" class:ok={it.ok === true} class:no={it.ok === false}>
         <div class="info">
@@ -160,6 +188,9 @@
   .row { display: flex; gap: 0.8rem; align-items: center; margin-top: 0.8rem; }
   button.primary { background: var(--accent); border: 1px solid var(--accent); color: #04231a; font-weight: 600; border-radius: 8px; padding: 0.55rem 1rem; cursor: pointer; font: inherit; }
   button.primary:disabled { opacity: 0.6; cursor: default; }
+  .head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+  .listen { border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); border-radius: 8px; padding: 0.4rem 0.8rem; cursor: pointer; font: inherit; font-size: 0.82rem; }
+  .listen:disabled { opacity: 0.6; cursor: default; }
   .item { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 0.55rem 0.6rem; border: 1px solid var(--border); border-radius: 8px; margin-top: 0.5rem; }
   .item.ok { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
   .item.no { border-color: var(--err); opacity: 0.6; }
