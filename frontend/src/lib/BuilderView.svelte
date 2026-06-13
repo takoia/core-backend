@@ -259,10 +259,13 @@
   }
 
   // Keep the agent node + live status in sync without looping (untrack).
+  // The agent box itself spins during a run so progress is always visible,
+  // even for agents that have no explicit step boxes on the canvas.
   $effect(() => {
-    const nm = name, ic = icon, ss = stepStatus;
+    const nm = name, ic = icon, ss = stepStatus, rs = runStatus;
+    const agentStatus = rs === "running" || rs === "queued" ? "running" : rs === "done" ? "done" : undefined;
     nodes = untrack(() => nodes).map((n) => {
-      if (n.id === "agent") return { ...n, data: { ...n.data, label: nm, glyph: ic } };
+      if (n.id === "agent") return { ...n, data: { ...n.data, label: nm, glyph: ic, status: agentStatus } };
       const st = ss[n.id];
       return st ? { ...n, data: { ...n.data, status: st } } : n;
     });
