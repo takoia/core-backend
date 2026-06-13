@@ -8,6 +8,7 @@
     glyph?: string;
     sub?: string;
     status?: "running" | "done" | "pending";
+    root?: boolean; // the agent node: no incoming handle
   };
 
   // A glyph can be an emoji/text OR an uploaded image (data: URL or http URL).
@@ -15,7 +16,7 @@
 </script>
 
 <div class="snode {data.kind} {data.status ?? ''}">
-  {#if data.kind !== "trigger"}<Handle type="target" position={Position.Top} />{/if}
+  {#if !data.root}<Handle type="target" position={Position.Top} />{/if}
   <div class="top">
     {#if data.glyph}
       {#if isImage}<img class="glyph-img" src={data.glyph} alt="" />{:else}<span class="glyph">{data.glyph}</span>{/if}

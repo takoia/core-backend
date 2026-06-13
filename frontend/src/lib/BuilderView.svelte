@@ -11,35 +11,50 @@
 
   // ── Palette: the blocks you drag onto the canvas (Scratch-like) ────────────
   const PALETTE = [
-    { group: "Étapes", items: [
+    { group: "Déclencheurs", items: [
+      { key: "trigger_manual", label: "Manuel", glyph: "▶️", kind: "trigger" },
+      { key: "trigger_email", label: "Email reçu", glyph: "📧", kind: "trigger" },
+      { key: "trigger_webhook", label: "Webhook", glyph: "🔗", kind: "trigger" },
+      { key: "trigger_ftp", label: "Fichier FTP", glyph: "📁", kind: "trigger" },
+      { key: "trigger_schedule", label: "Planifié", glyph: "⏰", kind: "trigger" },
+    ]},
+    { group: "Analyse", items: [
       { key: "analyse", label: "Analyse", glyph: "🔍", kind: "step" },
       { key: "decision", label: "Décision", glyph: "🧭", kind: "step" },
-      { key: "action", label: "Action", glyph: "⚙️", kind: "step" },
-      { key: "restitution", label: "Restitution", glyph: "📄", kind: "step" },
-    ]},
-    { group: "Outils", items: [
       { key: "web_search", label: "Recherche web", glyph: "🌐", kind: "tool" },
       { key: "market_data", label: "Données marché", glyph: "📈", kind: "tool" },
-      { key: "send_discord", label: "Webhook / Discord", glyph: "🔔", kind: "tool" },
-      { key: "send_email", label: "Email", glyph: "✉️", kind: "tool" },
-      { key: "write_file", label: "Écrire un fichier", glyph: "💾", kind: "tool" },
-      { key: "write_calendar", label: "Calendrier", glyph: "📅", kind: "tool" },
       { key: "analyse_video", label: "Analyse vidéo", glyph: "🎥", kind: "tool" },
       { key: "analyse_image", label: "Analyse image", glyph: "🖼️", kind: "tool" },
       { key: "analyse_sound", label: "Analyse son", glyph: "🎙️", kind: "tool" },
       { key: "analyse_text", label: "Analyse texte", glyph: "📝", kind: "tool" },
     ]},
-    { group: "Logique", items: [
-      { key: "loop", label: "Boucle", glyph: "🔁", kind: "control" },
-      { key: "for", label: "Pour chaque", glyph: "🔢", kind: "control" },
+    { group: "Conditions", items: [
       { key: "if", label: "Condition", glyph: "❓", kind: "control" },
+      { key: "for", label: "Pour chaque", glyph: "🔢", kind: "control" },
+      { key: "loop", label: "Boucle", glyph: "🔁", kind: "control" },
+    ]},
+    { group: "Restitutions", items: [
+      { key: "action", label: "Action", glyph: "⚙️", kind: "step" },
+      { key: "restitution", label: "Restitution", glyph: "📄", kind: "step" },
+      { key: "send_email", label: "Email", glyph: "✉️", kind: "tool" },
+      { key: "send_discord", label: "Webhook / Discord", glyph: "🔔", kind: "tool" },
+      { key: "write_file", label: "Écrire un fichier", glyph: "💾", kind: "tool" },
+      { key: "write_calendar", label: "Calendrier", glyph: "📅", kind: "tool" },
     ]},
   ];
+  // Default event each trigger block emits as `[trigger] on = "..."`.
+  const TRIGGER_EVENT: Record<string, string> = {
+    trigger_manual: "manual", trigger_email: "email.received",
+    trigger_webhook: "webhook.received", trigger_ftp: "file.received",
+    trigger_schedule: "schedule",
+  };
   type Block = { key: string; label: string; glyph: string; kind: string };
   const ALL_BLOCKS: Record<string, Block> = Object.fromEntries(
     PALETTE.flatMap((g) => g.items).map((b) => [b.key, b]),
   );
   const PARAM_KEYS: Record<string, string[]> = {
+    trigger_manual: ["event"], trigger_email: ["event"], trigger_webhook: ["event"],
+    trigger_ftp: ["event"], trigger_schedule: ["event"],
     web_search: ["site"],
     market_data: ["symbol"],
     send_discord: ["discord_webhook"],
@@ -52,6 +67,7 @@
     analyse_text: ["source_url"],
   };
   const PARAM_PH: Record<string, string> = {
+    event: "ex. email.received, webhook.received, schedule",
     site: "ex. windguru.com (laisser vide = tout le web)",
     symbol: "^IXIC, AAPL, NVDA…", discord_webhook: "https://discord.com/api/webhooks/…",
     recipient: "name@example.com", subject: "Objet de l'email",
@@ -59,6 +75,7 @@
     source_url: "URL du média (ou laisser vide)",
   };
   const PARAM_LABEL: Record<string, string> = {
+    event: "Événement déclencheur",
     site: "Site web", symbol: "Symbole", discord_webhook: "URL Webhook", recipient: "Destinataire",
     subject: "Objet", filename: "Nom du fichier", calendar_url: "URL calendrier", title: "Titre",
     source_url: "URL source",
@@ -80,7 +97,7 @@
 
   // Per-node config (keyed by node id): prompts for steps, params for tools.
   let prompts = $state<Record<string, string>>({});
-  let params = $state<Record<string, Record<string, string>>>({});
+  let params = $state<Record<string, Record<string, string>>>({ "trigger-0": { event: "manual" } });
 
   let selected = $state<string | null>("agent");
   let busy = $state(false);
@@ -102,19 +119,29 @@
 
   // ── Canvas: starts with ONE agent box; you drag blocks to add steps ────────
   let counter = $state(0);
-  let nodes = $state.raw<Node[]>([
-    { id: "agent", type: "block", position: { x: 0, y: 0 }, data: { label: name, kind: "trigger", glyph: icon, sub: "agent" } },
-  ]);
-  let edges = $state.raw<Edge[]>([]);
-  let lastId = $state("agent");
+  // The agent (root) node, plus a default Manual trigger wired right after it.
+  function freshGraph(): { nodes: Node[]; edges: Edge[] } {
+    return {
+      nodes: [
+        { id: "agent", type: "block", position: { x: 0, y: 0 }, data: { label: name, kind: "trigger", glyph: icon, sub: "agent", root: true } },
+        { id: "trigger-0", type: "block", position: { x: 0, y: 130 }, data: { label: "Manuel", kind: "trigger", glyph: "▶️", sub: "déclencheur" } },
+      ],
+      edges: [{ id: "e-agent-trigger-0", source: "agent", target: "trigger-0", animated: true }],
+    };
+  }
+  const _g0 = freshGraph();
+  let nodes = $state.raw<Node[]>(_g0.nodes);
+  let edges = $state.raw<Edge[]>(_g0.edges);
+  let lastId = $state("trigger-0");
 
   function newAgent() {
     editingId = null;
     name = "Nouvel agent"; icon = "🐙"; description = ""; author = "You"; expertise = "";
     autonomy = "full_auto"; triggerOn = ""; emit = ""; loopMinutes = 0; goals = ""; checks = "";
-    prompts = {}; params = {}; counter = 0; lastId = "agent";
-    nodes = [{ id: "agent", type: "block", position: { x: 0, y: 0 }, data: { label: name, kind: "trigger", glyph: icon, sub: "agent" } }];
-    edges = [];
+    prompts = {}; params = { "trigger-0": { event: "manual" } }; counter = 0; lastId = "trigger-0";
+    const g = freshGraph();
+    nodes = g.nodes;
+    edges = g.edges;
     selected = "agent"; resetRun();
   }
 
@@ -130,6 +157,13 @@
     edges = [...edges, edge];
     lastId = id;
     selected = id;
+    // A trigger block carries its event and also seeds the agent trigger field.
+    if (b.kind === "trigger") {
+      const ev = TRIGGER_EVENT[key] ?? "";
+      params = { ...params, [id]: { event: ev } };
+      if (ev && ev !== "manual") triggerOn = ev;
+    }
+    return id;
   }
 
   function removeNode(id: string) {
@@ -158,6 +192,18 @@
     if (id !== "agent") modalOpen = true;
   }
 
+  // Right-click on the canvas -> context menu to add a block at that spot.
+  let ctxMenu = $state<{ sx: number; sy: number; cx: number; cy: number } | null>(null);
+  function onContextMenu(e: MouseEvent) {
+    e.preventDefault();
+    const rect = flowEl.getBoundingClientRect();
+    ctxMenu = { sx: e.clientX, sy: e.clientY, cx: e.clientX - rect.left - 95, cy: e.clientY - rect.top - 30 };
+  }
+  function addFromMenu(key: string) {
+    if (ctxMenu) addBlock(key, { x: ctxMenu.cx, y: ctxMenu.cy });
+    ctxMenu = null;
+  }
+
   // Keep the agent node + live status in sync without looping (untrack).
   $effect(() => {
     const nm = name, ic = icon, ss = stepStatus;
@@ -182,7 +228,10 @@
     let toml = `[agent]\nid = "${editingId ?? slug(name)}"\nname = "${name}"\nauthor = "${author}"\nversion = "0.1.0"\n`;
     toml += `description = ${JSON.stringify(desc)}\nexpertise = "${expertise}"\nautonomy = "${autonomy}"\nicon = "${icon}"\n`;
     toml += `emit = [${emitArr.map((x) => `"${x}"`).join(", ")}]\n`;
-    if (triggerOn.trim()) toml += `\n[trigger]\non = "${triggerOn.trim()}"\n`;
+    // Prefer an explicit trigger node's event; fall back to the trigger field.
+    const trigNode = nodes.find((n) => n.data.kind === "trigger" && n.id !== "agent");
+    const trigEvent = (trigNode && params[trigNode.id]?.event?.trim()) || triggerOn.trim();
+    if (trigEvent && trigEvent !== "manual") toml += `\n[trigger]\non = "${trigEvent}"\n`;
     // Steps (by step key; prompt from the node).
     const seen = new Set<string>();
     for (const n of stepNodes) {
@@ -392,7 +441,7 @@
         <button class="save" onclick={save}>{$t("builder.save")}</button>
       </div>
     </div>
-    <div class="flowwrap card" bind:this={flowEl} ondragover={(e) => e.preventDefault()} ondrop={onDrop}>
+    <div class="flowwrap card" bind:this={flowEl} ondragover={(e) => e.preventDefault()} ondrop={onDrop} oncontextmenu={onContextMenu}>
       <SvelteFlow bind:nodes bind:edges {nodeTypes} fitView onnodeclick={onNodeClick}>
         <Background gap={22} />
         <Controls />
@@ -473,6 +522,13 @@
         <div class="nmbody">
           {#if mkind === "step"}
             <label class="blk">{$t("builder.systemPrompt")}<textarea rows="6" bind:value={prompts[selected]} placeholder={$t("builder.promptPlaceholder")}></textarea></label>
+          {:else if mkind === "trigger"}
+            <p class="hint">Déclencheur branché après l'agent.</p>
+            {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
+              <label class="blk">{PARAM_LABEL[pk] ?? pk}<input value={params[selected]?.[pk] ?? ""}
+                oninput={(e) => params = { ...params, [selected]: { ...(params[selected]||{}), [pk]: (e.target as HTMLInputElement).value } }}
+                placeholder={PARAM_PH[pk] ?? ""} /></label>
+            {/each}
           {:else if mkind === "tool"}
             <p class="hint">Outil exécuté à l'étape Action.</p>
             {#each PARAM_KEYS[blockKey(selected)] ?? [] as pk}
@@ -490,6 +546,19 @@
           <button class="ghost" onclick={() => (modalOpen = false)}>Fermer</button>
         </div>
       </div>
+    </div>
+  {/if}
+
+  <!-- Canvas right-click context menu to add a block -->
+  {#if ctxMenu}
+    <div class="ctxback" onclick={() => (ctxMenu = null)} oncontextmenu={(e) => { e.preventDefault(); ctxMenu = null; }} role="presentation"></div>
+    <div class="ctxmenu" style="left: {ctxMenu.sx}px; top: {ctxMenu.sy}px;">
+      {#each PALETTE as g}
+        <div class="ctxgroup">{g.group}</div>
+        {#each g.items as b}
+          <button class="ctxitem" onclick={() => addFromMenu(b.key)}><span class="pg">{b.glyph}</span> {b.label}</button>
+        {/each}
+      {/each}
     </div>
   {/if}
 </div>
@@ -545,6 +614,12 @@
   .nmfoot { display: flex; justify-content: space-between; gap: 0.6rem; padding: 0.8rem 1rem; border-top: 1px solid var(--border); }
   .nmfoot button { border-radius: 8px; padding: 0.5rem 0.9rem; cursor: pointer; font: inherit; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
   .nmfoot .danger { background: var(--err); border-color: var(--err); color: #2a0707; font-weight: 600; }
+  /* Canvas context menu */
+  .ctxback { position: fixed; inset: 0; z-index: 1090; }
+  .ctxmenu { position: fixed; z-index: 1091; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 0.35rem; box-shadow: 0 12px 40px rgba(0,0,0,0.5); max-height: 70vh; overflow-y: auto; width: 200px; }
+  .ctxgroup { color: var(--muted); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.05em; margin: 0.4rem 0.4rem 0.2rem; }
+  .ctxitem { display: flex; align-items: center; gap: 0.45rem; width: 100%; text-align: left; background: none; border: none; color: var(--text); font: inherit; font-size: 0.8rem; padding: 0.35rem 0.45rem; border-radius: 7px; cursor: pointer; }
+  .ctxitem:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
   .alist { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.4rem; }
   .arow { display: flex; align-items: center; }
   .arow.on { background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 8px; }
