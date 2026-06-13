@@ -13,6 +13,7 @@
   import MemoryView from "./lib/MemoryView.svelte";
   import VideoView from "./lib/VideoView.svelte";
   import LoginView from "./lib/LoginView.svelte";
+  import Toasts from "./lib/Toasts.svelte";
   import { t, locale, setLocale } from "./lib/i18n";
   import "./lib/theme"; // applies the persisted theme on load
   import logo from "./lib/assets/takoia.png";
@@ -119,6 +120,8 @@
     </main>
     {/if}
 {/if}
+
+<Toasts />
 
 <style>
   header { border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 80%, transparent); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px); height: 90px; }

@@ -272,4 +272,6 @@ export const fr: Record<string, string> = {
   "builder.icon": "Icône",
   "builder.descr": "Description",
   "builder.descrPlaceholder": "ce que fait cet agent",
+  "builder.triggerPick": "Choisissez comment l'agent démarre",
+  "builder.iconImage": "Ou URL d'image",
 };

@@ -13,6 +13,7 @@
   import Icon from "./Icon.svelte";
   import { api, subscribeJob, type Agent } from "./api";
   import { t } from "./i18n";
+  import { toast, confirmModal } from "./toast";
 
   const nodeTypes = { step: StepNode } as any;
   const STEPS = ["analyse", "decision", "action", "restitution"] as const;
@@ -44,6 +45,15 @@
   let description = $state("");
   let icon = $state("");
   const ICON_CHOICES = ["🐙", "📈", "🧾", "🌦️", "🛰️", "✉️", "🤖", "🔎", "📊", "🛒", "💬", "🧠"];
+  const TRIGGER_TYPES = [
+    { icon: "🖐️", label: "Manuel", event: "" },
+    { icon: "📨", label: "Email reçu", event: "email.received" },
+    { icon: "🔗", label: "Webhook", event: "webhook.received" },
+    { icon: "🧾", label: "Facture", event: "invoice.received" },
+    { icon: "📁", label: "Fichier FTP", event: "ftp.file" },
+    { icon: "⏰", label: "Chaque jour", event: "schedule.daily" },
+    { icon: "⏱️", label: "Chaque heure", event: "schedule.hourly" },
+  ];
   let prompts = $state<Record<StepKey, string>>({ analyse: "", decision: "", action: "", restitution: "" });
   let tools = $state<string[]>([]);
   let toolParams = $state<Record<string, string>>({ symbol: "^IXIC", discord_webhook: "" });
@@ -79,10 +89,11 @@
 
   async function deleteAgent(id: string, ev: Event) {
     ev.stopPropagation();
-    if (!confirm($t("builder.confirmDelete"))) return;
+    if (!(await confirmModal($t("builder.confirmDelete")))) return;
     await api.deleteAgent(id);
     if (editingId === id) newAgent();
     await refreshAgents();
+    toast(`${id} ${$t("builder.delete").toLowerCase()}`, "success");
   }
 
   async function loadAgent(id: string) {
@@ -191,9 +202,11 @@
       await fetch("/api/schedules", { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ agent_id: r.id, title: `${name} loop`, prompt: (goals.trim() || `Run ${name}`) + checkLine, interval_seconds: loopMinutes * 60 }) });
     }
-    createdMsg = $t("builder.created");
+    toast($t("builder.created"), "success");
     await refreshAgents();
     return r.id;
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
     } finally { busy = false; }
   }
 
@@ -249,6 +262,7 @@
   onDestroy(() => { if (cleanup) cleanup(); if (pollTimer) clearInterval(pollTimer); });
 
   const isStep = $derived(selected !== null && (STEPS as readonly string[]).includes(selected));
+  const isImg = (s: string) => /^(https?:|data:)/.test(s || "");
   function emoji(a: Agent): string {
     if (a.icon) return a.icon;
     const e = (a.expertise_domain || "").toLowerCase();
@@ -271,7 +285,9 @@
   <!-- Floating top bar -->
   <div class="topbar card">
     <button class="ptoggle" onclick={() => (agentsOpen = !agentsOpen)} title={$t("builder.myAgents")}>☰</button>
-    <button class="iconbtn" onclick={() => { selected = "general"; inspectorOpen = true; }} title={$t("builder.general")}>{icon || "🐙"}</button>
+    <button class="iconbtn" onclick={() => { selected = "general"; inspectorOpen = true; }} title={$t("builder.general")}>
+      {#if isImg(icon)}<img class="avimg" src={icon} alt="" />{:else}{icon || "🐙"}{/if}
+    </button>
     <input class="agentname" bind:value={name} />
     <button class="gear" onclick={() => { selected = "general"; inspectorOpen = true; }} title={$t("builder.general")}>⚙</button>
     <div class="runctl">
@@ -297,7 +313,7 @@
         {#each agentList as a}
           <div class="arow" class:on={editingId === a.id}>
             <button class="arow-main" onclick={() => loadAgent(a.id)}>
-              <span class="av">{emoji(a)}</span>
+              <span class="av">{#if isImg(emoji(a))}<img class="avimg" src={emoji(a)} alt="" />{:else}{emoji(a)}{/if}</span>
               <span class="an">
                 <span class="anm">{a.name}</span>
                 <span class="asub muted">{a.autonomy_level === "full_auto" ? "auto" : "validation"} · {a.runs_count} exéc.</span>
@@ -353,8 +369,16 @@
       {/if}
     {:else if selected === "trigger"}
       <h3>{$t("builder.node.trigger")}</h3>
+      <p class="muted small">{$t("builder.triggerPick")}</p>
+      <div class="trigtypes">
+        {#each TRIGGER_TYPES as tt}
+          <button class="ttype" class:on={triggerOn === tt.event} onclick={() => (triggerOn = tt.event)}>
+            <span class="tic">{tt.icon}</span>
+            <span class="tn">{tt.label}<span class="muted small"> · {tt.event}</span></span>
+          </button>
+        {/each}
+      </div>
       <label class="blk">{$t("builder.triggerOn")}<input bind:value={triggerOn} placeholder="invoice.received" /></label>
-      <p class="muted small">{$t("builder.triggerHint")}</p>
     {:else if selected === "emit"}
       <h3>{$t("builder.node.emit")}</h3>
       <label class="blk">{$t("builder.emit")}<input bind:value={emit} placeholder="report.ready" /></label>
@@ -366,6 +390,7 @@
           <button class="ic" class:on={icon === ic} onclick={() => (icon = ic)}>{ic}</button>
         {/each}
       </div>
+      <label class="blk">{$t("builder.iconImage")}<input bind:value={icon} placeholder="https://…/logo.png" /></label>
       <label class="blk">{$t("builder.name")}<input bind:value={name} /></label>
       <label class="blk">{$t("builder.descr")}<textarea rows="3" bind:value={description} placeholder={$t("builder.descrPlaceholder")}></textarea></label>
       <label class="blk">{$t("builder.author")}<input bind:value={author} /></label>
@@ -447,6 +472,14 @@
   .iconpick { display: flex; gap: 0.3rem; flex-wrap: wrap; margin: 0.2rem 0 0.5rem; }
   .ic { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.2rem 0.4rem; cursor: pointer; font-size: 1.25rem; line-height: 1.4; }
   .ic.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
+  .avimg { width: 1.2em; height: 1.2em; border-radius: 50%; object-fit: cover; vertical-align: middle; }
+  .iconbtn .avimg, .av .avimg { width: 22px; height: 22px; }
+  .trigtypes { display: flex; flex-direction: column; gap: 0.3rem; margin: 0.4rem 0 0.6rem; }
+  .ttype { display: flex; align-items: center; gap: 0.5rem; background: var(--bg); border: 1px solid var(--border); border-radius: 9px; padding: 0.45rem 0.6rem; cursor: pointer; color: var(--text); font: inherit; text-align: left; }
+  .ttype:hover { border-color: var(--accent); }
+  .ttype.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .tic { font-size: 1.1rem; }
+  .tn { display: flex; flex-direction: column; font-size: 0.82rem; }
   .spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; flex: none; }
   @keyframes spin { to { transform: rotate(360deg); } }
   /* Make the task palette stand out (Scratch-like) */
