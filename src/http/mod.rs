@@ -9,6 +9,7 @@ mod jobs;
 mod marketplace;
 mod mcp;
 mod objectives;
+mod schedules;
 mod skills;
 mod usage;
 
@@ -47,6 +48,10 @@ pub fn router(state: AppState) -> Router {
         .route("/jobs/:id/events", get(jobs::events))
         // Human-in-the-loop
         .route("/approvals/:id", post(approvals::decide))
+        // Recurring schedules (autonomous learning loop)
+        .route("/schedules", get(schedules::list).post(schedules::create))
+        .route("/schedules/:id", delete(schedules::delete))
+        .route("/schedules/:id/toggle", post(schedules::toggle))
         // Settings / connectors (encrypted)
         .route("/connectors", get(connectors::list).post(connectors::upsert))
         .route("/connectors/:id", delete(connectors::delete))

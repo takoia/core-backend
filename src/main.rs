@@ -13,6 +13,7 @@ mod http;
 mod llm;
 mod memory;
 mod queue;
+mod scheduler;
 mod state;
 mod tools;
 
@@ -41,6 +42,9 @@ async fn main() -> Result<()> {
 
     // Background job worker (runs the agent engine).
     agent::worker::spawn(state.clone());
+
+    // Recurring scheduler (autonomous learning loops).
+    scheduler::spawn(state.clone());
 
     let app = http::router(state);
 

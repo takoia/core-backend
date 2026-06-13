@@ -40,6 +40,7 @@ impl AppState {
             &self.cipher,
             account_id,
             &self.config.default_llm_provider,
+            &self.config.agent_workdir,
         )
         .await
     }

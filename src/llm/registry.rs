@@ -34,6 +34,7 @@ impl ProviderRegistry {
         cipher: &Cipher,
         account_id: &str,
         config_default: &str,
+        agent_workdir: &str,
     ) -> Result<Self> {
         let rows = sqlx::query_as::<_, LlmRow>(
             r#"SELECT name, base_url, model, encrypted_secret, is_default
@@ -60,6 +61,7 @@ impl ProviderRegistry {
                     row.name.clone(),
                     Some(row.model),
                     secret,
+                    Some(agent_workdir.to_string()),
                 ))
             } else {
                 Arc::new(OpenAiCompatProvider::new(

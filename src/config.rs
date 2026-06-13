@@ -26,6 +26,9 @@ pub struct Config {
     pub icm_db_path: String,
     /// Optional Claude plan token (`claude setup-token`) used to seed claude_max.
     pub claude_max_token: Option<String>,
+    /// Neutral working directory for agent `claude -p` subprocesses, isolated
+    /// from the host project (no CLAUDE.md / project ICM contamination).
+    pub agent_workdir: String,
 }
 
 impl Config {
@@ -43,6 +46,9 @@ impl Config {
         let discord_webhook_url = non_empty(std::env::var("DISCORD_WEBHOOK_URL").ok());
         let icm_db_path = env_or("ICM_DB_PATH", "data/icm.db");
         let claude_max_token = non_empty(std::env::var("CLAUDE_MAX_TOKEN").ok());
+        // Absolute path OUTSIDE the project git tree so the agent's claude -p
+        // does not walk up to the host CLAUDE.md or trigger project ICM recall.
+        let agent_workdir = env_or("AGENT_WORKDIR", "/tmp/takoia-agent-workspace");
 
         Ok(Self {
             bind_addr,
@@ -54,6 +60,7 @@ impl Config {
             discord_webhook_url,
             icm_db_path,
             claude_max_token,
+            agent_workdir,
         })
     }
 }

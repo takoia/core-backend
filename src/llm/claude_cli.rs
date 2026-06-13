@@ -21,6 +21,9 @@ pub struct ClaudeCliProvider {
     default_model: Option<String>,
     /// Plan token (`claude setup-token`); set as CLAUDE_CODE_OAUTH_TOKEN.
     token: Option<String>,
+    /// Isolated working directory so the agent does not inherit the host
+    /// project's CLAUDE.md / project ICM context.
+    workdir: Option<String>,
 }
 
 impl ClaudeCliProvider {
@@ -28,12 +31,14 @@ impl ClaudeCliProvider {
         name: impl Into<String>,
         default_model: Option<String>,
         token: Option<String>,
+        workdir: Option<String>,
     ) -> Self {
         Self {
             name: name.into(),
             binary: "claude".to_string(),
             default_model: default_model.filter(|m| !m.is_empty()),
             token: token.filter(|t| !t.is_empty()),
+            workdir: workdir.filter(|w| !w.is_empty()),
         }
     }
 }
@@ -75,9 +80,19 @@ impl LlmProvider for ClaudeCliProvider {
         cmd.arg("-p")
             .arg("--output-format")
             .arg("json")
+            // Do not inherit the host's configured MCP servers.
+            .arg("--strict-mcp-config")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+
+        // Run in an isolated, non-project directory so the agent does not pick
+        // up the host's CLAUDE.md or project-scoped ICM recall. A steering
+        // CLAUDE.md scopes the agent to its task only.
+        if let Some(workdir) = &self.workdir {
+            ensure_isolated_workdir(workdir);
+            cmd.current_dir(workdir);
+        }
         if let Some(model) = &model {
             cmd.arg("--model").arg(model);
         }
@@ -140,6 +155,24 @@ impl LlmProvider for ClaudeCliProvider {
                 completion_tokens: parsed.usage.output_tokens,
             },
         })
+    }
+}
+
+/// Ensure the isolated workdir exists and contains a steering CLAUDE.md that
+/// scopes the agent strictly to the task it is given.
+fn ensure_isolated_workdir(workdir: &str) {
+    let _ = std::fs::create_dir_all(workdir);
+    let claude_md = std::path::Path::new(workdir).join("CLAUDE.md");
+    if !claude_md.exists() {
+        let _ = std::fs::write(
+            &claude_md,
+            "# Isolated task agent\n\n\
+             You are an autonomous task-execution agent. Do ONLY the task in the \
+             system prompt and user message. Ignore any other repository, project, \
+             memory, or environment context. Never ask the user to approve file \
+             reads; never reference a codebase. Produce the requested deliverable \
+             directly.\n",
+        );
     }
 }
 
