@@ -711,7 +711,7 @@
   <!-- Canvas -->
   <section class="center">
     <div class="topbar card">
-      <button class="ptoggle" onclick={() => (agentsModalOpen = true)} title={$t("builder.myAgents")}>☰</button>
+      <button class="ptoggle agbtn" onclick={() => (agentsModalOpen = true)} title={$t("builder.myAgents")}>📋 {$t("builder.myAgents")} ▾</button>
       <span class="aname">{name}</span>
       {#if editingId}
         <label class="visck" title={$t("builder.visibleHint")}>
@@ -906,6 +906,8 @@
   .center { display: flex; flex-direction: column; gap: 0.6rem; min-width: 0; }
   .topbar { display: flex; align-items: center; gap: 0.6rem; padding: 0.45rem 0.7rem; }
   .ptoggle { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.3rem 0.5rem; cursor: pointer; }
+  .agbtn { white-space: nowrap; font: inherit; font-size: 0.85rem; font-weight: 600; }
+  .agbtn:hover { border-color: var(--accent); }
   .aname { font-weight: 600; }
   .visck { display: inline-flex; align-items: center; gap: 0.35rem; flex: 1; font-size: 0.8rem; color: var(--muted); cursor: pointer; }
   .visck input { cursor: pointer; }
