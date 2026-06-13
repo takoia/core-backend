@@ -132,12 +132,9 @@
   // ── Agent list ─────────────────────────────────────────────────────────────
   let agentList = $state<Agent[]>([]);
   async function refreshAgents() { try { agentList = await api.listAgents(); } catch { agentList = []; } }
-  // Re-open the last edited agent when returning to the dashboard.
-  onMount(async () => {
-    await refreshAgents();
-    const last = localStorage.getItem("takoia.lastAgent");
-    if (last && agentList.some((a) => a.id === last)) await loadAgent(last);
-  });
+  // Arriving on the dashboard always shows the agent picker (the home of the
+  // builder). Pick or create an agent to start editing.
+  onMount(refreshAgents);
 
   function agentEmoji(a: Agent): string {
     if (a.icon) return a.icon;

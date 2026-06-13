@@ -23,6 +23,10 @@
 
   type View = "dashboard" | "video" | "marketplace" | "mcp" | "skills" | "memory" | "logs" | "settings" | "usage";
   let view: View = "dashboard";
+  // Bumped whenever the dashboard nav/logo is clicked, to remount BuilderView so
+  // it returns to the agent picker.
+  let dashHome = 0;
+  function goDashboard() { view = "dashboard"; dashHome++; }
   let navCollapsed = false;
   let healthy = false;
   let token: string | null = localStorage.getItem("auth_token");
@@ -78,12 +82,12 @@
     <div class="container nav">
       <div class="brand">
         <button class="burger" on:click={() => (navCollapsed = !navCollapsed)} title="menu">☰</button>
-        <button class="logobtn" on:click={() => (view = "dashboard")} title="home">
+        <button class="logobtn" on:click={goDashboard} title="home">
           <img class="logo" src={logo} alt="TakoIA" />
         </button>
       </div>
       <nav class:collapsed={navCollapsed}>
-        <button class:active={view === "dashboard"} on:click={() => (view = "dashboard")}><Icon name="builder" />{$t("nav.dashboard")}</button>
+        <button class:active={view === "dashboard"} on:click={goDashboard}><Icon name="builder" />{$t("nav.dashboard")}</button>
         <button class:active={view === "video"} on:click={() => (view = "video")}><Icon name="video" />{$t("nav.video")}</button>
         <button class:active={view === "marketplace"} on:click={() => (view = "marketplace")}>🛒 {$t("nav.marketplace")}</button>
         <button class:active={view === "mcp"} on:click={() => (view = "mcp")}><Icon name="mcp" />{$t("nav.mcp")}</button>
@@ -103,7 +107,7 @@
   </header>
 
     {#if view === "dashboard"}
-      <BuilderView />
+      {#key dashHome}<BuilderView />{/key}
     {:else}
     <main class="container">
       {#if view === "mcp"}
