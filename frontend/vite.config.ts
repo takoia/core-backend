@@ -14,8 +14,11 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8080",
+        // Defaults to a local backend; set VITE_API_TARGET to proxy a remote
+        // one (e.g. the VM) for HMR against real data.
+        target: process.env.VITE_API_TARGET || "http://127.0.0.1:8080",
         changeOrigin: true,
+        secure: true,
         // SSE endpoints must not be buffered.
         ws: false,
       },
