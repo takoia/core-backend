@@ -31,9 +31,11 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health::health))
         // Agents + per-step customization + marketplace publishing
         .route("/agents", get(agents::list).post(agents::create))
+        .route("/agents/import", post(agents::import_toml))
         .route("/agents/:id", get(agents::get).put(agents::update))
         .route("/agents/:id/steps", put(agents::update_steps))
         .route("/agents/:id/publish", post(agents::publish))
+        .route("/agents/:id/export", get(agents::export_toml))
         .route("/agents/:id/memories", get(agents::memories))
         // Objectives -> jobs
         .route("/objectives", get(objectives::list).post(objectives::create))

@@ -50,7 +50,8 @@ async fn web_search(provider: &Arc<dyn LlmProvider>, query: &str) -> Result<Tool
              No preamble, no conclusion.",
         ),
         Message::user(format!("web_search query: {query}")),
-    ]);
+    ])
+    .with_web_search();
     let completion = provider.complete(req).await?;
     Ok(ToolOutput {
         output: completion.content,

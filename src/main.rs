@@ -2,6 +2,7 @@
 //! and serve the HTTP API plus the static frontend.
 
 mod agent;
+mod agentdef;
 mod bootstrap;
 mod config;
 mod crypto;

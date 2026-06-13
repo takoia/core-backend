@@ -6,6 +6,8 @@ use crate::domain::StepType;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::extract::{Path, State};
+use axum::http::header;
+use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -236,6 +238,28 @@ pub async fn publish(
     .execute(&state.db)
     .await?;
     Ok(Json(json!({ "ok": true, "visibility": visibility })))
+}
+
+/// `POST /api/agents/import` — import a declarative agent from a TOML body.
+pub async fn import_toml(State(state): State<AppState>, body: String) -> AppResult<Json<Value>> {
+    let id = crate::agentdef::import(&state.db, DEFAULT_ACCOUNT_ID, &body)
+        .await
+        .map_err(AppError::Other)?;
+    Ok(Json(json!({ "id": id })))
+}
+
+/// `GET /api/agents/:id/export` — export the agent as a TOML definition.
+pub async fn export_toml(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    let toml = crate::agentdef::export(&state.db, &id)
+        .await
+        .map_err(AppError::Other)?;
+    Ok((
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        toml,
+    ))
 }
 
 /// `GET /api/agents/:id/memories` — the agent's accumulated expertise.

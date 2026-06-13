@@ -84,6 +84,9 @@ impl LlmProvider for ClaudeCliProvider {
         if !system.trim().is_empty() {
             cmd.arg("--append-system-prompt").arg(&system);
         }
+        if req.enable_web_search {
+            cmd.arg("--allowedTools").arg("WebSearch");
+        }
         if let Some(token) = &self.token {
             cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
         }

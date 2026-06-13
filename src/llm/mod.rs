@@ -50,11 +50,26 @@ pub struct CompletionRequest {
     pub model: Option<String>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    /// Ask the provider to perform live web search if it supports it
+    /// (claude -p enables the WebSearch tool).
+    pub enable_web_search: bool,
 }
 
 impl CompletionRequest {
     pub fn new(messages: Vec<Message>) -> Self {
-        Self { messages, model: None, temperature: None, max_tokens: None }
+        Self {
+            messages,
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            enable_web_search: false,
+        }
+    }
+
+    /// Enable live web search for this request.
+    pub fn with_web_search(mut self) -> Self {
+        self.enable_web_search = true;
+        self
     }
 }
 

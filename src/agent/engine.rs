@@ -169,6 +169,11 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob) -> Result<RunOutcome> {
     bus.publish(JobEvent::status(&job.id, "done", "job completed"));
     increment_runs(state, &job.agent_id).await;
 
+    // Event choreography: emit this agent's events, triggering any wired agents.
+    if let Err(e) = super::choreography::dispatch(state, &job.id, &job.agent_id, &report).await {
+        tracing::warn!(error = %e, "choreography dispatch failed");
+    }
+
     Ok(RunOutcome::Completed)
 }
 
