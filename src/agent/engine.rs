@@ -313,6 +313,15 @@ impl<'a> RunCtx<'a> {
 
         let provider = self.registry.resolve(self.provider_for(step).as_deref());
         let mut messages = vec![Message::system(self.system_prompt(step))];
+        // Tell the agent it owns a persistent ICM memory it recalls and writes to.
+        messages.push(Message::system(
+            "You have a persistent long-term memory (ICM). Before acting it is \
+             recalled for you (the most important and most recent items first), \
+             and your conclusions are saved back to it automatically after each \
+             step. Build on what you already learned; do not contradict it and \
+             avoid repeating it."
+                .to_string(),
+        ));
         if !self.session.is_empty() {
             messages.push(Message::system(format!(
                 "Context from earlier steps of THIS run (stay consistent with it):\n{}",
@@ -321,8 +330,14 @@ impl<'a> RunCtx<'a> {
         }
         if !recalled.trim().is_empty() {
             messages.push(Message::system(format!(
-                "Recalled long-term memory (past runs & expertise):\n{recalled}"
+                "Your recalled memory (most important & recent first):\n{recalled}"
             )));
+        } else {
+            messages.push(Message::system(
+                "Your memory is currently empty for this objective — what you \
+                 conclude now becomes your first memories."
+                    .to_string(),
+            ));
         }
         messages.push(Message::user(input.to_string()));
         let req = CompletionRequest::new(messages);
