@@ -1,0 +1,24 @@
+# Optional Postgres for when you switch off SQLite.
+# The MVP runs on embedded SQLite and needs NO container at all.
+# To use Postgres: `docker compose up -d` then set
+#   DATABASE_URL=postgres://takoia:takoia@localhost:5432/takoia
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: takoia-postgres
+    environment:
+      POSTGRES_USER: takoia
+      POSTGRES_PASSWORD: takoia
+      POSTGRES_DB: takoia
+    ports:
+      - "5432:5432"
+    volumes:
+      - takoia-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U takoia"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  takoia-pg-data:

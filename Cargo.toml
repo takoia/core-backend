@@ -1,0 +1,68 @@
+[package]
+name = "takoia-core"
+version = "0.1.0"
+edition = "2021"
+description = "TakoIA core-backend: autonomous agent orchestrator (4-step loop)"
+
+[[bin]]
+name = "takoia"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+# Web
+axum = { version = "0.7", features = ["macros"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
+tower = "0.4"
+# DB
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "sqlite",
+    "macros",
+    "migrate",
+    "uuid",
+    "chrono",
+    "json",
+] }
+# HTTP client (LLM providers + connectors)
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "stream",
+] }
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Common
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Errors
+anyhow = "1"
+thiserror = "1"
+# Config
+dotenvy = "0.15"
+# Crypto for connector credentials
+chacha20poly1305 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+# Scheduling
+cron = "0.12"
+# SSE / async streams
+futures = "0.3"
+async-stream = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+# Embed frontend assets into the single binary (demo build)
+rust-embed = { version = "8", features = ["mime-guess"], optional = true }
+mime_guess = { version = "2", optional = true }
+
+[features]
+# Enable to embed frontend/dist into the binary for a single-file demo build.
+embed-frontend = ["dep:rust-embed", "dep:mime_guess"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
