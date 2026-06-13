@@ -202,6 +202,14 @@
   <h2>{$t("video.title")} <span class="muted small">— {$t("video.subtitle")}</span></h2>
   <p class="muted small">{$t("video.hint")}</p>
 
+  <div class="targetbar">
+    <span class="muted small">{$t("video.targetAgent")}</span>
+    <select bind:value={targetAgent}>
+      {#if agents.length === 0}<option value="">{$t("agents.empty")}</option>{/if}
+      {#each agents as a}<option value={a.id}>{a.name}</option>{/each}
+    </select>
+  </div>
+
   <div class="modes">
     <button class:on={mode === "video"} on:click={() => (mode = "video")}>🎥 {$t("video.modeVideo")}</button>
     <button class:on={mode === "photo"} on:click={() => (mode = "photo")}>🖼️ {$t("video.modePhoto")}</button>
@@ -308,6 +316,8 @@
   .row { display: flex; gap: 0.8rem; align-items: center; margin-top: 0.8rem; flex-wrap: wrap; }
   .opts { display: grid; grid-template-columns: 1fr 120px; gap: 0.8rem; align-items: start; }
   .dur input { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.55rem 0.7rem; font: inherit; margin-top: 0.25rem; }
+  .targetbar { display: flex; align-items: center; gap: 0.6rem; margin: 0.6rem 0 0.2rem; flex-wrap: wrap; }
+  .targetbar select { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.4rem 0.6rem; font: inherit; min-width: 200px; }
   .improve { margin-top: 1rem; padding-top: 0.8rem; border-top: 1px solid var(--border); }
   .improve select { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.5rem 0.6rem; font: inherit; }
   button.primary { background: var(--accent); border: 1px solid var(--accent); color: #04231a; font-weight: 600; border-radius: 8px; padding: 0.55rem 1rem; cursor: pointer; font: inherit; }
