@@ -16,6 +16,12 @@ pub const DEFAULT_ACCOUNT_ID: &str = "00000000-0000-0000-0000-000000000001";
 pub async fn run(db: &Db, cipher: &Cipher, config: &Config) -> Result<()> {
     ensure_account(db).await?;
     seed_providers(db, cipher, config).await?;
+    // No default agents are seeded — users create their own.
+    Ok(())
+}
+
+#[allow(dead_code)]
+async fn _unused_seeds(db: &Db) -> Result<()> {
     seed_demo_agent(db).await?;
     seed_invoice_agent(db).await?;
     seed_example_agents(db).await?;
