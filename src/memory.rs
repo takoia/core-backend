@@ -248,6 +248,86 @@ impl Memory {
         Ok(())
     }
 
+    /// Agent ids that currently have at least `min` stored memories.
+    pub async fn agents_with_memory(&self, min: i64) -> Vec<String> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT agent_id FROM memories GROUP BY agent_id HAVING COUNT(*) >= ?",
+        )
+        .bind(min)
+        .fetch_all(&self.db)
+        .await
+        .unwrap_or_default()
+    }
+
+    /// Number of stored memories for an agent (DB mirror).
+    pub async fn count(&self, agent_id: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM memories WHERE agent_id = ?")
+            .bind(agent_id)
+            .fetch_one(&self.db)
+            .await
+            .unwrap_or(0)
+    }
+
+    /// Consolidate an agent's verbatim memories into a single distilled summary
+    /// (ICM native consolidation, LLM summarizer via the inherited Max token).
+    /// Best-effort: a failure must never break a run.
+    pub async fn consolidate(&self, agent_id: &str) {
+        let out = Command::new("icm")
+            .arg("consolidate")
+            .arg("--topic")
+            .arg(Self::topic(agent_id))
+            .arg("--summarizer-provider")
+            .arg("claude")
+            .arg("--db")
+            .arg(&self.icm_db_path)
+            .arg("--no-embeddings")
+            .output()
+            .await;
+        match out {
+            Ok(o) if o.status.success() => {
+                // Keep the DB mirror in sync: replace verbatim rows with the
+                // consolidated summary so the UI and DB-fallback recall match.
+                self.resync_mirror_from_icm(agent_id).await;
+                tracing::info!(agent_id, "consolidated agent memory");
+            }
+            Ok(o) => tracing::warn!(agent_id, stderr = %String::from_utf8_lossy(&o.stderr), "icm consolidate failed"),
+            Err(e) => tracing::warn!(agent_id, error = %e, "icm consolidate spawn failed"),
+        }
+    }
+
+    /// Apply temporal decay to memory weights, then prune the faded ones.
+    pub async fn decay_and_prune(&self) {
+        let _ = Command::new("icm")
+            .args(["decay", "--db", &self.icm_db_path, "--no-embeddings"])
+            .output()
+            .await;
+        let _ = Command::new("icm")
+            .args(["prune", "--threshold", "0.1", "--db", &self.icm_db_path, "--no-embeddings"])
+            .output()
+            .await;
+    }
+
+    /// After ICM consolidation removed the originals, rebuild the DB mirror for
+    /// this agent from what ICM now holds (the consolidated summary).
+    async fn resync_mirror_from_icm(&self, agent_id: &str) {
+        let recalled = self.recall_icm(agent_id, "", 50).await.unwrap_or_default();
+        if recalled.trim().is_empty() {
+            return;
+        }
+        let _ = sqlx::query("DELETE FROM memories WHERE agent_id = ?")
+            .bind(agent_id)
+            .execute(&self.db)
+            .await;
+        let _ = sqlx::query(
+            r#"INSERT INTO memories (id, agent_id, key, content) VALUES (?, ?, 'consolidated', ?)"#,
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(agent_id)
+        .bind(recalled.trim())
+        .execute(&self.db)
+        .await;
+    }
+
     /// List stored memories for an agent (UI).
     pub async fn list(&self, agent_id: &str) -> Result<Vec<MemoryEntry>> {
         let rows = sqlx::query_as::<_, MemoryEntry>(
@@ -259,4 +339,23 @@ impl Memory {
         .await?;
         Ok(rows)
     }
+}
+
+/// Spawn the recurring background memory-maintenance loop: for each agent with
+/// enough verbatim memories, consolidate them into a distilled summary (ICM
+/// native), then apply temporal decay and prune faded entries. Keeps memory
+/// from growing as a verbatim pile and surfaces the important/recent facts.
+pub fn spawn_maintenance(memory: Memory) {
+    use std::time::Duration;
+    tokio::spawn(async move {
+        // Let the server settle before the first pass.
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        loop {
+            for agent_id in memory.agents_with_memory(6).await {
+                memory.consolidate(&agent_id).await;
+            }
+            memory.decay_and_prune().await;
+            tokio::time::sleep(Duration::from_secs(1800)).await; // every 30 min
+        }
+    });
 }

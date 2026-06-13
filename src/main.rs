@@ -51,6 +51,9 @@ async fn main() -> Result<()> {
     // Recurring scheduler (autonomous learning loops).
     scheduler::spawn(state.clone());
 
+    // Background memory maintenance: consolidate / decay / prune ICM memories.
+    memory::spawn_maintenance(state.memory.clone());
+
     let app = http::router(state);
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)
