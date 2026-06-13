@@ -415,6 +415,50 @@
   let paletteOpen = $state(true);
   let inspectorOpen = $state(true);
   let modalOpen = $state(false);
+  // Fleet view: display 1..n agents' graphs read-only on the canvas.
+  let fleetAgents = $state<string[]>([]);
+  let fleetNodes = $state.raw<Node[]>([]);
+  let fleetEdges = $state.raw<Edge[]>([]);
+
+  function collectFleetToolKeys(steps: any[]): string[] {
+    const keys: string[] = [];
+    for (const sc of steps) {
+      let opt: any = {}; try { opt = JSON.parse(sc.options || "{}"); } catch { /* */ }
+      if (Array.isArray(opt.allowed_tools)) for (const k of opt.allowed_tools) if (!keys.includes(k)) keys.push(k);
+    }
+    return keys;
+  }
+  async function composeFleet() {
+    if (!fleetAgents.length) { fleetNodes = []; fleetEdges = []; return; }
+    const defs = await Promise.all(fleetAgents.map((id) => api.getAgent(id).catch(() => null)));
+    const ns: Node[] = []; const es: Edge[] = [];
+    defs.filter(Boolean).forEach((d: any, col) => {
+      const x = col * 300;
+      const aid = d.agent.id;
+      const agId = `f:${aid}:agent`;
+      ns.push({ id: agId, type: "block", position: { x, y: 0 }, data: { label: d.agent.name, kind: "trigger", glyph: d.agent.icon || "🐙", sub: "agent", root: true } } as Node);
+      let prev = agId; let row = 1;
+      for (const sc of d.steps) {
+        if (!(sc.system_prompt || "").trim()) continue;
+        const b = ALL_BLOCKS[sc.step_type];
+        const nid = `f:${aid}:s:${row}`;
+        ns.push({ id: nid, type: "block", position: { x, y: row * 110 }, data: { label: b?.label ?? sc.step_type, kind: "step", glyph: b?.glyph ?? "•" } } as Node);
+        es.push({ id: `fe:${nid}`, source: prev, target: nid, animated: true }); prev = nid; row++;
+      }
+      for (const tk of collectFleetToolKeys(d.steps)) {
+        const b = ALL_BLOCKS[tk]; if (!b) continue;
+        const nid = `f:${aid}:t:${row}`;
+        ns.push({ id: nid, type: "block", position: { x, y: row * 110 }, data: { label: b.label, kind: "tool", glyph: b.glyph } } as Node);
+        es.push({ id: `fe:${nid}`, source: prev, target: nid }); prev = nid; row++;
+      }
+    });
+    fleetNodes = ns; fleetEdges = es;
+  }
+  function onFleetPick(e: Event) {
+    fleetAgents = Array.from((e.target as HTMLSelectElement).selectedOptions).map((o) => o.value);
+    composeFleet();
+  }
+  function exitFleet() { fleetAgents = []; fleetNodes = []; fleetEdges = []; }
   function onIconFile(e: Event) {
     const f = (e.target as HTMLInputElement).files?.[0];
     if (!f) return;
@@ -459,7 +503,15 @@
   <section class="center">
     <div class="topbar card">
       <button class="ptoggle" onclick={() => (agentsOpen = !agentsOpen)} title={$t("builder.myAgents")}>☰</button>
-      <span class="aname">{name}</span>
+      {#if fleetAgents.length}
+        <span class="aname">👥 {fleetAgents.length} {$t("builder.fleetView")}</span>
+        <button class="ptoggle" onclick={exitFleet} title={$t("builder.fleetExit")}>✕</button>
+      {:else}
+        <span class="aname">{name}</span>
+      {/if}
+      <select multiple class="fleetsel" onchange={onFleetPick} title={$t("builder.fleetPick")}>
+        {#each agentList as a}<option value={a.id} selected={fleetAgents.includes(a.id)}>{a.name}</option>{/each}
+      </select>
       <div class="runctl">
         {#if busy || runStatus === "queued" || runStatus === "running"}<span class="spinner"></span>{/if}
         {#if runStatus}<span class="badge {runStatus}">{runStatus}</span>{/if}
@@ -468,6 +520,15 @@
         <button class="save" onclick={save}>{$t("builder.save")}</button>
       </div>
     </div>
+    {#if fleetAgents.length}
+      <div class="flowwrap card">
+        <SvelteFlow bind:nodes={fleetNodes} bind:edges={fleetEdges} {nodeTypes} fitView nodesDraggable={false} elementsSelectable={false}>
+          <Background gap={22} />
+          <Controls />
+          <MiniMap pannable zoomable />
+        </SvelteFlow>
+      </div>
+    {:else}
     <div class="flowwrap card" bind:this={flowEl} ondragover={(e) => e.preventDefault()} ondrop={onDrop} oncontextmenu={onContextMenu}>
       <SvelteFlow bind:nodes bind:edges {nodeTypes} fitView onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu}>
         <Background gap={22} />
@@ -475,6 +536,7 @@
         <MiniMap pannable zoomable />
       </SvelteFlow>
     </div>
+    {/if}
     {#if runLogs.length}
       <div class="logfeed card">{#each runLogs.slice(-5) as l}<div class="lf">▸ {l}</div>{/each}</div>
     {/if}
@@ -620,7 +682,9 @@
   .center { display: flex; flex-direction: column; gap: 0.6rem; min-width: 0; }
   .topbar { display: flex; align-items: center; gap: 0.6rem; padding: 0.45rem 0.7rem; }
   .ptoggle { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.3rem 0.5rem; cursor: pointer; }
-  .aname { font-weight: 600; flex: 1; }
+  .aname { font-weight: 600; }
+  .fleetsel { flex: 1; min-width: 120px; max-width: 280px; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.2rem 0.4rem; font: inherit; font-size: 0.78rem; height: 30px; }
+  .fleetsel:focus { height: auto; max-height: 120px; }
   .runctl { display: flex; align-items: center; gap: 0.4rem; }
   .runctl button { border-radius: 8px; padding: 0.4rem 0.7rem; cursor: pointer; font: inherit; font-size: 0.82rem; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
   .start { background: var(--ok) !important; border-color: var(--ok) !important; color: #04231a !important; font-weight: 600; }
