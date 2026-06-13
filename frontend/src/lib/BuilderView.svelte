@@ -118,6 +118,9 @@
   let description = $state("");
   let author = $state("You");
   let expertise = $state("");
+  let persona = $state("");
+  let scaffoldDesc = $state("");
+  let scaffolding = $state(false);
   let autonomy = $state<"full_auto" | "confirm_before_action">("full_auto");
   let triggerOn = $state("");
   let emit = $state("");
@@ -190,6 +193,7 @@
   function newAgent() {
     editingId = null; agentVisible = false;
     name = "Nouvel agent"; icon = "🐙"; description = ""; author = "You"; expertise = "";
+    persona = ""; scaffoldDesc = "";
     autonomy = "full_auto"; triggerOn = ""; emit = ""; loopMinutes = defaultLoopMin(); goals = ""; checks = "";
     prompts = {}; params = { "trigger-0": { event: "manual" } }; counter = 0; lastId = "restitution";
     const g = freshGraph();
@@ -197,6 +201,21 @@
     edges = g.edges;
     selected = "agent"; resetRun();
     agentsModalOpen = false;
+  }
+
+  // Describe the agent in one line → generate the 4 step definitions + persona.
+  async function runScaffold() {
+    if (!scaffoldDesc.trim()) return;
+    scaffolding = true;
+    try {
+      const r = await api.scaffold(scaffoldDesc.trim());
+      persona = r.persona || persona;
+      if (!description.trim()) description = scaffoldDesc.trim();
+      if (!goals.trim()) goals = scaffoldDesc.trim();
+      prompts = { ...prompts, analyse: r.analyse || "", decision: r.decision || "", action: r.action || "", restitution: r.restitution || "" };
+      toast($t("builder.scaffolded"), "success");
+    } catch (e) { toast(e instanceof Error ? e.message : String(e), "error"); }
+    finally { scaffolding = false; }
   }
 
   function addBlock(key: string, pos?: { x: number; y: number }) {
@@ -360,7 +379,7 @@
     const desc = rules.length ? `${baseDesc} Rules: ${rules.join(" ")}` : baseDesc;
     const emitArr = emit.split(",").map((x) => x.trim()).filter(Boolean);
     let toml = `[agent]\nid = "${editingId ?? slug(name)}"\nname = "${name}"\nauthor = "${author}"\nversion = "0.1.0"\n`;
-    toml += `description = ${JSON.stringify(desc)}\nexpertise = "${expertise}"\nautonomy = "${autonomy}"\nicon = "${icon}"\n`;
+    toml += `description = ${JSON.stringify(desc)}\nexpertise = "${expertise}"\npersona = ${JSON.stringify(persona)}\nautonomy = "${autonomy}"\nicon = "${icon}"\n`;
     toml += `emit = [${emitArr.map((x) => `"${x}"`).join(", ")}]\n`;
     // Prefer an explicit trigger node's event; fall back to the trigger field.
     const trigNode = nodes.find((n) => n.data.kind === "trigger" && n.id !== "agent");
@@ -408,6 +427,7 @@
     agentVisible = (d.agent as any).visibility === "public";
     localStorage.setItem("takoia.lastAgent", id);
     name = d.agent.name; icon = d.agent.icon || ""; description = d.agent.description ?? "";
+    persona = (d.agent as any).persona ?? "";
     author = d.agent.author ?? ""; expertise = d.agent.expertise_domain ?? "";
     autonomy = d.agent.autonomy_level === "full_auto" ? "full_auto" : "confirm_before_action";
     triggerOn = (d.agent as any).trigger_on ?? "";
@@ -743,6 +763,12 @@
     <div class="phead insp-top"><strong>{$t("builder.properties")}</strong><button class="collapse" onclick={() => (inspectorOpen = false)} title="Réduire">»</button></div>
     {#if selected === "agent"}
       <h3>{$t("builder.general")}</h3>
+      <div class="scaffold">
+        <label class="blk">✨ {$t("builder.describe")}
+          <textarea rows="2" bind:value={scaffoldDesc} placeholder={$t("builder.describePh")}></textarea>
+        </label>
+        <button class="genbtn" onclick={runScaffold} disabled={scaffolding || !scaffoldDesc.trim()}>{scaffolding ? "…" : "✨ " + $t("builder.generate")}</button>
+      </div>
       <div class="iconrow">
         <span class="bigicon">{#if isImg(icon)}<img class="avimg2" src={icon} alt="" />{:else}{icon || "🐙"}{/if}</span>
         <label class="upl">{$t("builder.upload")}<input type="file" accept="image/*" onchange={onIconFile} /></label>
@@ -750,6 +776,8 @@
       <div class="iconpick">{#each ["🐙","📈","🧾","🌦️","🛰️","✉️","🤖","🔎","📊","🛒"] as ic}<button class="ic" class:on={icon===ic} onclick={() => (icon=ic)}>{ic}</button>{/each}</div>
       <label class="blk">{$t("builder.name")}<input bind:value={name} /></label>
       <label class="blk">{$t("builder.descr")}<textarea rows="2" bind:value={description}></textarea></label>
+      <label class="blk">{$t("builder.persona")}<textarea rows="3" bind:value={persona} placeholder={$t("builder.personaPh")}></textarea></label>
+      <p class="hint">{$t("builder.personaHint")}</p>
       <label class="blk">{$t("builder.autonomy")}
         <select bind:value={autonomy}><option value="confirm_before_action">{$t("builder.confirm")}</option><option value="full_auto">{$t("builder.fullAuto")}</option></select>
       </label>
@@ -958,6 +986,9 @@
   .del { background: none; border: none; cursor: pointer; opacity: 0.55; padding: 0.25rem; }
   .del:hover { opacity: 1; }
   hr { border: none; border-top: 1px solid var(--border); margin: 0.8rem 0; }
+  .scaffold { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border)); border-radius: 10px; padding: 0.6rem; margin-bottom: 0.8rem; }
+  .genbtn { margin-top: 0.4rem; width: 100%; background: var(--accent); border: none; color: #04231a; font-weight: 600; border-radius: 8px; padding: 0.5rem; cursor: pointer; font: inherit; }
+  .genbtn:disabled { opacity: 0.5; cursor: default; }
   .iconrow { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.4rem; }
   .bigicon { font-size: 2rem; }
   .hicon { width: 24px; height: 24px; border-radius: 6px; object-fit: cover; vertical-align: middle; }

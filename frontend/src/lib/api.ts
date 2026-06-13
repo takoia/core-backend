@@ -133,6 +133,12 @@ export const api = {
     }),
 
   // Marketplace: keys, earnings, and the public invoke API.
+  scaffold: (description: string) =>
+    req<{ persona: string; analyse: string; decision: string; action: string; restitution: string }>(
+      "/api/agents/scaffold",
+      { method: "POST", headers: jsonH, body: JSON.stringify({ description }) },
+    ),
+
   listKeys: () => req<{ keys: { id: string; name: string; key_prefix: string; revoked: number; last_used_at: string | null }[] }>("/api/keys").then((r) => r.keys),
   createKey: (name: string) => req<{ key: string; prefix: string }>("/api/keys", { method: "POST", headers: jsonH, body: JSON.stringify({ name }) }),
   revokeKey: (id: string) => req(`/api/keys/${id}`, { method: "DELETE" }),

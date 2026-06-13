@@ -35,6 +35,7 @@ struct ObjectiveRow {
 struct AgentRow {
     autonomy_level: String,
     expertise_domain: String,
+    persona: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -61,7 +62,7 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
     .context("objective not found")?;
 
     let agent = sqlx::query_as::<_, AgentRow>(
-        "SELECT autonomy_level, expertise_domain FROM agents WHERE id = ?",
+        "SELECT autonomy_level, expertise_domain, persona FROM agents WHERE id = ?",
     )
     .bind(&job.agent_id)
     .fetch_one(&state.db)
@@ -90,6 +91,7 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
         registry: &registry,
         configs: &configs,
         expertise: &agent.expertise_domain,
+        persona: &agent.persona,
         account_id: &objective.account_id,
         objective_prompt: &objective.prompt,
         session: Vec::new(),
@@ -234,6 +236,7 @@ struct RunCtx<'a> {
     registry: &'a crate::llm::ProviderRegistry,
     configs: &'a HashMap<String, StepConfigRow>,
     expertise: &'a str,
+    persona: &'a str,
     account_id: &'a str,
     objective_prompt: &'a str,
     /// Accumulated outputs of THIS run's steps, injected into every later step
@@ -322,6 +325,12 @@ impl<'a> RunCtx<'a> {
 
         let provider = self.registry.resolve(self.provider_for(step).as_deref());
         let mut messages = vec![Message::system(self.system_prompt(step))];
+        // Per-agent persona (static identity/voice). The evolving half is the
+        // ICM memory recalled just below — together they form the agent's
+        // personalization that grows as memory consolidates.
+        if !self.persona.trim().is_empty() {
+            messages.push(Message::system(format!("Your persona / identity:\n{}", self.persona)));
+        }
         // Tell the agent it owns a persistent ICM memory it recalls and writes to.
         messages.push(Message::system(
             "You have a persistent long-term memory (ICM). Before acting it is \

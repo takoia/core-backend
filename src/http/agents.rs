@@ -28,13 +28,14 @@ struct AgentRow {
     trigger_on: Option<String>,
     emit: String,
     icon: String,
+    persona: String,
 }
 
 /// `GET /api/agents` — list this account's agents.
 pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
     let rows = sqlx::query_as::<_, AgentRow>(
         r#"SELECT id, name, description, autonomy_level, expertise_domain, visibility,
-                  price_per_run_usd, runs_count, created_at, author, trigger_on, emit, icon
+                  price_per_run_usd, runs_count, created_at, author, trigger_on, emit, icon, persona
            FROM agents WHERE account_id = ? ORDER BY created_at DESC"#,
     )
     .bind(DEFAULT_ACCOUNT_ID)
@@ -47,7 +48,7 @@ pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
 pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Value>> {
     let agent = sqlx::query_as::<_, AgentRow>(
         r#"SELECT id, name, description, autonomy_level, expertise_domain, visibility,
-                  price_per_run_usd, runs_count, created_at, author, trigger_on, emit, icon
+                  price_per_run_usd, runs_count, created_at, author, trigger_on, emit, icon, persona
            FROM agents WHERE id = ?"#,
     )
     .bind(&id)
@@ -324,6 +325,75 @@ pub async fn memories(
 ) -> AppResult<Json<Value>> {
     let items = state.memory.list(&id).await.map_err(AppError::Other)?;
     Ok(Json(json!({ "memories": items })))
+}
+
+#[derive(Deserialize)]
+pub struct ScaffoldInput {
+    pub description: String,
+}
+
+/// `POST /api/agents/scaffold` — from a one-line description, generate the 4
+/// step definitions (analyse/decision/action/restitution) + a persona via
+/// `claude -p`. The builder fills the boxes with the result.
+pub async fn scaffold(
+    State(state): State<AppState>,
+    Json(body): Json<ScaffoldInput>,
+) -> AppResult<Json<Value>> {
+    if body.description.trim().is_empty() {
+        return Err(AppError::BadRequest("description is required".into()));
+    }
+    let prompt = format!(
+        "You design autonomous agents that run a 4-step loop: analyse, decision, \
+         action, restitution. For this agent description, write a concise system \
+         prompt (2-4 sentences, imperative) DEFINING what each step must do, plus \
+         a short 'persona' (the agent's identity/voice/expertise). Answer in the \
+         same language as the description. Return ONLY a JSON object with keys \
+         persona, analyse, decision, action, restitution. No prose, no code \
+         fences.\n\nAgent description:\n{}",
+        body.description.trim()
+    );
+
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.arg("-p")
+        .arg("--output-format")
+        .arg("json")
+        .arg("--permission-mode")
+        .arg("bypassPermissions");
+    if let Some(token) = &state.config.claude_max_token {
+        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+    }
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to spawn claude: {e}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(prompt.as_bytes()).await;
+        drop(stdin);
+    }
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| AppError::Other(e.into()))?;
+    if !output.status.success() {
+        return Err(AppError::Other(anyhow::anyhow!(
+            "claude failed: {}",
+            String::from_utf8_lossy(&output.stderr).chars().take(200).collect::<String>()
+        )));
+    }
+    let parsed: Value = serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
+        .map_err(|e| AppError::Other(anyhow::anyhow!("invalid claude output: {e}")))?;
+    let text = parsed.get("result").and_then(|v| v.as_str()).unwrap_or_default();
+    // The model returns a JSON object; tolerate surrounding prose/fences.
+    let slice = match (text.find('{'), text.rfind('}')) {
+        (Some(a), Some(b)) if b > a => &text[a..=b],
+        _ => text,
+    };
+    let fields: Value = serde_json::from_str(slice)
+        .unwrap_or_else(|_| json!({ "persona": "", "analyse": text, "decision": "", "action": "", "restitution": "" }));
+    Ok(Json(fields))
 }
 
 /// ICM memories with native importance metadata (weight, access_count) so the

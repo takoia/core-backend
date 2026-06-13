@@ -43,6 +43,7 @@ pub fn router(state: AppState) -> Router {
         // Agents + per-step customization + marketplace publishing
         .route("/agents", get(agents::list).post(agents::create))
         .route("/agents/import", post(agents::import_toml))
+        .route("/agents/scaffold", post(agents::scaffold))
         .route("/agents/:id", get(agents::get).put(agents::update).delete(agents::delete))
         .route("/agents/:id/steps", put(agents::update_steps))
         .route("/agents/:id/publish", post(agents::publish))
