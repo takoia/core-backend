@@ -119,6 +119,7 @@ export const api = {
     req<{ id: string }>("/api/agents", { method: "POST", headers: jsonH, body: JSON.stringify(body) }),
   updateSteps: (id: string, steps: unknown[]) =>
     req(`/api/agents/${id}/steps`, { method: "PUT", headers: jsonH, body: JSON.stringify({ steps }) }),
+  deleteAgent: (id: string) => req(`/api/agents/${id}`, { method: "DELETE" }),
   publishAgent: (id: string, visibility: string, price?: number) =>
     req(`/api/agents/${id}/publish`, {
       method: "POST",

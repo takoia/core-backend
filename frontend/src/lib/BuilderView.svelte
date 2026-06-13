@@ -46,6 +46,9 @@
   let toolParams = $state<Record<string, string>>({ symbol: "^IXIC", discord_webhook: "" });
   let selected = $state<string | null>("analyse");
   let createdMsg = $state("");
+  // Floating overlay panels (canvas is full-screen underneath).
+  let agentsOpen = $state(true);
+  let inspectorOpen = $state(false);
 
   // Param fields to show for the currently chosen action tools.
   const activeParams = $derived(
@@ -67,6 +70,14 @@
     triggerOn = ""; emit = ""; loopMinutes = 0; goals = ""; checks = "";
     prompts = { analyse: "", decision: "", action: "", restitution: "" };
     tools = []; selected = "analyse"; resetRun();
+  }
+
+  async function deleteAgent(id: string, ev: Event) {
+    ev.stopPropagation();
+    if (!confirm($t("builder.confirmDelete"))) return;
+    await api.deleteAgent(id);
+    if (editingId === id) newAgent();
+    await refreshAgents();
   }
 
   async function loadAgent(id: string) {
@@ -124,7 +135,10 @@
 
   function onNodeClick(e: any) {
     const id = e?.node?.id ?? e?.detail?.node?.id;
-    if (id) selected = id;
+    if (id) {
+      selected = id;
+      inspectorOpen = true;
+    }
   }
   function addTool(tool: string) { if (!tools.includes(tool)) tools = [...tools, tool]; }
   function removeTool(tool: string) { tools = tools.filter((x) => x !== tool); }
@@ -234,53 +248,66 @@
 </script>
 
 <div class="dash">
-  <!-- Left sidebar: agent list -->
-  <aside class="side card">
-    <div class="side-head">
-      <strong>{$t("builder.myAgents")}</strong>
-      <button class="new" onclick={newAgent} title={$t("builder.newAgent")}>＋</button>
-    </div>
-    <div class="alist">
-      {#each agentList as a}
-        <button class="arow" class:on={editingId === a.id} onclick={() => loadAgent(a.id)}>
-          <span class="av">{emoji(a)}</span>
-          <span class="an">
-            <span class="anm">{a.name}</span>
-            <span class="asub muted">{a.autonomy_level === "full_auto" ? "auto" : "validation"} · {a.runs_count} exéc.</span>
-          </span>
-        </button>
-      {/each}
-      {#if agentList.length === 0}<p class="muted small">{$t("agents.empty")}</p>{/if}
-    </div>
-  </aside>
+  <!-- Full-screen canvas underneath everything -->
+  <div class="flowwrap">
+    <SvelteFlow bind:nodes bind:edges {nodeTypes} fitView onnodeclick={onNodeClick}>
+      <Background gap={22} />
+      <Controls />
+      <MiniMap pannable zoomable />
+    </SvelteFlow>
+  </div>
 
-  <!-- Center: live canvas -->
-  <section class="center">
-    <div class="topbar card">
-      <input class="agentname" bind:value={name} />
-      <div class="runctl">
-        {#if runStatus}<span class="badge {runStatus}">{runStatus}</span>{/if}
-        <button class="start" onclick={start}><Icon name="run" size={14} /> {$t("builder.start")}</button>
-        <button class="stop" onclick={stop} disabled={!runJobId}>■ {$t("builder.stop")}</button>
-        <button class="save" onclick={save}>{$t("builder.save")}</button>
-      </div>
+  <!-- Floating top bar -->
+  <div class="topbar card">
+    <button class="ptoggle" onclick={() => (agentsOpen = !agentsOpen)} title={$t("builder.myAgents")}>☰</button>
+    <input class="agentname" bind:value={name} />
+    <div class="runctl">
+      {#if runStatus}<span class="badge {runStatus}">{runStatus}</span>{/if}
+      <button class="start" onclick={start}><Icon name="run" size={14} /> {$t("builder.start")}</button>
+      <button class="stop" onclick={stop} disabled={!runJobId}>■ {$t("builder.stop")}</button>
+      <button class="save" onclick={save}>{$t("builder.save")}</button>
     </div>
-    <div class="flowwrap card">
-      <SvelteFlow bind:nodes bind:edges {nodeTypes} fitView onnodeclick={onNodeClick}>
-        <Background gap={22} />
-        <Controls />
-        <MiniMap pannable zoomable />
-      </SvelteFlow>
-    </div>
-    {#if runLogs.length}
-      <div class="logfeed card">
-        {#each runLogs.slice(-6) as l}<div class="lf">▸ {l}</div>{/each}
-      </div>
-    {/if}
-  </section>
+  </div>
 
-  <!-- Right: inspector / palette -->
-  <aside class="inspector card">
+  <!-- Floating agents panel -->
+  {#if agentsOpen}
+    <aside class="panel agents card">
+      <div class="phead">
+        <strong>{$t("builder.myAgents")}</strong>
+        <span>
+          <button class="new" onclick={newAgent} title={$t("builder.newAgent")}>＋</button>
+          <button class="closep" onclick={() => (agentsOpen = false)}>×</button>
+        </span>
+      </div>
+      <div class="alist">
+        {#each agentList as a}
+          <div class="arow" class:on={editingId === a.id}>
+            <button class="arow-main" onclick={() => loadAgent(a.id)}>
+              <span class="av">{emoji(a)}</span>
+              <span class="an">
+                <span class="anm">{a.name}</span>
+                <span class="asub muted">{a.autonomy_level === "full_auto" ? "auto" : "validation"} · {a.runs_count} exéc.</span>
+              </span>
+            </button>
+            <button class="del" onclick={(e) => deleteAgent(a.id, e)} title={$t("builder.delete")}>🗑</button>
+          </div>
+        {/each}
+        {#if agentList.length === 0}<p class="muted small">{$t("agents.empty")}</p>{/if}
+      </div>
+    </aside>
+  {/if}
+
+  <!-- Floating log feed -->
+  {#if runLogs.length}
+    <div class="logfeed card">
+      {#each runLogs.slice(-6) as l}<div class="lf">▸ {l}</div>{/each}
+    </div>
+  {/if}
+
+  <!-- Floating inspector (opens on node click) -->
+  {#if inspectorOpen}
+  <aside class="panel inspector card">
+    <button class="closep abs" onclick={() => (inspectorOpen = false)}>×</button>
     {#if isStep}
       {@const sk = selected as StepKey}
       <h3>{STEP_LABEL[sk]}</h3>
@@ -335,39 +362,50 @@
     </details>
     {#if createdMsg}<p class="muted small">{createdMsg}</p>{/if}
   </aside>
+  {/if}
 </div>
 
 <style>
-  .dash { display: grid; grid-template-columns: 230px 1fr 320px; gap: 0.8rem; height: calc(100vh - 76px); padding: 0.8rem; box-sizing: border-box; }
+  /* Canvas fills the whole page; panels float on top. */
+  .dash { position: relative; height: calc(100vh - 90px); width: 100%; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
-  .side { padding: 0.8rem; display: flex; flex-direction: column; overflow: hidden; }
-  .side-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem; }
-  .new { width: 28px; height: 28px; border-radius: 8px; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); cursor: pointer; font-size: 1.1rem; }
-  .alist { overflow-y: auto; display: flex; flex-direction: column; gap: 0.3rem; }
-  .arow { display: flex; align-items: center; gap: 0.5rem; background: transparent; border: 1px solid transparent; border-radius: 9px; padding: 0.45rem 0.5rem; cursor: pointer; text-align: left; color: var(--text); font: inherit; }
-  .arow:hover { background: var(--bg); }
-  .arow.on { background: color-mix(in srgb, var(--accent) 16%, transparent); border-color: var(--accent); }
-  .av { font-size: 1.2rem; }
-  .an { display: flex; flex-direction: column; min-width: 0; }
-  .anm { font-size: 0.86rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .asub { font-size: 0.72rem; }
-  .center { display: flex; flex-direction: column; gap: 0.7rem; min-width: 0; }
-  .topbar { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0.8rem; gap: 0.8rem; }
-  .agentname { background: transparent; border: none; color: var(--text); font: inherit; font-size: 1.1rem; font-weight: 600; flex: 1; min-width: 0; }
+  .flowwrap { position: absolute; inset: 0; }
+
+  .topbar { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 5;
+    display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0.6rem; box-shadow: 0 8px 24px rgba(0,0,0,0.35); }
+  .ptoggle { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.35rem 0.55rem; cursor: pointer; font-size: 1rem; }
+  .agentname { background: transparent; border: none; color: var(--text); font: inherit; font-size: 1.05rem; font-weight: 600; width: 200px; }
   .runctl { display: flex; align-items: center; gap: 0.4rem; }
   .runctl button { display: inline-flex; align-items: center; gap: 0.3rem; border-radius: 8px; padding: 0.4rem 0.7rem; cursor: pointer; font: inherit; font-size: 0.82rem; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
   .start { background: var(--ok) !important; border-color: var(--ok) !important; color: #04231a !important; font-weight: 600; }
   .stop { background: var(--err) !important; border-color: var(--err) !important; color: #2a0707 !important; }
   .stop:disabled { opacity: 0.5; }
   .save { background: var(--accent) !important; border-color: var(--accent) !important; color: #04231a !important; }
-  .flowwrap { flex: 1; overflow: hidden; min-height: 360px; }
-  .logfeed { padding: 0.5rem 0.8rem; font-family: ui-monospace, monospace; font-size: 0.76rem; max-height: 110px; overflow-y: auto; }
-  .lf { color: var(--muted); padding: 0.1rem 0; }
   .badge { font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 20px; background: var(--border); }
   .badge.running, .badge.queued { background: var(--warn); color: #2a2410; }
   .badge.done { background: var(--ok); color: #04231a; }
   .badge.failed { background: var(--err); color: #2a0707; }
-  .inspector { padding: 0.9rem; overflow-y: auto; }
+
+  .panel { position: absolute; top: 12px; bottom: 12px; z-index: 6; width: 300px; padding: 0.9rem; overflow-y: auto; box-shadow: 0 8px 28px rgba(0,0,0,0.4); }
+  .panel.agents { left: 12px; }
+  .panel.inspector { right: 12px; }
+  .phead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem; }
+  .closep { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 1.2rem; line-height: 1; }
+  .closep.abs { position: absolute; top: 8px; right: 10px; }
+  .new { width: 26px; height: 26px; border-radius: 8px; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); cursor: pointer; font-size: 1rem; }
+  .alist { display: flex; flex-direction: column; gap: 0.3rem; }
+  .arow { display: flex; align-items: center; gap: 0.2rem; border-radius: 9px; }
+  .arow.on { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  .arow-main { flex: 1; display: flex; align-items: center; gap: 0.5rem; background: transparent; border: none; border-radius: 9px; padding: 0.45rem 0.5rem; cursor: pointer; text-align: left; color: var(--text); font: inherit; min-width: 0; }
+  .arow-main:hover { background: var(--bg); }
+  .del { background: transparent; border: none; cursor: pointer; opacity: 0.5; padding: 0.3rem; border-radius: 7px; }
+  .del:hover { opacity: 1; background: color-mix(in srgb, var(--err) 18%, transparent); }
+  .av { font-size: 1.2rem; }
+  .an { display: flex; flex-direction: column; min-width: 0; }
+  .anm { font-size: 0.86rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .asub { font-size: 0.72rem; }
+  .logfeed { position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px; z-index: 5; width: 420px; max-width: 50%; padding: 0.5rem 0.8rem; font-family: ui-monospace, monospace; font-size: 0.76rem; max-height: 130px; overflow-y: auto; }
+  .lf { color: var(--muted); padding: 0.1rem 0; }
   .inspector h3 { margin: 0 0 0.6rem; }
   .blk { display: block; font-size: 0.8rem; color: var(--muted); margin-top: 0.6rem; }
   input, select, textarea { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.45rem 0.6rem; font: inherit; margin-top: 0.2rem; }

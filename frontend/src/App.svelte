@@ -75,8 +75,9 @@
     <div class="container nav">
       <div class="brand">
         <button class="burger" on:click={() => (navCollapsed = !navCollapsed)} title="menu">☰</button>
-        <img class="logo" src={logo} alt="TakoIA" />
-        <h1>TakoIA</h1>
+        <button class="logobtn" on:click={() => (view = "dashboard")} title="home">
+          <img class="logo" src={logo} alt="TakoIA" />
+        </button>
       </div>
       <nav class:collapsed={navCollapsed}>
         <button class:active={view === "dashboard"} on:click={() => (view = "dashboard")}><Icon name="builder" />{$t("nav.dashboard")}</button>
@@ -120,13 +121,13 @@
 {/if}
 
 <style>
-  header { border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 80%, transparent); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px); height: 76px; }
+  header { border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 80%, transparent); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px); height: 90px; }
   .nav { display: flex; align-items: center; justify-content: space-between; gap: 1rem; max-width: none; padding: 0.5rem 1.25rem; }
   .brand { display: flex; align-items: center; gap: 0.5rem; flex: 0 0 auto; }
   .burger { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.25rem 0.5rem; cursor: pointer; font-size: 1rem; }
   nav.collapsed { display: none; }
-  .brand .logo { width: 56px; height: 56px; border-radius: 50%; }
-  .brand h1 { margin: 0; font-size: 1.15rem; }
+  .logobtn { background: none; border: none; padding: 0; cursor: pointer; display: flex; }
+  .brand .logo { width: 84px; height: 84px; border-radius: 50%; }
   .brand .tag { color: var(--muted); font-size: 0.8rem; }
   nav { display: flex; align-items: center; gap: 0.2rem; overflow-x: auto; min-width: 0; scrollbar-width: none; }
   nav::-webkit-scrollbar { display: none; }

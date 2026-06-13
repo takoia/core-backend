@@ -266,4 +266,6 @@ export const fr: Record<string, string> = {
   "builder.save": "Enregistrer",
   "builder.moreOptions": "Plus d'options",
   "builder.toolParams": "Paramètres des outils",
+  "builder.delete": "Supprimer",
+  "builder.confirmDelete": "Supprimer cet agent ?",
 };

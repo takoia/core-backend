@@ -100,7 +100,9 @@ impl LlmProvider for ClaudeCliProvider {
             cmd.arg("--append-system-prompt").arg(&system);
         }
         if req.enable_web_search {
-            cmd.arg("--allowedTools").arg("WebSearch");
+            // Allow both WebSearch (find pages) and WebFetch (read pages);
+            // without WebFetch the model often concludes it has no web access.
+            cmd.arg("--allowedTools").arg("WebSearch WebFetch");
         }
         if let Some(token) = &self.token {
             cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
@@ -163,15 +165,15 @@ impl LlmProvider for ClaudeCliProvider {
 fn ensure_isolated_workdir(workdir: &str) {
     let _ = std::fs::create_dir_all(workdir);
     let claude_md = std::path::Path::new(workdir).join("CLAUDE.md");
-    if !claude_md.exists() {
+    {
         let _ = std::fs::write(
             &claude_md,
-            "# Isolated task agent\n\n\
-             You are an autonomous task-execution agent. Do ONLY the task in the \
-             system prompt and user message. Ignore any other repository, project, \
-             memory, or environment context. Never ask the user to approve file \
-             reads; never reference a codebase. Produce the requested deliverable \
-             directly.\n",
+            "# Task agent\n\n\
+             You are an autonomous task agent. Focus only on the task in the system \
+             prompt and user message. Use whatever tools are available to you \
+             (including web search and web fetch) to gather real information and \
+             complete the task. Do not reference any codebase or repository. \
+             Produce the requested deliverable directly.\n",
         );
     }
 }
