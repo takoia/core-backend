@@ -95,6 +95,9 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .nest("/api", api)
         .merge(frontend_service())
+        // Video frame uploads (downscaled frames as base64) exceed the 2 MB
+        // default; allow large request bodies.
+        .layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
 }
