@@ -99,16 +99,14 @@ impl LlmProvider for ClaudeCliProvider {
         if !system.trim().is_empty() {
             cmd.arg("--append-system-prompt").arg(&system);
         }
-        if req.enable_web_search {
-            // Allow both WebSearch (find pages) and WebFetch (read pages).
-            // The flag takes a comma-separated list; a space would be parsed as a
-            // single invalid tool name and block everything.
-            cmd.arg("--allowedTools").arg("WebSearch,WebFetch");
-            // Bypass per-domain permission prompts: in headless `-p` mode WebFetch
-            // otherwise errors on arbitrary domains found via WebSearch. The agent
-            // runs in an isolated workdir, so this stays scoped to web research.
-            cmd.arg("--permission-mode").arg("bypassPermissions");
-        }
+        // Headless `-p` can't answer permission prompts, so EVERY step must run
+        // without them — otherwise a step's LLM that reaches for WebFetch/WebSearch
+        // hangs and emits "please approve the permission" instead of doing the work.
+        // The agent runs in an isolated workdir, so this stays scoped.
+        cmd.arg("--permission-mode").arg("bypassPermissions");
+        // Allow the safe read/web tools in every step (comma-separated; a space
+        // would be parsed as one invalid tool name and block everything).
+        cmd.arg("--allowedTools").arg("WebSearch,WebFetch,Read");
         if let Some(token) = &self.token {
             cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
         }

@@ -262,10 +262,13 @@
   // The agent box itself spins during a run so progress is always visible,
   // even for agents that have no explicit step boxes on the canvas.
   $effect(() => {
-    const nm = name, ic = icon, ss = stepStatus, rs = runStatus;
-    const agentStatus = rs === "running" || rs === "queued" ? "running" : rs === "done" ? "done" : undefined;
+    const nm = name, ic = icon, ss = stepStatus, rs = runStatus, cs = currentStep;
+    const running = rs === "running" || rs === "queued";
+    const agentStatus = running ? "running" : rs === "done" ? "done" : undefined;
+    const stepLabel = cs && ALL_BLOCKS[cs] ? ALL_BLOCKS[cs].label : cs;
+    const agentSub = running && stepLabel ? `▶ ${stepLabel}` : rs === "done" ? "terminé" : "agent";
     nodes = untrack(() => nodes).map((n) => {
-      if (n.id === "agent") return { ...n, data: { ...n.data, label: nm, glyph: ic, status: agentStatus } };
+      if (n.id === "agent") return { ...n, data: { ...n.data, label: nm, glyph: ic, status: agentStatus, sub: agentSub } };
       const st = ss[n.id];
       return st ? { ...n, data: { ...n.data, status: st } } : n;
     });
@@ -422,6 +425,7 @@
   // ── Live run ───────────────────────────────────────────────────────────────
   let runJobId = $state<string | null>(null);
   let runStatus = $state("");
+  let currentStep = $state(""); // the step_type currently running (for the agent box)
   let stepStatus = $state<Record<string, string>>({});
   let runLogs = $state<string[]>([]);
   let logsOpen = $state(true);
@@ -429,7 +433,7 @@
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   function resetRun() {
-    runJobId = null; runStatus = ""; stepStatus = {}; runLogs = [];
+    runJobId = null; runStatus = ""; currentStep = ""; stepStatus = {}; runLogs = [];
     if (cleanup) cleanup(); cleanup = null;
     if (pollTimer) clearInterval(pollTimer); pollTimer = null;
   }
@@ -449,6 +453,7 @@
     cleanup = subscribeJob(runJobId, (ev) => {
       const k = ev.kind as string, step = ev.step_type as string | undefined;
       if ((k === "step_started" || k === "step_completed") && step) {
+        if (k === "step_started") currentStep = step;
         const nid = stepNodeId(step);
         if (nid) stepStatus = { ...stepStatus, [nid]: k === "step_completed" ? "done" : "running" };
       }
@@ -467,6 +472,10 @@
       const ss: Record<string, string> = {};
       for (const s of d.steps) { const nid = stepNodeId(s.step_type); if (nid) ss[nid] = s.status === "done" ? "done" : "running"; }
       stepStatus = ss;
+      // Current step = the first not-yet-done step (drives the agent box label).
+      const cur = [...d.steps].sort((a, b) => a.position - b.position).find((s) => s.status !== "done");
+      if (["done", "failed"].includes(d.job.status)) currentStep = "";
+      else if (cur) currentStep = cur.step_type;
       // Build a readable execution log from the steps (reliable via polling,
       // independent of SSE which can be buffered behind a proxy).
       const lines = [...d.steps]
@@ -659,7 +668,7 @@
         {#if runStatus}<span class="badge {runStatus}">{runStatus}</span>{/if}
         <button class="start" onclick={start}>▶ {$t("builder.start")}</button>
         <button class="stop" onclick={stop} disabled={!runJobId}>■ {$t("builder.stop")}</button>
-        <button class="save" onclick={save}>{$t("builder.save")}</button>
+        <button class="save" onclick={() => save()}>{$t("builder.save")}</button>
       </div>
     </div>
     {#if fleetAgents.length}
