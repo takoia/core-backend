@@ -180,12 +180,21 @@
 
   // Drag from palette -> drop on canvas.
   let flowEl: HTMLDivElement;
+  let viewport = $state.raw({ x: 0, y: 0, zoom: 1 });
+  // Convert a screen position into flow coordinates (accounts for pan/zoom).
+  function flowCoords(clientX: number, clientY: number) {
+    const rect = flowEl.getBoundingClientRect();
+    const z = viewport.zoom || 1;
+    return {
+      x: (clientX - rect.left - viewport.x) / z - 95,
+      y: (clientY - rect.top - viewport.y) / z - 30,
+    };
+  }
   function onDrop(e: DragEvent) {
     e.preventDefault();
     const key = e.dataTransfer?.getData("text/plain");
     if (!key) return;
-    const rect = flowEl.getBoundingClientRect();
-    addBlock(key, { x: e.clientX - rect.left - 95, y: e.clientY - rect.top - 30 });
+    addBlock(key, flowCoords(e.clientX, e.clientY));
   }
 
   function onNodeClick(e: any) {
@@ -201,8 +210,8 @@
   let ctxMenu = $state<{ sx: number; sy: number; cx: number; cy: number; nodeId?: string } | null>(null);
   function onContextMenu(e: MouseEvent) {
     e.preventDefault();
-    const rect = flowEl.getBoundingClientRect();
-    ctxMenu = { sx: e.clientX, sy: e.clientY, cx: e.clientX - rect.left - 95, cy: e.clientY - rect.top - 30 };
+    const fc = flowCoords(e.clientX, e.clientY);
+    ctxMenu = { sx: e.clientX, sy: e.clientY, cx: fc.x, cy: fc.y };
   }
   function onNodeContextMenu(e: any) {
     const ev: MouseEvent = e?.event ?? e;
@@ -490,7 +499,7 @@
         <div class="pgroup">{g.group}</div>
         {#each g.items as b}
           <button class="pblock {b.kind}" draggable="true"
-            ondragstart={(e) => e.dataTransfer?.setData("text/plain", b.key)}
+            ondragstart={(e) => { if (e.dataTransfer) { e.dataTransfer.effectAllowed = "copy"; e.dataTransfer.setData("text/plain", b.key); } }}
             onclick={() => addBlock(b.key)}>
             <span class="pg">{b.glyph}</span> {b.label}
           </button>
@@ -553,8 +562,8 @@
         </SvelteFlow>
       </div>
     {:else}
-    <div class="flowwrap card" bind:this={flowEl} ondragover={(e) => e.preventDefault()} ondrop={onDrop} oncontextmenu={onContextMenu}>
-      <SvelteFlow bind:nodes bind:edges {nodeTypes} fitView onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu}>
+    <div class="flowwrap card" bind:this={flowEl} ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; }} ondrop={onDrop} oncontextmenu={onContextMenu}>
+      <SvelteFlow bind:nodes bind:edges bind:viewport {nodeTypes} fitView onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu}>
         <Background gap={22} />
         <Controls />
         <MiniMap pannable zoomable />
