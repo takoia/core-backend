@@ -193,15 +193,31 @@
     if (id !== "agent") modalOpen = true;
   }
 
-  // Right-click on the canvas -> context menu to add a block at that spot.
-  let ctxMenu = $state<{ sx: number; sy: number; cx: number; cy: number } | null>(null);
+  // Right-click context menu: on the canvas it adds a block (New); on a node
+  // it offers Modify / Delete.
+  let ctxMenu = $state<{ sx: number; sy: number; cx: number; cy: number; nodeId?: string } | null>(null);
   function onContextMenu(e: MouseEvent) {
     e.preventDefault();
     const rect = flowEl.getBoundingClientRect();
     ctxMenu = { sx: e.clientX, sy: e.clientY, cx: e.clientX - rect.left - 95, cy: e.clientY - rect.top - 30 };
   }
+  function onNodeContextMenu(e: any) {
+    const ev: MouseEvent = e?.event ?? e;
+    const id: string = e?.node?.id ?? e?.detail?.node?.id;
+    ev?.preventDefault?.();
+    if (!id) return;
+    ctxMenu = { sx: (ev as MouseEvent).clientX, sy: (ev as MouseEvent).clientY, cx: 0, cy: 0, nodeId: id };
+  }
   function addFromMenu(key: string) {
     if (ctxMenu) addBlock(key, { x: ctxMenu.cx, y: ctxMenu.cy });
+    ctxMenu = null;
+  }
+  function editFromMenu() {
+    if (ctxMenu?.nodeId) { selected = ctxMenu.nodeId; if (ctxMenu.nodeId !== "agent") modalOpen = true; }
+    ctxMenu = null;
+  }
+  function deleteFromMenu() {
+    if (ctxMenu?.nodeId) removeNode(ctxMenu.nodeId);
     ctxMenu = null;
   }
 
@@ -217,6 +233,9 @@
 
   // Selected node helpers.
   const selNode = $derived(nodes.find((n) => n.id === selected) ?? null);
+  // A trigger node on the canvas supplies the event, so the global trigger
+  // field is hidden to avoid duplication.
+  const hasTriggerNode = $derived(nodes.some((n) => n.data.kind === "trigger" && n.id !== "agent"));
   function blockKey(id: string): string { return id.replace(/-\d+$/, ""); }
 
   // ── Build TOML from the graph ──────────────────────────────────────────────
@@ -443,7 +462,7 @@
       </div>
     </div>
     <div class="flowwrap card" bind:this={flowEl} ondragover={(e) => e.preventDefault()} ondrop={onDrop} oncontextmenu={onContextMenu}>
-      <SvelteFlow bind:nodes bind:edges {nodeTypes} fitView onnodeclick={onNodeClick}>
+      <SvelteFlow bind:nodes bind:edges {nodeTypes} fitView onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu}>
         <Background gap={22} />
         <Controls />
         <MiniMap pannable zoomable />
@@ -489,7 +508,9 @@
       <label class="blk">{$t("builder.autonomy")}
         <select bind:value={autonomy}><option value="confirm_before_action">{$t("builder.confirm")}</option><option value="full_auto">{$t("builder.fullAuto")}</option></select>
       </label>
-      <label class="blk">{$t("builder.triggerOn")}<input bind:value={triggerOn} placeholder="invoice.received / email.received / webhook.received" /></label>
+      {#if !hasTriggerNode}
+        <label class="blk">{$t("builder.triggerOn")}<input bind:value={triggerOn} placeholder="invoice.received / email.received / webhook.received" /></label>
+      {/if}
       <label class="blk">{$t("builder.loopEvery")}<input type="number" min="0" bind:value={loopMinutes} /></label>
       <label class="blk">{$t("builder.goals")}<input bind:value={goals} /></label>
     {:else if selNode}
@@ -558,12 +579,18 @@
   {#if ctxMenu}
     <div class="ctxback" onclick={() => (ctxMenu = null)} oncontextmenu={(e) => { e.preventDefault(); ctxMenu = null; }} role="presentation"></div>
     <div class="ctxmenu" style="left: {ctxMenu.sx}px; top: {ctxMenu.sy}px;">
-      {#each PALETTE as g}
-        <div class="ctxgroup">{g.group}</div>
-        {#each g.items as b}
-          <button class="ctxitem" onclick={() => addFromMenu(b.key)}><span class="pg">{b.glyph}</span> {b.label}</button>
+      {#if ctxMenu.nodeId}
+        <button class="ctxitem" onclick={editFromMenu}>✏️ Modifier</button>
+        {#if ctxMenu.nodeId !== "agent"}<button class="ctxitem danger" onclick={deleteFromMenu}>🗑 Supprimer</button>{/if}
+      {:else}
+        <div class="ctxgroup">＋ Nouveau bloc</div>
+        {#each PALETTE as g}
+          <div class="ctxgroup">{g.group}</div>
+          {#each g.items as b}
+            <button class="ctxitem" onclick={() => addFromMenu(b.key)}><span class="pg">{b.glyph}</span> {b.label}</button>
+          {/each}
         {/each}
-      {/each}
+      {/if}
     </div>
   {/if}
 </div>
@@ -627,6 +654,8 @@
   .ctxgroup { color: var(--muted); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.05em; margin: 0.4rem 0.4rem 0.2rem; }
   .ctxitem { display: flex; align-items: center; gap: 0.45rem; width: 100%; text-align: left; background: none; border: none; color: var(--text); font: inherit; font-size: 0.8rem; padding: 0.35rem 0.45rem; border-radius: 7px; cursor: pointer; }
   .ctxitem:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+  .ctxitem.danger { color: var(--err); }
+  .ctxitem.danger:hover { background: color-mix(in srgb, var(--err) 18%, transparent); }
   .alist { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.4rem; }
   .arow { display: flex; align-items: center; }
   .arow.on { background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 8px; }
