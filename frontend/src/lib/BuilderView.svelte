@@ -712,7 +712,7 @@
   <section class="center">
     <div class="topbar card">
       <button class="ptoggle" onclick={() => (picking = true)} title={$t("builder.myAgents")}>☰</button>
-      {#if fleetAgents.length}
+      {#if fleetNodes.length}
         <span class="aname">👥 {fleetAgents.length} {$t("builder.fleetView")}</span>
         <button class="ptoggle" onclick={exitFleet} title={$t("builder.fleetExit")}>✕</button>
       {:else}
@@ -752,7 +752,7 @@
         <button class="save" onclick={() => save()}>{$t("builder.save")}</button>
       </div>
     </div>
-    {#if fleetAgents.length}
+    {#if fleetNodes.length}
       <div class="flowwrap card">
         <SvelteFlow bind:nodes={fleetNodes} bind:edges={fleetEdges} {nodeTypes} fitView nodesDraggable={false} elementsSelectable={false}>
           <Background gap={22} />
