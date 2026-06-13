@@ -116,7 +116,7 @@
   let triggerOn = $state("");
   let emit = $state("");
   // Default loop interval (minutes) for new agents — adjustable in Settings.
-  const defaultLoopMin = () => parseInt(localStorage.getItem("takoia.defaultLoopMin") ?? "5", 10) || 5;
+  const defaultLoopMin = () => parseInt(localStorage.getItem("takoia.defaultLoopMin") ?? "300", 10) || 300;
   let loopMinutes = $state(defaultLoopMin());
   let goals = $state("");
   let checks = $state("");
@@ -132,7 +132,12 @@
   // ── Agent list ─────────────────────────────────────────────────────────────
   let agentList = $state<Agent[]>([]);
   async function refreshAgents() { try { agentList = await api.listAgents(); } catch { agentList = []; } }
-  onMount(refreshAgents);
+  // Re-open the last edited agent when returning to the dashboard.
+  onMount(async () => {
+    await refreshAgents();
+    const last = localStorage.getItem("takoia.lastAgent");
+    if (last && agentList.some((a) => a.id === last)) await loadAgent(last);
+  });
 
   function agentEmoji(a: Agent): string {
     if (a.icon) return a.icon;
@@ -383,6 +388,7 @@
     const d = await api.getAgent(id);
     newAgent();
     editingId = d.agent.id;
+    localStorage.setItem("takoia.lastAgent", id);
     name = d.agent.name; icon = d.agent.icon || ""; description = d.agent.description ?? "";
     author = d.agent.author ?? ""; expertise = d.agent.expertise_domain ?? "";
     autonomy = d.agent.autonomy_level === "full_auto" ? "full_auto" : "confirm_before_action";
@@ -496,7 +502,8 @@
     const id = await save(true);
     if (!id) return;
     await launchJob(id, `${name} run`, `${langDirective()}\n\n${goals.trim() || `Run ${name}`}`);
-    toast($t("builder.started"), "success");
+    const ic = isImg(icon) ? "🤖" : (icon || "🐙");
+    toast(`${ic} ${name} — ${$t("builder.startedWord")}`, "success");
   }
 
   function onTestImage(e: Event) {

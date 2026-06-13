@@ -74,6 +74,13 @@ pub async fn create(
         return Err(AppError::NotFound("agent not found".into()));
     }
 
+    // One recurring schedule per agent: drop any existing ones first so repeated
+    // saves don't pile up duplicate loops that flood the worker.
+    sqlx::query("DELETE FROM schedules WHERE agent_id = ?")
+        .bind(&body.agent_id)
+        .execute(&state.db)
+        .await?;
+
     let id = Uuid::new_v4().to_string();
     sqlx::query(
         r#"INSERT INTO schedules

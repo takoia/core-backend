@@ -12,9 +12,9 @@
   let tab: Tab = "appearance";
 
   // Agents: default loop interval (minutes) for newly built agents.
-  let defaultLoopMin = parseInt(localStorage.getItem("takoia.defaultLoopMin") ?? "5", 10) || 5;
+  let defaultLoopMin = parseInt(localStorage.getItem("takoia.defaultLoopMin") ?? "300", 10) || 300;
   function saveAgentDefaults() {
-    localStorage.setItem("takoia.defaultLoopMin", String(defaultLoopMin > 0 ? defaultLoopMin : 5));
+    localStorage.setItem("takoia.defaultLoopMin", String(defaultLoopMin > 0 ? defaultLoopMin : 300));
   }
 
   // Global named Discord webhooks (reusable by name in the builder).

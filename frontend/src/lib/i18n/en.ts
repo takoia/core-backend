@@ -178,6 +178,7 @@ export const en: Record<string, string> = {
   "builder.create": "Create agent",
   "builder.created": "Agent created",
   "builder.started": "Agent started",
+  "builder.startedWord": "started",
   "builder.test": "Test",
   "builder.testRun": "Run test",
   "builder.testRunning": "Test launched",

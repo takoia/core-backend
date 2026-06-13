@@ -4,6 +4,7 @@
   import { t } from "./i18n";
   import Icon from "./Icon.svelte";
   import MemoryGraph from "./MemoryGraph.svelte";
+  import { confirmModal } from "./toast";
 
   let stats: Record<string, string> = {};
   let topics: { topic: string; count: number }[] = [];
@@ -29,7 +30,7 @@
   }
 
   async function purge(topic: string) {
-    if (!confirm(`${$t("memory.confirmPurge")}\n${topic}`)) return;
+    if (!(await confirmModal(`${$t("memory.confirmPurge")}\n${topic}`))) return;
     busy = true;
     try {
       await api.memoryPurge(topic);
