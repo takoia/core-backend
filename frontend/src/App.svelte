@@ -12,6 +12,7 @@
   import { t, locale, setLocale } from "./lib/i18n";
   import "./lib/theme"; // applies the persisted theme on load
   import logo from "./lib/assets/takoia.png";
+  import Icon from "./lib/Icon.svelte";
 
   type View = "run" | "agents" | "canvas" | "mcp" | "skills" | "settings" | "usage";
   let view: View = "run";
@@ -72,13 +73,13 @@
         <h1>TakoIA</h1>
       </div>
       <nav>
-        <button class:active={view === "run"} on:click={() => (view = "run")}>{$t("nav.run")}</button>
-        <button class:active={view === "agents"} on:click={() => (view = "agents")}>{$t("nav.agents")}</button>
-        <button class:active={view === "canvas"} on:click={() => (view = "canvas")}>Canvas</button>
-        <button class:active={view === "mcp"} on:click={() => (view = "mcp")}>{$t("nav.mcp")}</button>
-        <button class:active={view === "skills"} on:click={() => (view = "skills")}>{$t("nav.skills")}</button>
-        <button class:active={view === "settings"} on:click={() => (view = "settings")}>{$t("nav.settings")}</button>
-        <button class:active={view === "usage"} on:click={() => (view = "usage")}>{$t("nav.usage")}</button>
+        <button class:active={view === "run"} on:click={() => (view = "run")}><Icon name="run" />{$t("nav.run")}</button>
+        <button class:active={view === "agents"} on:click={() => (view = "agents")}><Icon name="agents" />{$t("nav.agents")}</button>
+        <button class:active={view === "canvas"} on:click={() => (view = "canvas")}><Icon name="canvas" />Canvas</button>
+        <button class:active={view === "mcp"} on:click={() => (view = "mcp")}><Icon name="mcp" />{$t("nav.mcp")}</button>
+        <button class:active={view === "skills"} on:click={() => (view = "skills")}><Icon name="skills" />{$t("nav.skills")}</button>
+        <button class:active={view === "settings"} on:click={() => (view = "settings")}><Icon name="settings" />{$t("nav.settings")}</button>
+        <button class:active={view === "usage"} on:click={() => (view = "usage")}><Icon name="usage" />{$t("nav.usage")}</button>
         <span class="sep"></span>
         <button class="lang" class:on={$locale === "fr"} on:click={() => setLocale("fr")}>FR</button>
         <button class="lang" class:on={$locale === "en"} on:click={() => setLocale("en")}>EN</button>
@@ -117,7 +118,7 @@
   .brand h1 { margin: 0; font-size: 1.2rem; }
   .brand .tag { color: var(--muted); font-size: 0.8rem; }
   nav { display: flex; align-items: center; gap: 0.35rem; }
-  nav button { background: transparent; border: 1px solid transparent; color: var(--muted); padding: 0.4rem 0.75rem; border-radius: 8px; cursor: pointer; font: inherit; }
+  nav button { display: inline-flex; align-items: center; gap: 0.35rem; background: transparent; border: 1px solid transparent; color: var(--muted); padding: 0.4rem 0.7rem; border-radius: 8px; cursor: pointer; font: inherit; }
   nav button:hover { color: var(--text); }
   nav button.active { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--border); color: var(--text); }
   .sep { width: 1px; height: 20px; background: var(--border); margin: 0 0.3rem; }
