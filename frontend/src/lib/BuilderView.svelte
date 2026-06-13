@@ -17,7 +17,16 @@
   const nodeTypes = { step: StepNode } as any;
   const STEPS = ["analyse", "decision", "action", "restitution"] as const;
   type StepKey = (typeof STEPS)[number];
-  const TOOLS = ["web_search", "write_report", "send_discord", "send_email", "extract_fields"];
+  const TOOLS = ["web_search", "market_data", "send_discord", "write_report", "extract_fields"];
+  // Tools that need parameters -> {tool: [param keys]}.
+  const TOOL_PARAMS: Record<string, string[]> = {
+    market_data: ["symbol"],
+    send_discord: ["discord_webhook"],
+  };
+  const PARAM_PLACEHOLDER: Record<string, string> = {
+    symbol: "^IXIC (NASDAQ), AAPL, NVDA…",
+    discord_webhook: "https://discord.com/api/webhooks/…",
+  };
   const STEP_LABEL: Record<string, string> = {
     analyse: "Analyse", decision: "Décision", action: "Action", restitution: "Restitution",
   };
@@ -34,8 +43,14 @@
   let checks = $state("");
   let prompts = $state<Record<StepKey, string>>({ analyse: "", decision: "", action: "", restitution: "" });
   let tools = $state<string[]>([]);
+  let toolParams = $state<Record<string, string>>({ symbol: "^IXIC", discord_webhook: "" });
   let selected = $state<string | null>("analyse");
   let createdMsg = $state("");
+
+  // Param fields to show for the currently chosen action tools.
+  const activeParams = $derived(
+    Array.from(new Set(tools.flatMap((t) => TOOL_PARAMS[t] ?? []))),
+  );
 
   // ── Agent dashboard list ──
   let agentList = $state<Agent[]>([]);
@@ -65,7 +80,11 @@
     let nt: string[] = [];
     for (const sc of d.steps) {
       if ((STEPS as readonly string[]).includes(sc.step_type)) np[sc.step_type as StepKey] = sc.system_prompt;
-      try { const o = JSON.parse(sc.options || "{}"); if (sc.step_type === "action" && Array.isArray(o.allowed_tools)) nt = o.allowed_tools; } catch { /* */ }
+      try {
+        const o = JSON.parse(sc.options || "{}");
+        if (sc.step_type === "action" && Array.isArray(o.allowed_tools)) nt = o.allowed_tools;
+        if (sc.step_type === "action" && o.tool_params) toolParams = { ...toolParams, ...o.tool_params };
+      } catch { /* */ }
     }
     prompts = np; tools = nt; selected = "analyse"; resetRun();
   }
@@ -128,6 +147,12 @@
       toml += `\n[steps.${s}]\n`;
       if (p) toml += `system_prompt = ${JSON.stringify(p)}\n`;
       if (isAction && tools.length) toml += `allowed_tools = [${tools.map((x) => `"${x}"`).join(", ")}]\n`;
+      if (isAction && activeParams.length) {
+        const pairs = activeParams
+          .filter((k) => (toolParams[k] ?? "").trim())
+          .map((k) => `${k} = ${JSON.stringify(toolParams[k])}`);
+        if (pairs.length) toml += `tool_params = { ${pairs.join(", ")} }\n`;
+      }
     }
     return toml;
   }
@@ -274,6 +299,14 @@
             {#each tools as tool}<span class="chip">{tool} <button class="x" onclick={() => removeTool(tool)}>×</button></span>{/each}
           </div>
         </div>
+        {#if activeParams.length}
+          <div class="params">
+            <span class="muted small">{$t("builder.toolParams")}</span>
+            {#each activeParams as p}
+              <label class="blk">{p}<input bind:value={toolParams[p]} placeholder={PARAM_PLACEHOLDER[p] ?? ""} /></label>
+            {/each}
+          </div>
+        {/if}
       {/if}
     {:else if selected === "trigger"}
       <h3>{$t("builder.node.trigger")}</h3>

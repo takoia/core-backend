@@ -92,6 +92,9 @@ pub struct StepOptions {
     /// Tools the agent is allowed to call during the Action step.
     #[serde(default)]
     pub allowed_tools: Vec<String>,
+    /// Per-tool parameters, e.g. { "symbol": "^IXIC", "discord_webhook": "https://..." }.
+    #[serde(default)]
+    pub tool_params: serde_json::Value,
     /// Sampling temperature.
     #[serde(default)]
     pub temperature: Option<f32>,

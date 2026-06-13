@@ -75,6 +75,50 @@ async fn seed_example_agents(db: &Db) -> Result<()> {
             .await?;
         }
     }
+    // NASDAQ autonomous agent: pulls public market data and alerts on Discord.
+    let nid = "nasdaq-watch";
+    let nexists: Option<(String,)> = sqlx::query_as("SELECT id FROM agents WHERE id = ?")
+        .bind(nid)
+        .fetch_optional(db)
+        .await?;
+    if nexists.is_none() {
+        sqlx::query(
+            r#"INSERT INTO agents
+               (id, account_id, name, description, autonomy_level, expertise_domain,
+                author, visibility, trigger_on, emit)
+               VALUES (?, ?, 'NASDAQ Watch', 'Autonomous agent: pulls NASDAQ data and alerts on Discord when it moves.',
+                       'full_auto', 'NASDAQ trading', 'TakoIA examples', 'public', 'schedule.hourly', '["nasdaq.alert"]')"#,
+        )
+        .bind(nid)
+        .bind(DEFAULT_ACCOUNT_ID)
+        .execute(db)
+        .await?;
+        let action_opts = serde_json::json!({
+            "allowed_tools": ["market_data", "send_discord"],
+            "tool_params": { "symbol": "^IXIC", "discord_webhook": "" }
+        });
+        let prompts = [
+            (StepType::Analyse, "Identify what to monitor on the NASDAQ index.", serde_json::json!({})),
+            (StepType::Decision, "Decide whether the move is notable enough to alert.", serde_json::json!({})),
+            (StepType::Action, "Read the market data and summarize the NASDAQ movement.", action_opts),
+            (StepType::Restitution, "Write a short alert: NASDAQ level, change %, and whether it is notable.", serde_json::json!({})),
+        ];
+        for (pos, (step, prompt, opts)) in prompts.iter().enumerate() {
+            sqlx::query(
+                r#"INSERT INTO agent_step_configs (id, agent_id, step_type, system_prompt, options, position)
+                   VALUES (?, ?, ?, ?, ?, ?)"#,
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(nid)
+            .bind(step.as_str())
+            .bind(*prompt)
+            .bind(opts.to_string())
+            .bind(pos as i64)
+            .execute(db)
+            .await?;
+        }
+    }
+
     tracing::info!("seeded example agents");
     Ok(())
 }

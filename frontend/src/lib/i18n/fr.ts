@@ -265,4 +265,5 @@ export const fr: Record<string, string> = {
   "builder.stop": "Arrêter",
   "builder.save": "Enregistrer",
   "builder.moreOptions": "Plus d'options",
+  "builder.toolParams": "Paramètres des outils",
 };

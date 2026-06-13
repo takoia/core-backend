@@ -60,6 +60,9 @@ pub struct StepDef {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
+    /// Per-tool parameters (e.g. symbol, discord_webhook).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub tool_params: std::collections::HashMap<String, String>,
 }
 
 fn default_version() -> String {
@@ -143,6 +146,9 @@ pub async fn import(db: &Db, account_id: &str, toml_str: &str) -> Result<String>
         if !sd.allowed_tools.is_empty() {
             options.insert("allowed_tools".into(), serde_json::json!(sd.allowed_tools));
         }
+        if !sd.tool_params.is_empty() {
+            options.insert("tool_params".into(), serde_json::json!(sd.tool_params));
+        }
         let options_json = serde_json::Value::Object(options).to_string();
 
         sqlx::query(
@@ -219,6 +225,15 @@ pub async fn export(db: &Db, agent_id: &str) -> Result<String> {
                     .get("allowed_tools")
                     .and_then(|v| v.as_array())
                     .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
+                tool_params: opts
+                    .get("tool_params")
+                    .and_then(|v| v.as_object())
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect()
+                    })
                     .unwrap_or_default(),
             },
         );

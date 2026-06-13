@@ -134,12 +134,24 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob) -> Result<RunOutcome> {
     }
 
     // ── Action (tool execution via sandbox) ────────────────────────────────
-    // Only run web_search when the agent's Action step allows it; extraction
-    // agents (e.g. invoices) process the given payload without searching.
+    // Run every tool the agent's Action step allows (market_data, web_search…),
+    // gathering their output. Extraction agents with no tools process the payload.
     let allowed = ctx.allowed_tools(StepType::Action);
-    let action_input = if allowed.iter().any(|t| t == "web_search") {
-        let provider = registry.resolve(ctx.provider_for(StepType::Action).as_deref());
+    let params = ctx.tool_params(StepType::Action);
+    if !allowed.is_empty() {
         bus.publish(JobEvent::step_started(&job.id, "action"));
+    }
+    let mut gathered = String::new();
+    if allowed.iter().any(|t| t == "market_data") {
+        let symbol = params.get("symbol").and_then(|v| v.as_str()).unwrap_or("^IXIC");
+        bus.publish(JobEvent::log(&job.id, format!("running tool: market_data ({symbol})")));
+        match tools::market_data(symbol).await {
+            Ok(out) => gathered.push_str(&format!("\n{}", out.output)),
+            Err(e) => gathered.push_str(&format!("\nmarket_data error: {e}")),
+        }
+    }
+    if allowed.iter().any(|t| t == "web_search") {
+        let provider = registry.resolve(ctx.provider_for(StepType::Action).as_deref());
         bus.publish(JobEvent::log(&job.id, "running tool: web_search"));
         let search = match tools::execute(&provider, "web_search", &objective.prompt).await {
             Ok(out) => out,
@@ -149,12 +161,12 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob) -> Result<RunOutcome> {
             }
         };
         ctx.record_usage(&provider.name(), "web_search", search.usage).await;
-        format!("Plan:\n{}\n\nTool web_search results:\n{}", decision, search.output)
+        gathered.push_str(&format!("\nweb_search:\n{}", search.output));
+    }
+    let action_input = if gathered.trim().is_empty() {
+        format!("Plan:\n{}\n\nInput to process:\n{}", decision, objective.prompt)
     } else {
-        format!(
-            "Plan:\n{}\n\nInput to process:\n{}",
-            decision, objective.prompt
-        )
+        format!("Plan:\n{}\n\nGathered data:{}", decision, gathered)
     };
     let action = ctx
         .step_with_extra(StepType::Action, &action_input, &done, 2, TokenUsage::default())
@@ -175,6 +187,15 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob) -> Result<RunOutcome> {
         .await
     {
         tracing::warn!(error = %e, "failed to persist memory");
+    }
+
+    // Discord alert: if the agent uses send_discord and a webhook is set.
+    if allowed.iter().any(|t| t == "send_discord") {
+        let webhook = params.get("discord_webhook").and_then(|v| v.as_str()).unwrap_or("");
+        match tools::send_discord(webhook, &format!("**{}**\n{}", objective.title, report)).await {
+            Ok(_) => bus.publish(JobEvent::log(&job.id, "alert sent to Discord")),
+            Err(e) => bus.publish(JobEvent::log(&job.id, format!("discord notify failed: {e}"))),
+        }
     }
 
     bus.publish(JobEvent::report(&job.id, &report));
@@ -214,6 +235,14 @@ impl<'a> RunCtx<'a> {
             .and_then(|c| serde_json::from_str::<StepOptions>(&c.options).ok())
             .map(|o| o.allowed_tools)
             .unwrap_or_default()
+    }
+
+    fn tool_params(&self, step: StepType) -> serde_json::Value {
+        self.configs
+            .get(step.as_str())
+            .and_then(|c| serde_json::from_str::<StepOptions>(&c.options).ok())
+            .map(|o| o.tool_params)
+            .unwrap_or(serde_json::Value::Null)
     }
 
     fn system_prompt(&self, step: StepType) -> String {
