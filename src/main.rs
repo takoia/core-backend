@@ -1,6 +1,8 @@
 //! TakoIA core-backend entrypoint: load config, open the DB, run migrations,
 //! and serve the HTTP API plus the static frontend.
 
+mod agent;
+mod bootstrap;
 mod config;
 mod crypto;
 mod db;
@@ -9,7 +11,9 @@ mod error;
 mod http;
 mod llm;
 mod memory;
+mod queue;
 mod state;
+mod tools;
 
 use anyhow::{Context, Result};
 use config::Config;
@@ -30,6 +34,13 @@ async fn main() -> Result<()> {
     tracing::info!("migrations applied");
 
     let state = AppState::new(pool, config.clone());
+
+    // First-boot seeding: default account, providers, demo agent.
+    bootstrap::run(&state.db, &state.cipher, &state.config).await?;
+
+    // Background job worker (runs the agent engine).
+    agent::worker::spawn(state.clone());
+
     let app = http::router(state);
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)

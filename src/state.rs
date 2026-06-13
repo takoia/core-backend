@@ -1,9 +1,12 @@
 //! Shared application state passed to every HTTP handler and the worker.
 
+use crate::agent::EventBus;
 use crate::config::Config;
 use crate::crypto::Cipher;
 use crate::db::Db;
+use crate::llm::ProviderRegistry;
 use crate::memory::Memory;
+use anyhow::Result;
 use std::sync::Arc;
 
 /// Cheaply-cloneable shared state (everything behind an `Arc`).
@@ -13,6 +16,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub cipher: Cipher,
     pub memory: Memory,
+    pub events: EventBus,
 }
 
 impl AppState {
@@ -24,6 +28,19 @@ impl AppState {
             config: Arc::new(config),
             cipher,
             memory,
+            events: EventBus::new(),
         }
+    }
+
+    /// Build the LLM provider registry for an account (loads + decrypts
+    /// connectors, with the global default as the fallback provider name).
+    pub async fn load_registry(&self, account_id: &str) -> Result<ProviderRegistry> {
+        ProviderRegistry::load(
+            &self.db,
+            &self.cipher,
+            account_id,
+            &self.config.default_llm_provider,
+        )
+        .await
     }
 }

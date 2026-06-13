@@ -1,12 +1,19 @@
 //! HTTP layer: REST API under `/api`, plus static frontend serving with SPA
 //! fallback for everything else.
 
+mod agents;
+mod approvals;
+mod connectors;
 mod health;
+mod jobs;
+mod marketplace;
+mod objectives;
+mod usage;
 
 use crate::state::AppState;
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse};
-use axum::routing::get;
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use std::path::PathBuf;
 use tower_http::cors::CorsLayer;
@@ -22,6 +29,27 @@ pub fn router(state: AppState) -> Router {
 
     let api = Router::new()
         .route("/health", get(health::health))
+        // Agents + per-step customization + marketplace publishing
+        .route("/agents", get(agents::list).post(agents::create))
+        .route("/agents/:id", get(agents::get).put(agents::update))
+        .route("/agents/:id/steps", put(agents::update_steps))
+        .route("/agents/:id/publish", post(agents::publish))
+        .route("/agents/:id/memories", get(agents::memories))
+        // Objectives -> jobs
+        .route("/objectives", get(objectives::list).post(objectives::create))
+        // Jobs + live SSE
+        .route("/jobs", get(jobs::list))
+        .route("/jobs/:id", get(jobs::get))
+        .route("/jobs/:id/events", get(jobs::events))
+        // Human-in-the-loop
+        .route("/approvals/:id", post(approvals::decide))
+        // Settings / connectors (encrypted)
+        .route("/connectors", get(connectors::list).post(connectors::upsert))
+        .route("/connectors/:id", delete(connectors::delete))
+        // Usage metering (billing basis)
+        .route("/usage", get(usage::get))
+        // Public marketplace
+        .route("/marketplace", get(marketplace::list))
         .with_state(state);
 
     Router::new()
