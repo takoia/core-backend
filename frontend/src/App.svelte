@@ -11,13 +11,14 @@
   import BuilderView from "./lib/BuilderView.svelte";
   import LogsView from "./lib/LogsView.svelte";
   import MemoryView from "./lib/MemoryView.svelte";
+  import VideoView from "./lib/VideoView.svelte";
   import LoginView from "./lib/LoginView.svelte";
   import { t, locale, setLocale } from "./lib/i18n";
   import "./lib/theme"; // applies the persisted theme on load
   import logo from "./lib/assets/takoia.png";
   import Icon from "./lib/Icon.svelte";
 
-  type View = "run" | "agents" | "builder" | "canvas" | "mcp" | "skills" | "memory" | "logs" | "settings" | "usage";
+  type View = "run" | "agents" | "builder" | "canvas" | "video" | "mcp" | "skills" | "memory" | "logs" | "settings" | "usage";
   let view: View = "run";
   let healthy = false;
   let token: string | null = localStorage.getItem("auth_token");
@@ -80,6 +81,7 @@
         <button class:active={view === "agents"} on:click={() => (view = "agents")}><Icon name="agents" />{$t("nav.agents")}</button>
         <button class:active={view === "builder"} on:click={() => (view = "builder")}><Icon name="builder" />{$t("nav.builder")}</button>
         <button class:active={view === "canvas"} on:click={() => (view = "canvas")}><Icon name="canvas" />Canvas</button>
+        <button class:active={view === "video"} on:click={() => (view = "video")}><Icon name="video" />{$t("nav.video")}</button>
         <button class:active={view === "mcp"} on:click={() => (view = "mcp")}><Icon name="mcp" />{$t("nav.mcp")}</button>
         <button class:active={view === "skills"} on:click={() => (view = "skills")}><Icon name="skills" />{$t("nav.skills")}</button>
         <button class:active={view === "memory"} on:click={() => (view = "memory")}><Icon name="builder" />{$t("nav.memory")}</button>
@@ -109,6 +111,8 @@
         <McpView />
       {:else if view === "skills"}
         <SkillsView />
+      {:else if view === "video"}
+        <VideoView />
       {:else if view === "memory"}
         <MemoryView />
       {:else if view === "logs"}

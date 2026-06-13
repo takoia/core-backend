@@ -14,6 +14,7 @@
     usage: "M4 20V10M10 20V4M16 20v-7M22 20H2",
     logs: "M4 5h16M4 10h16M4 15h10M4 20h7",
     builder: "M5 6a2 2 0 100-4 2 2 0 000 4zM19 22a2 2 0 100-4 2 2 0 000 4zM5 6v6a4 4 0 004 4h6M19 18v-2",
+    video: "M4 5h16v14H4zM10 9l5 3-5 3V9z",
   };
 </script>
 

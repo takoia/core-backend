@@ -227,4 +227,23 @@ export const fr: Record<string, string> = {
   "memory.confirmPurge": "Purger toutes les mémoires de :",
   "memory.entriesTitle": "Mémoires",
   "memory.noEntries": "Aucune entrée.",
+
+  // Video analysis
+  "nav.video": "Vidéo",
+  "video.title": "Analyse vidéo",
+  "video.subtitle": "enregistrez votre écran ou uploadez, l'IA extrait, vous confirmez",
+  "video.hint": "Les frames sont échantillonnées 1/sec dans votre navigateur et analysées par claude -p (vision). Ensuite, confirmez quelles infos extraites sont pertinentes.",
+  "video.record": "Enregistrer l'écran",
+  "video.stop": "Arrêter l'enregistrement",
+  "video.or": "ou",
+  "video.recording": "Enregistrement… arrêtez quand c'est fini",
+  "video.prompt": "Que doit chercher l'IA ? (optionnel)",
+  "video.promptPlaceholder": "ex. extraire les étapes effectuées, ou les champs de la facture affichée",
+  "video.analyze": "Analyser",
+  "video.extracting": "Extraction de la frame {i}/{n}…",
+  "video.analyzing": "Analyse de {n} frames avec claude -p…",
+  "video.done": "Terminé — {n} frames analysées",
+  "video.extracted": "Informations extraites",
+  "video.confirmHint": "confirmez ce qui est pertinent",
+  "video.confirmedCount": "{n} sur {total} confirmées",
 };

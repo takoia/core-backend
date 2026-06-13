@@ -173,6 +173,18 @@ export const api = {
     return req<{ logs: LogEntry[]; total: number }>(`/api/logs${suffix}`);
   },
 
+  analyzeVideo: (frames: string[], prompt?: string) =>
+    req<{
+      items: { info: string; detail: string }[];
+      raw: string;
+      frame_count: number;
+      usage: Record<string, number>;
+    }>("/api/video/analyze", {
+      method: "POST",
+      headers: jsonH,
+      body: JSON.stringify({ frames, prompt }),
+    }),
+
   memoryOverview: () =>
     req<{ stats: Record<string, string>; topics: { topic: string; count: number }[] }>(
       "/api/memory/overview",

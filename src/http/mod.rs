@@ -16,6 +16,7 @@ mod objectives;
 mod schedules;
 mod skills;
 mod usage;
+mod video;
 mod webhooks;
 
 use crate::state::AppState;
@@ -81,6 +82,8 @@ pub fn router(state: AppState) -> Router {
         // Permanent memory (ICM) management
         .route("/memory/overview", get(memory::overview))
         .route("/memory/purge", post(memory::purge))
+        // Video analysis (frames -> claude -p vision)
+        .route("/video/analyze", post(video::analyze))
         // Public marketplace
         .route("/marketplace", get(marketplace::list))
         .with_state(state);
