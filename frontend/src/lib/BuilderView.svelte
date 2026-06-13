@@ -106,7 +106,7 @@
   // ── Agent state ────────────────────────────────────────────────────────────
   let editingId = $state<string | null>(null);
   // Landing state: show the agent picker, not a blank new agent, on arrival.
-  let picking = $state(true);
+  let agentsModalOpen = $state(false);
   let name = $state("Nouvel agent");
   let icon = $state("🐙");
   let description = $state("");
@@ -132,9 +132,15 @@
   // ── Agent list ─────────────────────────────────────────────────────────────
   let agentList = $state<Agent[]>([]);
   async function refreshAgents() { try { agentList = await api.listAgents(); } catch { agentList = []; } }
-  // Arriving on the dashboard always shows the agent picker (the home of the
-  // builder). Pick or create an agent to start editing.
-  onMount(refreshAgents);
+  // Open straight into the editor: load the last agent (or the first, or a fresh
+  // one). The "My agents" list is a modal opened from the ☰ button.
+  onMount(async () => {
+    await refreshAgents();
+    const last = localStorage.getItem("takoia.lastAgent");
+    if (last && agentList.some((a) => a.id === last)) await loadAgent(last);
+    else if (agentList.length) await loadAgent(agentList[0].id);
+    // else: keep the fresh "Nouvel agent" the component initialized with.
+  });
 
   function agentEmoji(a: Agent): string {
     if (a.icon) return a.icon;
@@ -184,7 +190,7 @@
     nodes = g.nodes;
     edges = g.edges;
     selected = "agent"; resetRun();
-    picking = false;
+    agentsModalOpen = false;
   }
 
   function addBlock(key: string, pos?: { x: number; y: number }) {
@@ -630,16 +636,17 @@
   {/if}
 {/snippet}
 
-{#if picking}
-  <div class="welcome">
-    <div class="welcome-card card">
+{#if agentsModalOpen}
+  <div class="overlay" onclick={() => (agentsModalOpen = false)} role="presentation">
+    <div class="agmodal" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
       <div class="wtop">
         <h2>{$t("builder.myAgents")}</h2>
         <button class="newbig" onclick={newAgent}>＋ {$t("builder.newAgent")}</button>
+        <button class="x" onclick={() => (agentsModalOpen = false)} aria-label="close">×</button>
       </div>
       <div class="walist">
         {#each agentList as a}
-          <div class="warow">
+          <div class="warow" class:on={editingId === a.id}>
             <button class="warow-main" onclick={() => loadAgent(a.id)}>
               <span class="fav">{#if isImg(agentEmoji(a))}<img class="favimg" src={agentEmoji(a)} alt="" />{:else}{agentEmoji(a)}{/if}</span>
               <span class="fnm">{a.name || a.id}</span>
@@ -651,7 +658,7 @@
       </div>
     </div>
   </div>
-{:else}
+{/if}
 <div class="dash" style="grid-template-columns: {paletteOpen ? '200px' : '36px'} 1fr {inspectorOpen ? '300px' : '36px'};">
   <!-- Palette (tools window) -->
   {#if paletteOpen}
@@ -676,7 +683,7 @@
   <!-- Canvas -->
   <section class="center">
     <div class="topbar card">
-      <button class="ptoggle" onclick={() => (picking = true)} title={$t("builder.myAgents")}>☰</button>
+      <button class="ptoggle" onclick={() => (agentsModalOpen = true)} title={$t("builder.myAgents")}>☰</button>
       <span class="aname">{name}</span>
       {#if editingId}
         <label class="visck" title={$t("builder.visibleHint")}>
@@ -844,7 +851,6 @@
     </div>
   {/if}
 </div>
-{/if}
 
 <style>
   .dash { position: relative; height: calc(100vh - 90px); width: 100%; display: grid; grid-template-columns: 200px 1fr 300px; gap: 0.7rem; padding: 0.7rem; box-sizing: border-box; }
@@ -958,6 +964,9 @@
   /* Landing / agent picker */
   .welcome { display: flex; align-items: flex-start; justify-content: center; padding: 3rem 1rem; height: calc(100vh - 90px); box-sizing: border-box; }
   .welcome-card { width: 560px; max-width: 92vw; padding: 1.5rem; }
+  .agmodal { width: 480px; max-width: 92vw; max-height: 80vh; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 1.2rem; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+  .agmodal .x { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1.4rem; line-height: 1; }
+  .warow.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .wtop { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.2rem; gap: 1rem; }
   .wtop h2 { margin: 0; }
   .newbig { background: var(--accent); border: none; color: #04231a; font-weight: 700; border-radius: 10px; padding: 0.6rem 1rem; cursor: pointer; font: inherit; font-size: 0.9rem; white-space: nowrap; }
