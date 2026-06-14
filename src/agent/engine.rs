@@ -182,6 +182,24 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
         ctx.record_usage(&provider.name(), "web_search", search.usage).await;
         gathered.push_str(&format!("\nweb_search:\n{}", search.output));
     }
+    // call_agent: this agent orchestrates other agents (multi-agent composition,
+    // the substrate of the agent-to-agent flow). Each target runs synchronously,
+    // read-only, and its deliverable is gathered for this agent to synthesize.
+    if !action_done && allowed.iter().any(|t| t == "call_agent") {
+        let targets = call_agent_targets(&params);
+        let depth = job_chain_depth(state, &job.id).await;
+        if depth >= MAX_CALL_DEPTH {
+            gathered.push_str("\ncall_agent skipped: max orchestration depth reached.");
+        } else {
+            for target in &targets {
+                bus.publish(JobEvent::log(&job.id, format!("orchestrating: calling agent {target}")));
+                match run_subagent(state, target, &objective.prompt, depth + 1).await {
+                    Ok(result) => gathered.push_str(&format!("\nagent[{target}]:\n{result}")),
+                    Err(e) => gathered.push_str(&format!("\nagent[{target}] error: {e}")),
+                }
+            }
+        }
+    }
     let action_input = if gathered.trim().is_empty() {
         format!("Plan:\n{}\n\nInput to process:\n{}", decision, objective.prompt)
     } else {
@@ -585,4 +603,97 @@ pub async fn fail(state: &AppState, job_id: &str, err: &anyhow::Error) {
     state
         .events
         .publish(JobEvent::status(job_id, "failed", msg));
+}
+
+// ── Multi-agent orchestration (call_agent) ──────────────────────────────────
+
+/// Maximum agent-to-agent orchestration depth (anti-recursion guard).
+const MAX_CALL_DEPTH: i64 = 3;
+
+/// Target agent ids for the `call_agent` tool, read from the Action step params:
+/// `{ "call_agents": ["id1","id2"] }` or `{ "call_agent_id": "id" }`.
+fn call_agent_targets(params: &serde_json::Value) -> Vec<String> {
+    if let Some(arr) = params.get("call_agents").and_then(|v| v.as_array()) {
+        return arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    }
+    params
+        .get("call_agent_id")
+        .and_then(|v| v.as_str())
+        .map(|s| vec![s.to_string()])
+        .unwrap_or_default()
+}
+
+async fn job_chain_depth(state: &AppState, job_id: &str) -> i64 {
+    sqlx::query_as::<_, (i64,)>("SELECT chain_depth FROM jobs WHERE id = ?")
+        .bind(job_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.0)
+        .unwrap_or(0)
+}
+
+/// Run another agent synchronously and return its deliverable (restitution).
+/// Read-only so the callee's curated memory is never polluted by the caller's
+/// sub-task. `Box::pin` breaks the run_job -> call_agent -> run_job async cycle.
+async fn run_subagent(
+    state: &AppState,
+    target_agent_id: &str,
+    subtask: &str,
+    depth: i64,
+) -> Result<String> {
+    let account: Option<(String,)> = sqlx::query_as("SELECT account_id FROM agents WHERE id = ?")
+        .bind(target_agent_id)
+        .fetch_optional(&state.db)
+        .await?;
+    let Some((account_id,)) = account else {
+        return Err(anyhow::anyhow!("target agent not found"));
+    };
+
+    let objective_id = Uuid::new_v4().to_string();
+    let sub_job_id = Uuid::new_v4().to_string();
+    let mut tx = state.db.begin().await?;
+    sqlx::query(
+        "INSERT INTO objectives (id, account_id, agent_id, title, prompt) VALUES (?, ?, ?, 'sub-task', ?)",
+    )
+    .bind(&objective_id)
+    .bind(&account_id)
+    .bind(target_agent_id)
+    .bind(subtask)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO jobs (id, objective_id, agent_id, status, synchronous, chain_depth) VALUES (?, ?, ?, 'running', 1, ?)",
+    )
+    .bind(&sub_job_id)
+    .bind(&objective_id)
+    .bind(target_agent_id)
+    .bind(depth)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let claimed = ClaimedJob {
+        id: sub_job_id.clone(),
+        objective_id,
+        agent_id: target_agent_id.to_string(),
+    };
+    Box::pin(run_job(state, &claimed, true)).await?;
+
+    let out: Option<(String,)> = sqlx::query_as(
+        "SELECT output FROM steps WHERE job_id = ? AND step_type = 'restitution' ORDER BY position DESC LIMIT 1",
+    )
+    .bind(&sub_job_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let text = out
+        .map(|(o,)| {
+            serde_json::from_str::<serde_json::Value>(&o)
+                .ok()
+                .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
+                .unwrap_or(o)
+        })
+        .unwrap_or_default();
+    Ok(text)
 }
