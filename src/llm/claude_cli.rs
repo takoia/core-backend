@@ -1,6 +1,6 @@
 //! Claude provider backed by the Claude Code CLI in headless mode (`claude -p`).
 //!
-//! This consumes the user's Claude **plan** (forfait) via a long-lived token
+//! This consumes the user's Claude **plan** (subscription) via a long-lived token
 //! generated with `claude setup-token`, instead of per-token API billing. The
 //! token, when provided, is passed to the subprocess as `CLAUDE_CODE_OAUTH_TOKEN`.
 
@@ -8,11 +8,17 @@ use super::{Completion, CompletionRequest, LlmProvider, Role, TokenUsage};
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 /// Sentinel `base_url` value that selects this transport in the registry.
 pub const TRANSPORT_SENTINEL: &str = "claude-cli";
+
+/// Hard wall-clock limit for a single `claude -p` invocation. A hung CLI must
+/// not pin a worker forever; on timeout the child is killed (kill_on_drop) and
+/// the call returns an error so the engine can fall back to its canned provider.
+const CLAUDE_CLI_TIMEOUT_SECS: u64 = 300;
 
 /// A provider that shells out to `claude -p --output-format json`.
 pub struct ClaudeCliProvider {
@@ -84,7 +90,9 @@ impl LlmProvider for ClaudeCliProvider {
             .arg("--strict-mcp-config")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            // Guarantee the subprocess dies if we drop the child on timeout.
+            .kill_on_drop(true);
 
         // Run in an isolated, non-project directory so the agent does not pick
         // up the host's CLAUDE.md or project-scoped ICM recall. A steering
@@ -123,10 +131,21 @@ impl LlmProvider for ClaudeCliProvider {
             drop(stdin);
         }
 
-        let output = child
-            .wait_with_output()
-            .await
-            .context("failed to run claude -p")?;
+        // Race the subprocess against a hard timeout. On elapse, the child is
+        // dropped here and `kill_on_drop(true)` terminates the hung process.
+        let output = match tokio::time::timeout(
+            Duration::from_secs(CLAUDE_CLI_TIMEOUT_SECS),
+            child.wait_with_output(),
+        )
+        .await
+        {
+            Ok(res) => res.context("failed to run claude -p")?,
+            Err(_) => {
+                return Err(anyhow!(
+                    "claude -p exceeded {CLAUDE_CLI_TIMEOUT_SECS}s timeout"
+                ));
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -156,7 +175,13 @@ impl LlmProvider for ClaudeCliProvider {
             content: parsed.result,
             model: used_model,
             usage: TokenUsage {
-                prompt_tokens: parsed.usage.input_tokens,
+                // Cached prompt tokens (creation + read) are billed/counted as
+                // input but reported in separate fields; include them all.
+                prompt_tokens: parsed
+                    .usage
+                    .input_tokens
+                    .saturating_add(parsed.usage.cache_creation_input_tokens)
+                    .saturating_add(parsed.usage.cache_read_input_tokens),
                 completion_tokens: parsed.usage.output_tokens,
             },
         })
@@ -165,10 +190,16 @@ impl LlmProvider for ClaudeCliProvider {
 
 /// Ensure the isolated workdir exists and contains a steering CLAUDE.md that
 /// scopes the agent strictly to the task it is given.
+///
+/// `create_dir_all` is idempotent and cheap, so it runs on every call. The
+/// steering CLAUDE.md content is constant, so it is written at most once per
+/// process (guarded by a `Once`) to avoid a blocking fs write on every LLM step
+/// and a data race when concurrent jobs share the same workdir.
 fn ensure_isolated_workdir(workdir: &str) {
+    static STEERING_WRITTEN: std::sync::Once = std::sync::Once::new();
     let _ = std::fs::create_dir_all(workdir);
-    let claude_md = std::path::Path::new(workdir).join("CLAUDE.md");
-    {
+    STEERING_WRITTEN.call_once(|| {
+        let claude_md = std::path::Path::new(workdir).join("CLAUDE.md");
         let _ = std::fs::write(
             &claude_md,
             "# Task agent\n\n\
@@ -178,7 +209,7 @@ fn ensure_isolated_workdir(workdir: &str) {
              complete the task. Do not reference any codebase or repository. \
              Produce the requested deliverable directly.\n",
         );
-    }
+    });
 }
 
 #[derive(Deserialize)]
@@ -199,4 +230,8 @@ struct CliUsage {
     input_tokens: u32,
     #[serde(default)]
     output_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
+    #[serde(default)]
+    cache_read_input_tokens: u32,
 }

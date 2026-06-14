@@ -218,6 +218,19 @@
     finally { scaffolding = false; }
   }
 
+  // Evolve the saved agent's persona from its accumulated memories/interactions.
+  let evolving = $state(false);
+  async function evolvePersonaNow() {
+    if (!editingId) return;
+    evolving = true;
+    try {
+      const r = await api.evolvePersona(editingId);
+      persona = r.persona || persona;
+      toast($t("builder.personaEvolved"), "success");
+    } catch (e) { toast(e instanceof Error ? e.message : String(e), "error"); }
+    finally { evolving = false; }
+  }
+
   function addBlock(key: string, pos?: { x: number; y: number }) {
     const b = ALL_BLOCKS[key];
     if (!b) return;
@@ -729,7 +742,7 @@
       </div>
     </div>
     <div class="flowwrap card" bind:this={flowEl} ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; }} ondrop={onDrop}>
-      <SvelteFlow bind:nodes bind:edges bind:viewport {nodeTypes} fitView onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu} onedgecontextmenu={onEdgeContextMenu} onpanecontextmenu={onPaneContextMenu} onconnect={onConnect}>
+      <SvelteFlow colorMode="dark" bind:nodes bind:edges bind:viewport {nodeTypes} fitView onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu} onedgecontextmenu={onEdgeContextMenu} onpanecontextmenu={onPaneContextMenu} onconnect={onConnect}>
         <Background gap={22} />
         <Controls />
         <MiniMap pannable zoomable />
@@ -765,7 +778,7 @@
       <h3>{$t("builder.general")}</h3>
       <div class="scaffold">
         <label class="blk">✨ {$t("builder.describe")}
-          <textarea rows="2" bind:value={scaffoldDesc} placeholder={$t("builder.describePh")}></textarea>
+          <textarea rows="3" bind:value={scaffoldDesc} placeholder={$t("builder.describePh")}></textarea>
         </label>
         <button class="genbtn" onclick={runScaffold} disabled={scaffolding || !scaffoldDesc.trim()}>{scaffolding ? "…" : "✨ " + $t("builder.generate")}</button>
       </div>
@@ -778,6 +791,9 @@
       <label class="blk">{$t("builder.descr")}<textarea rows="2" bind:value={description}></textarea></label>
       <label class="blk">{$t("builder.persona")}<textarea rows="3" bind:value={persona} placeholder={$t("builder.personaPh")}></textarea></label>
       <p class="hint">{$t("builder.personaHint")}</p>
+      {#if editingId}
+        <button class="genbtn" onclick={evolvePersonaNow} disabled={evolving} title={$t("builder.evolvePersonaHint")}>{evolving ? "⏳ …" : "🧬 " + $t("builder.evolvePersona")}</button>
+      {/if}
       <label class="blk">{$t("builder.autonomy")}
         <select bind:value={autonomy}><option value="confirm_before_action">{$t("builder.confirm")}</option><option value="full_auto">{$t("builder.fullAuto")}</option></select>
       </label>

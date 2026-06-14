@@ -14,9 +14,6 @@ pub struct ToolOutput {
     pub usage: TokenUsage,
 }
 
-/// Names of the tools the platform knows about.
-pub const KNOWN_TOOLS: &[&str] = &["web_search", "write_report", "market_data", "send_discord"];
-
 /// Fetch public market data for a symbol (Yahoo Finance, no API key).
 /// `symbol` examples: AAPL, MSFT, ^IXIC (NASDAQ Composite), NVDA.
 pub async fn market_data(symbol: &str) -> Result<ToolOutput> {
@@ -66,12 +63,6 @@ pub async fn send_discord(webhook_url: &str, content: &str) -> Result<()> {
         return Err(anyhow!("discord webhook returned {}", resp.status()));
     }
     Ok(())
-}
-
-/// Whether a tool is considered sensitive (gated by human approval when the
-/// agent is not fully autonomous).
-pub fn is_sensitive(tool: &str) -> bool {
-    matches!(tool, "send_discord" | "write_report")
 }
 
 /// Execute a tool by name.

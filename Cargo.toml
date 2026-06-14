@@ -3,6 +3,7 @@ name = "takoia-core"
 version = "0.1.0"
 edition = "2021"
 description = "TakoIA core-backend: autonomous agent orchestrator (4-step loop)"
+license = "BUSL-1.1"
 
 [[bin]]
 name = "takoia"
@@ -55,6 +56,8 @@ dotenvy = "0.15"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 # Crypto for connector credentials
 chacha20poly1305 = "0.10"
+# Password hashing (multi-user auth)
+argon2 = "0.5"
 base64 = "0.22"
 rand = "0.8"
 # Scheduling

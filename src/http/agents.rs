@@ -11,7 +11,13 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::time::Duration;
 use uuid::Uuid;
+
+/// Hard wall-clock limit for the `claude -p` scaffold invocation. A hung CLI
+/// must not pin the HTTP handler (and its checked-out DB connection); on
+/// timeout the child is dropped and `kill_on_drop(true)` terminates it.
+const SCAFFOLD_TIMEOUT_SECS: u64 = 180;
 
 #[derive(Serialize, sqlx::FromRow)]
 struct AgentRow {
@@ -88,6 +94,7 @@ pub struct CreateAgent {
 /// `POST /api/agents` — create an agent with default step configs.
 pub async fn create(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Json(body): Json<CreateAgent>,
 ) -> AppResult<Json<Value>> {
     if body.name.trim().is_empty() {
@@ -125,6 +132,12 @@ pub async fn create(
         .execute(&mut *tx)
         .await?;
     }
+    // The creator owns the agent (RBAC).
+    sqlx::query("INSERT INTO agent_permissions (agent_id, user_id, role) VALUES (?, ?, 'owner')")
+        .bind(&id)
+        .bind(&me.id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
 
     Ok(Json(json!({ "id": id })))
@@ -185,9 +198,11 @@ pub struct UpdateSteps {
 /// `PUT /api/agents/:id/steps` — edit the per-step prompts/options.
 pub async fn update_steps(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
     Json(body): Json<UpdateSteps>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "editor").await?;
     let mut tx = state.db.begin().await?;
     for step in &body.steps {
         let options = if step.options.is_null() {
@@ -278,8 +293,10 @@ pub async fn export_toml(
 /// `DELETE /api/agents/:id` — remove an agent and its configs (cascade).
 pub async fn delete(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "owner").await?;
     sqlx::query("DELETE FROM agents WHERE id = ? AND account_id = ?")
         .bind(&id)
         .bind(DEFAULT_ACCOUNT_ID)
@@ -364,27 +381,40 @@ pub async fn scaffold(
     }
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        // Guarantee the subprocess dies if we drop the child on timeout.
+        .kill_on_drop(true);
     let mut child = cmd
         .spawn()
-        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to spawn claude: {e}")))?;
+        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to start AI generation: {e}")))?;
     if let Some(mut stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
         let _ = stdin.write_all(prompt.as_bytes()).await;
         drop(stdin);
     }
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| AppError::Other(e.into()))?;
+    // Race the subprocess against a hard timeout. On elapse, the child is
+    // dropped here and `kill_on_drop(true)` terminates the hung process.
+    let output = match tokio::time::timeout(
+        Duration::from_secs(SCAFFOLD_TIMEOUT_SECS),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(res) => res.map_err(|e| AppError::Other(e.into()))?,
+        Err(_elapsed) => {
+            return Err(AppError::Other(anyhow::anyhow!(
+                "AI generation exceeded {SCAFFOLD_TIMEOUT_SECS}s timeout"
+            )));
+        }
+    };
     if !output.status.success() {
         return Err(AppError::Other(anyhow::anyhow!(
-            "claude failed: {}",
+            "AI generation failed: {}",
             String::from_utf8_lossy(&output.stderr).chars().take(200).collect::<String>()
         )));
     }
     let parsed: Value = serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
-        .map_err(|e| AppError::Other(anyhow::anyhow!("invalid claude output: {e}")))?;
+        .map_err(|e| AppError::Other(anyhow::anyhow!("invalid AI generation output: {e}")))?;
     let text = parsed.get("result").and_then(|v| v.as_str()).unwrap_or_default();
     // The model returns a JSON object; tolerate surrounding prose/fences.
     let slice = match (text.find('{'), text.rfind('}')) {
@@ -394,6 +424,110 @@ pub async fn scaffold(
     let fields: Value = serde_json::from_str(slice)
         .unwrap_or_else(|_| json!({ "persona": "", "analyse": text, "decision": "", "action": "", "restitution": "" }));
     Ok(Json(fields))
+}
+
+/// `POST /api/agents/:id/evolve-persona` — regenerate the agent's persona from
+/// its accumulated memories, so its identity grows with what it has lived
+/// (including the tone of how the user has treated it). Two agents that start
+/// from the same persona diverge as their memories diverge.
+pub async fn evolve_persona(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let row: Option<(String, String, String)> =
+        sqlx::query_as("SELECT name, expertise_domain, persona FROM agents WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((name, expertise, current_persona)) = row else {
+        return Err(AppError::NotFound("agent not found".into()));
+    };
+
+    // Gather what the agent has accumulated. recall() falls back to the agent's
+    // top-weight memories when the keyword query misses.
+    let memories = state
+        .memory
+        .recall(&id, "interactions tone style how the user treats me preferences", 16)
+        .await;
+    if memories.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "agent has no memories yet — nothing to evolve from".into(),
+        ));
+    }
+
+    let prompt = format!(
+        "You evolve an AI agent's PERSONA based on what it has lived. Below is its \
+         current persona and the memories it has accumulated — including the tone \
+         of how the user has interacted with it. Rewrite the persona so it reflects \
+         this lived experience: if the user has been harsh or insulting, the agent \
+         grows more guarded, terse and defensive; if the user has been kind and \
+         appreciative, it grows warmer, proactive and trusting. Keep the agent's \
+         core expertise intact. Answer in the same language as the current persona, \
+         2-4 sentences, written in the agent's own voice. Return ONLY the new \
+         persona text, no preamble, no quotes.\n\n\
+         Agent name: {name}\nExpertise: {expertise}\n\nCurrent persona:\n{current_persona}\n\n\
+         Accumulated memories:\n{memories}"
+    );
+
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.arg("-p")
+        .arg("--output-format")
+        .arg("json")
+        .arg("--permission-mode")
+        .arg("bypassPermissions");
+    if let Some(token) = &state.config.claude_max_token {
+        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+    }
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to start AI generation: {e}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(prompt.as_bytes()).await;
+        drop(stdin);
+    }
+    let output = match tokio::time::timeout(
+        Duration::from_secs(SCAFFOLD_TIMEOUT_SECS),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(res) => res.map_err(|e| AppError::Other(e.into()))?,
+        Err(_elapsed) => {
+            return Err(AppError::Other(anyhow::anyhow!(
+                "AI generation exceeded {SCAFFOLD_TIMEOUT_SECS}s timeout"
+            )));
+        }
+    };
+    if !output.status.success() {
+        return Err(AppError::Other(anyhow::anyhow!(
+            "AI generation failed: {}",
+            String::from_utf8_lossy(&output.stderr).chars().take(200).collect::<String>()
+        )));
+    }
+    let parsed: Value = serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
+        .map_err(|e| AppError::Other(anyhow::anyhow!("invalid AI generation output: {e}")))?;
+    let new_persona = parsed
+        .get("result")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if new_persona.is_empty() {
+        return Err(AppError::Other(anyhow::anyhow!("AI returned an empty persona")));
+    }
+
+    sqlx::query("UPDATE agents SET persona = ? WHERE id = ?")
+        .bind(&new_persona)
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+
+    Ok(Json(json!({ "persona": new_persona, "previous": current_persona })))
 }
 
 /// ICM memories with native importance metadata (weight, access_count) so the

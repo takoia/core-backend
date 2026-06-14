@@ -4,8 +4,10 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::Json;
+use cron::Schedule;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::str::FromStr;
 use uuid::Uuid;
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -72,6 +74,18 @@ pub async fn create(
         .await?;
     if exists.is_none() {
         return Err(AppError::NotFound("agent not found".into()));
+    }
+
+    // When no positive interval is given, the schedule runs on the cron
+    // expression. Validate it up front (same parser as compute_next) so a
+    // malformed or 5-field Unix cron is rejected instead of silently degrading
+    // to the ~1 hour fallback.
+    let uses_cron = !matches!(body.interval_seconds, Some(secs) if secs > 0);
+    if uses_cron && Schedule::from_str(&body.cron_expr).is_err() {
+        return Err(AppError::BadRequest(format!(
+            "invalid cron expression: '{}' (expected a 6-field cron, e.g. '0 0 * * * *')",
+            body.cron_expr
+        )));
     }
 
     // One recurring schedule per agent: drop any existing ones first so repeated

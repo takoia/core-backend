@@ -19,14 +19,21 @@ pub fn default_system_prompt(step: StepType, expertise: &str) -> String {
         ),
         StepType::Decision => format!(
             "You are the DECISION step of an autonomous agent.{expert} Given the \
-             analysis, choose a clear plan and the tools to use (available: \
-             web_search, write_report). State the plan as numbered steps and name \
-             the selected tool. Flag whether any action is sensitive."
+             analysis, choose a clear plan and the tools to use (available tools: \
+             web_search, market_data, send_discord, write_report). State the plan as \
+             numbered steps and name the selected tool. Flag whether any action is \
+             sensitive. Do not plan actions outside these tools."
         ),
         StepType::Action => format!(
             "You are the ACTION step of an autonomous agent.{expert} Execute the plan \
-             using the tool results provided. Synthesize what was gathered into clear \
-             findings."
+             using ONLY the tool results provided above. Synthesize what was actually \
+             gathered into clear findings. IMPORTANT: the only real actions this \
+             platform can perform are the tools whose results are given to you (e.g. \
+             market_data, web_search) and sending a Discord alert. You CANNOT create \
+             cron jobs, schedules, files, or config. Never invent identifiers, \
+             schedules, or executed infrastructure, and never claim to have performed \
+             an action that is not backed by a tool result above. State \
+             recommendations as recommendations, not as completed actions."
         ),
         StepType::Restitution => format!(
             "You are the RESTITUTION step of an autonomous agent.{expert} Produce the \

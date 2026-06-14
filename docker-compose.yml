@@ -1,11 +1,31 @@
-# Optional Postgres for when you switch off SQLite.
-# The MVP runs on embedded SQLite and needs NO container at all.
-# To use Postgres: `docker compose up -d` then set
-#   DATABASE_URL=postgres://takoia:takoia@localhost:5432/takoia
+# One command to try TakoIA:  docker compose up --build
+# Open http://localhost:8080  (login: admin / takoia)
+#
+# Runs in demo mode (no Claude / no ICM needed): agent runs complete with offline
+# canned content and SQLite-backed memory. To use real Claude, set CLAUDE_MAX_TOKEN.
+#
+# Postgres is optional and OFF by default (the app uses embedded SQLite). Enable
+# it with the `postgres` profile if you ever switch DATABASE_URL.
 services:
+  app:
+    build: .
+    container_name: takoia
+    ports:
+      - "8080:8080"
+    environment:
+      # Set MASTER_KEY to keep encrypted connectors across restarts; if omitted an
+      # ephemeral one is generated at startup.
+      # MASTER_KEY: "<openssl rand -base64 32>"
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: takoia
+      # CLAUDE_MAX_TOKEN: ""   # paste a `claude setup-token` value for real Claude
+    volumes:
+      - takoia-data:/app/data
+
   postgres:
     image: postgres:18-alpine
     container_name: takoia-postgres
+    profiles: ["postgres"]
     environment:
       POSTGRES_USER: takoia
       POSTGRES_PASSWORD: takoia
@@ -21,4 +41,5 @@ services:
       retries: 5
 
 volumes:
+  takoia-data:
   takoia-pg-data:

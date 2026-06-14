@@ -1,0 +1,11 @@
+# Build artifacts and local state — never needed inside the image.
+target/
+frontend/node_modules/
+frontend/dist/
+data/
+*.db
+*.db-shm
+*.db-wal
+.git/
+.env
+.env.local

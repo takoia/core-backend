@@ -53,8 +53,23 @@ async fn tick(state: &AppState) -> Result<()> {
     .await?;
 
     for s in due {
-        // Avoid pile-up: skip if this agent already has an active job.
+        // Avoid pile-up: skip if this agent already has an active job. Still
+        // advance next_run_at so the skipped occurrence is pushed to its next
+        // legitimate slot instead of re-firing on every tick (which would
+        // collapse the interval/cron cadence once the agent frees up).
         if agent_has_active_job(&state.db, &s.agent_id).await? {
+            let next = compute_next(&s, now);
+            sqlx::query("UPDATE schedules SET next_run_at = ? WHERE id = ?")
+                .bind(&next)
+                .bind(&s.id)
+                .execute(&state.db)
+                .await?;
+            tracing::info!(
+                schedule = %s.id,
+                agent = %s.agent_id,
+                next = %next,
+                "scheduled run skipped (agent busy); advanced next_run_at"
+            );
             continue;
         }
         enqueue_run(&state.db, &s).await?;

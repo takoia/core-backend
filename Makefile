@@ -2,10 +2,12 @@
 # Hot reload: run `make dev` (backend auto-reload + frontend HMR together),
 # or run `make dev-api` and `make dev-web` in two terminals.
 
-.PHONY: help setup dev dev-api dev-web build build-frontend run test fmt clippy db-reset
+.PHONY: help demo docker setup dev dev-api dev-web build build-frontend run test fmt clippy db-reset
 
 help:
 	@echo "TakoIA core-backend"
+	@echo "  make demo           one command: setup + build + run (http://localhost:8080)"
+	@echo "  make docker         build & run everything in Docker (no Rust/Bun needed)"
 	@echo "  make setup          install frontend deps + create .env"
 	@echo "  make dev            run backend (auto-reload) + frontend (HMR)"
 	@echo "  make dev-api        backend only, auto-reload on Rust changes"
@@ -16,9 +18,18 @@ help:
 	@echo "  make fmt clippy     format / lint"
 	@echo "  make db-reset       delete the SQLite database"
 
+# One-shot local run: install deps, create .env, build everything, serve.
+demo: setup build run
+
+# Zero-prerequisite path (only Docker required).
+docker:
+	docker compose up --build
+
 setup:
 	cd frontend && bun install
-	@test -f .env || (sed 's|REPLACE_ME_WITH_openssl_rand_base64_32|'"$$(openssl rand -base64 32)"'|' .env-sample > .env && echo "created .env with a fresh MASTER_KEY")
+	@test -f .env || ( SAMPLE=$$(test -f .env.example && echo .env.example || echo .env-sample); \
+		sed 's|REPLACE_ME_WITH_openssl_rand_base64_32|'"$$(openssl rand -base64 32)"'|' $$SAMPLE > .env && \
+		echo "created .env from $$SAMPLE with a fresh MASTER_KEY" )
 
 # Run both dev servers; Ctrl-C stops both.
 dev:
@@ -42,6 +53,7 @@ build: build-frontend
 	cargo build --release
 
 run:
+	@test -d frontend/dist || ( echo "frontend bundle missing — building it once..." && $(MAKE) build-frontend )
 	cargo run --release
 
 test:

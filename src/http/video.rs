@@ -9,12 +9,18 @@ use axum::Json;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use uuid::Uuid;
 
 /// Hard cap on frames per request to bound cost and context size.
 const MAX_FRAMES: usize = 40;
+
+/// Hard wall-clock limit for the `claude -p` video analysis invocation. A hung
+/// CLI must not pin the HTTP handler (and its checked-out DB connection); on
+/// timeout the child is dropped and `kill_on_drop(true)` terminates it.
+const VIDEO_TIMEOUT_SECS: u64 = 180;
 
 #[derive(Deserialize)]
 pub struct AnalyzeVideo {
@@ -98,17 +104,32 @@ pub async fn analyze(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        // Guarantee the subprocess dies if we drop the child on timeout.
+        .kill_on_drop(true)
         .spawn()
-        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to spawn claude: {e}")))?;
+        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to start AI analysis: {e}")))?;
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(prompt.as_bytes()).await;
         drop(stdin);
     }
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| AppError::Other(e.into()))?;
+    // Race the subprocess against a hard timeout. On elapse, the child is
+    // dropped here and `kill_on_drop(true)` terminates the hung process.
+    let output = match tokio::time::timeout(
+        Duration::from_secs(VIDEO_TIMEOUT_SECS),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(res) => res.map_err(|e| AppError::Other(e.into()))?,
+        Err(_elapsed) => {
+            // Best-effort cleanup of the frame directory before returning.
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            return Err(AppError::Other(anyhow::anyhow!(
+                "AI analysis exceeded {VIDEO_TIMEOUT_SECS}s timeout"
+            )));
+        }
+    };
 
     // Best-effort cleanup of the frame directory.
     let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -116,14 +137,14 @@ pub async fn analyze(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(AppError::Other(anyhow::anyhow!(
-            "claude -p failed: {}",
+            "AI analysis failed: {}",
             stderr.chars().take(300).collect::<String>()
         )));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: Value = serde_json::from_str(stdout.trim())
-        .map_err(|e| AppError::Other(anyhow::anyhow!("invalid claude output: {e}")))?;
+        .map_err(|e| AppError::Other(anyhow::anyhow!("invalid AI analysis output: {e}")))?;
     let analysis = parsed
         .get("result")
         .and_then(|v| v.as_str())

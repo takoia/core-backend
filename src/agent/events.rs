@@ -2,7 +2,7 @@
 
 use crate::db::Db;
 use serde::Serialize;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 /// Kind of progress event emitted during a run.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -30,60 +30,137 @@ pub struct JobEvent {
     pub data: Option<serde_json::Value>,
 }
 
+/// A row ready to be inserted into `event_log`. We pre-compute the derived
+/// columns (id, kind wire string, serialized data) on the publishing side so
+/// the background writer only performs the INSERT.
+struct EventLogRow {
+    id: String,
+    job_id: String,
+    kind: String,
+    step_type: Option<String>,
+    status: Option<String>,
+    message: String,
+    data: Option<String>,
+}
+
+impl EventLogRow {
+    /// Build a persistable row from a `JobEvent`, mirroring exactly the columns
+    /// and values that were inserted by the previous per-event spawn path.
+    fn from_event(event: &JobEvent) -> Self {
+        let id = uuid::Uuid::new_v4().to_string();
+        // Serialize the kind enum to its snake_case wire string.
+        let kind = serde_json::to_value(event.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        let data = event.data.as_ref().map(|d| d.to_string());
+        Self {
+            id,
+            job_id: event.job_id.clone(),
+            kind,
+            step_type: event.step_type.clone(),
+            status: event.status.clone(),
+            message: event.message.clone(),
+            data,
+        }
+    }
+}
+
 /// A cloneable broadcast bus. SSE handlers subscribe and filter by `job_id`.
 /// Every published event is also persisted to `event_log` for the audit trail.
+///
+/// `EventBus` stays `Clone` because both `broadcast::Sender` and
+/// `mpsc::UnboundedSender` are cheaply cloneable handles. All clones feed the
+/// single background writer task spawned in [`EventBus::new`].
 #[derive(Clone)]
 pub struct EventBus {
     tx: broadcast::Sender<JobEvent>,
-    db: Db,
+    persist_tx: mpsc::UnboundedSender<EventLogRow>,
 }
 
 impl EventBus {
     pub fn new(db: Db) -> Self {
         let (tx, _rx) = broadcast::channel(1024);
-        Self { tx, db }
+        let (persist_tx, persist_rx) = mpsc::unbounded_channel::<EventLogRow>();
+        tokio::spawn(Self::persist_writer(db, persist_rx));
+        Self { tx, persist_tx }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<JobEvent> {
         self.tx.subscribe()
     }
 
-    /// Publish an event: broadcast to live subscribers, then persist it to the
-    /// `event_log` audit trail in the background.
+    /// Publish an event: broadcast to live subscribers immediately, then hand
+    /// the row off to the background writer for persistence to `event_log`.
     pub fn publish(&self, event: JobEvent) {
         let _ = self.tx.send(event.clone());
         self.persist(event);
     }
 
-    /// Insert the event into `event_log`. Spawned so persistence never blocks
-    /// the caller; failures are logged but do not affect the broadcast.
+    /// Queue the event for persistence. The actual INSERT runs in the single
+    /// background writer task, so the caller never blocks and bursts collapse
+    /// into batched transactions. If the writer is gone, the send is dropped.
     fn persist(&self, event: JobEvent) {
-        let db = self.db.clone();
-        tokio::spawn(async move {
-            let id = uuid::Uuid::new_v4().to_string();
-            // Serialize the kind enum to its snake_case wire string.
-            let kind = serde_json::to_value(event.kind)
-                .ok()
-                .and_then(|v| v.as_str().map(String::from))
-                .unwrap_or_default();
-            let data = event.data.as_ref().map(|d| d.to_string());
-            let res = sqlx::query(
-                r#"INSERT INTO event_log (id, job_id, kind, step_type, status, message, data)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)"#,
-            )
-            .bind(&id)
-            .bind(&event.job_id)
-            .bind(&kind)
-            .bind(&event.step_type)
-            .bind(&event.status)
-            .bind(&event.message)
-            .bind(&data)
-            .execute(&db)
-            .await;
-            if let Err(e) = res {
-                tracing::warn!("failed to persist event to event_log: {e}");
+        let row = EventLogRow::from_event(&event);
+        let _ = self.persist_tx.send(row);
+    }
+
+    /// Single background task that drains the persistence channel and writes
+    /// events to `event_log`. After each `recv()`, it opportunistically drains
+    /// any already-queued rows with `try_recv()` and inserts the whole batch in
+    /// one transaction, so bursts of events become a handful of transactions.
+    async fn persist_writer(db: Db, mut rx: mpsc::UnboundedReceiver<EventLogRow>) {
+        while let Some(first) = rx.recv().await {
+            // Collect the head row plus everything already queued.
+            let mut batch = vec![first];
+            while let Ok(row) = rx.try_recv() {
+                batch.push(row);
             }
-        });
+
+            let mut tx = match db.begin().await {
+                Ok(tx) => tx,
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to begin transaction for {} event_log rows: {e}",
+                        batch.len()
+                    );
+                    continue;
+                }
+            };
+
+            let mut failed = false;
+            for row in &batch {
+                let res = sqlx::query(
+                    r#"INSERT INTO event_log (id, job_id, kind, step_type, status, message, data)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+                )
+                .bind(&row.id)
+                .bind(&row.job_id)
+                .bind(&row.kind)
+                .bind(&row.step_type)
+                .bind(&row.status)
+                .bind(&row.message)
+                .bind(&row.data)
+                .execute(&mut *tx)
+                .await;
+                if let Err(e) = res {
+                    tracing::warn!("failed to persist event to event_log: {e}");
+                    failed = true;
+                    break;
+                }
+            }
+
+            if failed {
+                if let Err(e) = tx.rollback().await {
+                    tracing::warn!("failed to roll back event_log batch: {e}");
+                }
+            } else if let Err(e) = tx.commit().await {
+                tracing::warn!(
+                    "failed to commit {} event_log rows: {e}",
+                    batch.len()
+                );
+            }
+        }
     }
 }
 

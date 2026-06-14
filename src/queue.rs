@@ -83,11 +83,15 @@ pub async fn mark_failed(db: &Db, job_id: &str, error: &str) -> Result<()> {
 }
 
 /// Recover jobs left `running` by a previous crashed process: requeue them.
+///
+/// Synchronous inline-invoke jobs (`synchronous = 1`) are excluded: they are
+/// executed synchronously within the HTTP handler and must never be requeued
+/// by crash recovery.
 pub async fn recover_orphans(db: &Db) -> Result<u64> {
     let res = sqlx::query(
         r#"UPDATE jobs SET status = 'queued', locked_at = NULL,
            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-           WHERE status = 'running'"#,
+           WHERE status = 'running' AND synchronous = 0"#,
     )
     .execute(db)
     .await?;

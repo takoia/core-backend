@@ -45,6 +45,9 @@ async fn main() -> Result<()> {
     // First-boot seeding: default account, providers, demo agent.
     bootstrap::run(&state.db, &state.cipher, &state.config).await?;
 
+    // Seed the initial admin user from env credentials (multi-user auth).
+    http::users::ensure_admin_user(&state).await?;
+
     // Background job worker (runs the agent engine).
     agent::worker::spawn(state.clone());
 

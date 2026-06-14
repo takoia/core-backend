@@ -120,7 +120,7 @@
 <style>
   .wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; }
   .bg { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
-  .box { position: relative; z-index: 1; background: color-mix(in srgb, var(--panel) 78%, transparent); border: 1px solid var(--border); border-radius: 16px; padding: 2rem; width: 360px; max-width: 90vw; text-align: center; backdrop-filter: blur(10px); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45); }
+  .box { position: relative; z-index: 1; background: color-mix(in srgb, var(--panel) 80%, transparent); border: 1.5px solid color-mix(in srgb, var(--accent) 60%, transparent); border-radius: 16px; padding: 2rem; width: 360px; max-width: 90vw; text-align: center; backdrop-filter: blur(10px); box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55), 0 0 56px color-mix(in srgb, var(--accent) 24%, transparent), inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent); }
   .logo { width: 120px; height: 120px; border-radius: 50%; box-shadow: 0 0 34px color-mix(in srgb, var(--accent) 45%, transparent); }
   h2 { margin: 0.8rem 0 0.2rem; font-size: 1.15rem; }
   label { display: block; font-size: 0.85rem; color: var(--muted); margin-top: 0.9rem; text-align: left; }

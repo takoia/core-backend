@@ -25,6 +25,7 @@ pub struct CreatedJob {
 /// `POST /api/objectives` — create an objective and enqueue its job.
 pub async fn create(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Json(body): Json<CreateObjective>,
 ) -> AppResult<Json<CreatedJob>> {
     if body.prompt.trim().is_empty() {
@@ -39,6 +40,8 @@ pub async fn create(
     if exists.is_none() {
         return Err(AppError::NotFound("agent not found".into()));
     }
+    // Running an agent requires at least editor rights on it.
+    crate::http::users::require_agent_role(&state, &body.agent_id, &me, "editor").await?;
 
     let objective_id = Uuid::new_v4().to_string();
     let job_id = Uuid::new_v4().to_string();

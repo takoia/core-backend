@@ -1,6 +1,8 @@
 <script lang="ts">
-  import { api, type Connector } from "./api";
+  import { onMount } from "svelte";
+  import { api, type Connector, type User, type AgentPermission } from "./api";
   import { t } from "./i18n";
+  import { toast } from "./toast";
   import { THEMES, themeId, setTheme } from "./theme";
   import IntegrationsView from "./IntegrationsView.svelte";
   import { loadDiscordHooks, saveDiscordHooks } from "./discordHooks";
@@ -8,8 +10,148 @@
   export let connectors: Connector[] = [];
   export let onChanged: () => void = () => {};
 
-  type Tab = "appearance" | "agents" | "providers" | "integrations" | "expert" | "account";
+  type Tab = "appearance" | "agents" | "providers" | "integrations" | "expert" | "users" | "account";
   let tab: Tab = "appearance";
+
+  // Users & Roles (admin only)
+  let me: User | null = null;
+  let users: User[] = [];
+  // create-user form
+  let nuEmail = "";
+  let nuName = "";
+  let nuPassword = "";
+  let nuAdmin = false;
+  // agent permissions
+  let permAgents: { id: string; name: string }[] = [];
+  let permAgentId = "";
+  let perms: AgentPermission[] = [];
+  let grantUserId = "";
+  let grantRole: "owner" | "editor" | "viewer" = "viewer";
+
+  onMount(async () => {
+    try {
+      me = await api.me();
+    } catch {
+      me = null;
+    }
+    if (me?.is_admin) {
+      await loadUsers();
+      try {
+        permAgents = (await api.listAgents()).map((a) => ({ id: a.id, name: a.name }));
+      } catch (e) {
+        toast(e instanceof Error ? e.message : String(e), "error");
+      }
+    }
+  });
+
+  async function loadUsers() {
+    try {
+      users = await api.listUsers();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
+
+  async function createUser() {
+    if (!nuEmail.trim() || !nuPassword) return;
+    try {
+      await api.createUser({ email: nuEmail.trim(), name: nuName.trim() || undefined, password: nuPassword, is_admin: nuAdmin });
+      toast($t("users.created"), "success");
+      nuEmail = nuName = nuPassword = "";
+      nuAdmin = false;
+      await loadUsers();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
+
+  async function toggleAdmin(u: User) {
+    try {
+      await api.updateUser(u.id, { is_admin: !u.is_admin });
+      toast($t("users.updated"), "success");
+      await loadUsers();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
+
+  async function editName(u: User) {
+    const name = prompt($t("users.name"), u.name);
+    if (name === null) return;
+    try {
+      await api.updateUser(u.id, { name: name.trim() });
+      toast($t("users.updated"), "success");
+      await loadUsers();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
+
+  async function resetPassword(u: User) {
+    const password = prompt($t("users.newPassword"));
+    if (!password) return;
+    try {
+      await api.updateUser(u.id, { password });
+      toast($t("users.updated"), "success");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
+
+  async function deleteUser(u: User) {
+    if (!confirm($t("users.confirmDelete"))) return;
+    try {
+      await api.deleteUser(u.id);
+      toast($t("users.deleted"), "success");
+      await loadUsers();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
+
+  async function loadPerms() {
+    if (!permAgentId) {
+      perms = [];
+      return;
+    }
+    try {
+      perms = await api.agentPermissions(permAgentId);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
+
+  async function grantPerm() {
+    if (!permAgentId || !grantUserId) return;
+    try {
+      await api.setAgentPermission(permAgentId, grantUserId, grantRole);
+      toast($t("users.granted"), "success");
+      grantUserId = "";
+      await loadPerms();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
+
+  async function setRole(p: AgentPermission, role: string) {
+    try {
+      await api.setAgentPermission(permAgentId, p.user_id, role);
+      toast($t("users.updated"), "success");
+      await loadPerms();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
+
+  async function removePerm(p: AgentPermission) {
+    try {
+      await api.removeAgentPermission(permAgentId, p.user_id);
+      toast($t("users.removed"), "success");
+      await loadPerms();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
 
   // Agents: default loop interval (minutes) for newly built agents.
   let defaultLoopMin = parseInt(localStorage.getItem("takoia.defaultLoopMin") ?? "300", 10) || 300;
@@ -99,6 +241,9 @@ allowed_tools = ["web_search"]
   <button class:active={tab === "providers"} on:click={() => (tab = "providers")}>{$t("settings.tab.providers")}</button>
   <button class:active={tab === "integrations"} on:click={() => (tab = "integrations")}>{$t("settings.tab.integrations")}</button>
   <button class:active={tab === "expert"} on:click={() => (tab = "expert")}>{$t("settings.tab.expert")}</button>
+  {#if me?.is_admin}
+    <button class:active={tab === "users"} on:click={() => (tab = "users")}>{$t("settings.tab.users")}</button>
+  {/if}
   <button class:active={tab === "account"} on:click={() => (tab = "account")}>{$t("settings.tab.account")}</button>
 </div>
 
@@ -207,6 +352,107 @@ allowed_tools = ["web_search"]
     </div>
   </div>
 
+{:else if tab === "users"}
+  {#if !me?.is_admin}
+    <div class="card">
+      <p class="muted">{$t("users.adminOnly")}</p>
+    </div>
+  {:else}
+    <div class="card">
+      <h2>{$t("users.title")}</h2>
+      <table>
+        <thead><tr>
+          <th>{$t("users.email")}</th><th>{$t("users.name")}</th>
+          <th>{$t("users.admin")}</th><th></th>
+        </tr></thead>
+        <tbody>
+          {#each users as u (u.id)}
+            <tr>
+              <td><strong>{u.email}</strong></td>
+              <td class="small">{u.name || "—"}</td>
+              <td>{#if u.is_admin}<span class="badge">{$t("users.admin")}</span>{/if}</td>
+              <td class="actions">
+                <button on:click={() => editName(u)}>{$t("users.editName")}</button>
+                <button on:click={() => resetPassword(u)}>{$t("users.resetPassword")}</button>
+                <button on:click={() => toggleAdmin(u)}>{u.is_admin ? $t("users.revokeAdmin") : $t("users.makeAdmin")}</button>
+                <button class="danger" on:click={() => deleteUser(u)} disabled={u.id === me.id}>{$t("users.delete")}</button>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>{$t("users.create")}</h2>
+      <div class="form">
+        <label>{$t("users.email")} <input type="email" bind:value={nuEmail} placeholder="user@example.com" /></label>
+        <label>{$t("users.name")} <input bind:value={nuName} /></label>
+        <label>{$t("users.password")} <input type="password" bind:value={nuPassword} /></label>
+        <label class="check"><input type="checkbox" bind:checked={nuAdmin} /> {$t("users.admin")}</label>
+      </div>
+      <div class="row">
+        <button class="primary" on:click={createUser} disabled={!nuEmail.trim() || !nuPassword}>{$t("users.create")}</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>{$t("users.permissions")}</h2>
+      <div class="form">
+        <label>{$t("users.pickAgent")}
+          <select bind:value={permAgentId} on:change={loadPerms}>
+            <option value="">—</option>
+            {#each permAgents as a (a.id)}
+              <option value={a.id}>{a.name}</option>
+            {/each}
+          </select>
+        </label>
+      </div>
+      {#if permAgentId}
+        <table>
+          <thead><tr>
+            <th>{$t("users.email")}</th><th>{$t("users.role")}</th><th></th>
+          </tr></thead>
+          <tbody>
+            {#each perms as p (p.user_id)}
+              <tr>
+                <td><strong>{p.email}</strong> <span class="small muted">{p.name}</span></td>
+                <td>
+                  <select value={p.role} on:change={(e) => setRole(p, e.currentTarget.value)}>
+                    <option value="owner">{$t("users.role.owner")}</option>
+                    <option value="editor">{$t("users.role.editor")}</option>
+                    <option value="viewer">{$t("users.role.viewer")}</option>
+                  </select>
+                </td>
+                <td><button class="danger" on:click={() => removePerm(p)}>{$t("users.remove")}</button></td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        <div class="form">
+          <label>{$t("users.name")}
+            <select bind:value={grantUserId}>
+              <option value="">—</option>
+              {#each users as u (u.id)}
+                <option value={u.id}>{u.email}</option>
+              {/each}
+            </select>
+          </label>
+          <label>{$t("users.role")}
+            <select bind:value={grantRole}>
+              <option value="owner">{$t("users.role.owner")}</option>
+              <option value="editor">{$t("users.role.editor")}</option>
+              <option value="viewer">{$t("users.role.viewer")}</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <button class="primary" on:click={grantPerm} disabled={!grantUserId}>{$t("users.grant")}</button>
+        </div>
+      {/if}
+    </div>
+  {/if}
+
 {:else if tab === "account"}
   <div class="card">
     <h2>{$t("settings.tab.account")}</h2>
@@ -238,4 +484,11 @@ allowed_tools = ["web_search"]
   button.primary { background: var(--accent); border: 1px solid var(--accent); color: #04231a; font-weight: 600; border-radius: 8px; padding: 0.5rem 0.9rem; cursor: pointer; font: inherit; }
   button.danger { background: var(--err); border: 1px solid var(--err); color: #2a0707; border-radius: 8px; padding: 0.5rem 0.9rem; cursor: pointer; font: inherit; }
   .small { font-size: 0.78rem; }
+  .muted { color: var(--muted); }
+  select { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 7px; padding: 0.45rem 0.6rem; font: inherit; margin-top: 0.2rem; }
+  .badge { display: inline-block; background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--text); border: 1px solid var(--accent); border-radius: 6px; padding: 0.1rem 0.45rem; font-size: 0.72rem; }
+  .actions { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  .actions button { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 7px; padding: 0.3rem 0.55rem; cursor: pointer; font: inherit; font-size: 0.76rem; }
+  .actions button.danger { background: var(--err); border-color: var(--err); color: #2a0707; }
+  .actions button:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

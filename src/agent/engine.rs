@@ -93,8 +93,8 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
         expertise: &agent.expertise_domain,
         persona: &agent.persona,
         account_id: &objective.account_id,
-        objective_prompt: &objective.prompt,
         session: Vec::new(),
+        recalled_memory: memory_ctx.clone(),
         read_only: read_only_memory,
     };
 
@@ -150,7 +150,11 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
         bus.publish(JobEvent::step_started(&job.id, "action"));
     }
     let mut gathered = String::new();
-    if allowed.iter().any(|t| t == "market_data") {
+    // Skip tool gathering when the Action step was already completed on a prior
+    // attempt: the step result is reused below, so re-running the tools would
+    // only waste calls and re-bill tokens (e.g. web_search).
+    let action_done = done.contains_key(StepType::Action.as_str());
+    if !action_done && allowed.iter().any(|t| t == "market_data") {
         let symbol = params.get("symbol").and_then(|v| v.as_str()).unwrap_or("^IXIC");
         bus.publish(JobEvent::log(&job.id, format!("running tool: market_data ({symbol})")));
         match tools::market_data(symbol).await {
@@ -158,7 +162,7 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
             Err(e) => gathered.push_str(&format!("\nmarket_data error: {e}")),
         }
     }
-    if allowed.iter().any(|t| t == "web_search") {
+    if !action_done && allowed.iter().any(|t| t == "web_search") {
         let provider = registry.resolve(ctx.provider_for(StepType::Action).as_deref());
         // Restrict to a specific site when the web_search tool has a `site` param.
         let site = params.get("site").and_then(|v| v.as_str()).unwrap_or("");
@@ -188,6 +192,10 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
         .await?;
 
     // ── Restitution (final deliverable + memory write) ─────────────────────
+    // Whether Restitution was already completed on a prior attempt. On a resumed
+    // run (approval requeue or crash recovery) `run_job` re-executes top to
+    // bottom, so the post-restitution side effects below must not double-fire.
+    let restitution_was_done = done.contains_key(StepType::Restitution.as_str());
     let restitution_input = format!(
         "Objective: {}\n\nFindings:\n{}",
         objective.prompt, action
@@ -196,7 +204,8 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
 
     // Persist what was learned so the agent gets more expert over time.
     // Read-only (marketplace) runs never write to the publisher's memory.
-    if !read_only_memory {
+    // Skipped on a resumed-after-completion run so the summary is stored once.
+    if !read_only_memory && !restitution_was_done {
         let summary = report.chars().take(600).collect::<String>();
         if let Err(e) = state
             .memory
@@ -205,10 +214,19 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
         {
             tracing::warn!(error = %e, "failed to persist memory");
         }
+        // Capture HOW the user interacted (their wording/tone), separate from the
+        // work, so the persona can later evolve from the relationship itself.
+        let interaction = objective.prompt.chars().take(400).collect::<String>();
+        let _ = state
+            .memory
+            .store(&job.agent_id, "interaction", &interaction)
+            .await;
     }
 
     // Discord alert: if the agent uses send_discord and a webhook is set.
-    if allowed.iter().any(|t| t == "send_discord") {
+    // Skip on a resumed run whose Restitution was already done, so the alert is
+    // never sent twice for the same job.
+    if !restitution_was_done && allowed.iter().any(|t| t == "send_discord") {
         let webhook = params.get("discord_webhook").and_then(|v| v.as_str()).unwrap_or("");
         match tools::send_discord(webhook, &format!("**{}**\n{}", objective.title, report)).await {
             Ok(_) => bus.publish(JobEvent::log(&job.id, "alert sent to Discord")),
@@ -219,11 +237,17 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
     bus.publish(JobEvent::report(&job.id, &report));
     queue::set_status(&state.db, &job.id, JobStatus::Done).await?;
     bus.publish(JobEvent::status(&job.id, "done", "job completed"));
-    increment_runs(state, &job.agent_id).await;
+    // Skipped on a resumed-after-completion run so the run is counted once.
+    if !restitution_was_done {
+        increment_runs(state, &job.agent_id).await;
+    }
 
     // Event choreography: emit this agent's events, triggering any wired agents.
-    if let Err(e) = super::choreography::dispatch(state, &job.id, &job.agent_id, &report).await {
-        tracing::warn!(error = %e, "choreography dispatch failed");
+    // Skipped on a resumed-after-completion run so downstream agents fire once.
+    if !restitution_was_done {
+        if let Err(e) = super::choreography::dispatch(state, &job.id, &job.agent_id, &report).await {
+            tracing::warn!(error = %e, "choreography dispatch failed");
+        }
     }
 
     Ok(RunOutcome::Completed)
@@ -238,10 +262,12 @@ struct RunCtx<'a> {
     expertise: &'a str,
     persona: &'a str,
     account_id: &'a str,
-    objective_prompt: &'a str,
     /// Accumulated outputs of THIS run's steps, injected into every later step
     /// so the agent keeps a continuous session memory across steps.
     session: Vec<String>,
+    /// ICM recall computed once per run (the query — the objective prompt — is
+    /// constant across steps).
+    recalled_memory: String,
     /// Recall memory but never write it (marketplace consumer invokes).
     read_only: bool,
 }
@@ -308,14 +334,12 @@ impl<'a> RunCtx<'a> {
 
         bus.publish(JobEvent::step_started(&self.job.id, step.as_str()));
 
-        // ── ICM recall at the START of every step ──────────────────────────
+        // ── ICM recall (computed once per run, reused here) ────────────────
         // Long-term memory (past runs + expertise) plus this run's earlier
-        // steps, so the agent keeps a continuous, coherent session.
-        let recalled = self
-            .state
-            .memory
-            .recall(&self.job.agent_id, self.objective_prompt, 6)
-            .await;
+        // steps, so the agent keeps a continuous, coherent session. The query
+        // (objective prompt) is constant across steps, so the recall is done
+        // once in `run_job` and cached on `RunCtx`.
+        let recalled = self.recalled_memory.clone();
         if !recalled.trim().is_empty() {
             bus.publish(JobEvent::log(
                 &self.job.id,
@@ -360,6 +384,7 @@ impl<'a> RunCtx<'a> {
         messages.push(Message::user(input.to_string()));
         let req = CompletionRequest::new(messages);
 
+        let mut used_canned = false;
         let completion = match provider.complete(req.clone()).await {
             Ok(c) => c,
             Err(e) => {
@@ -368,6 +393,7 @@ impl<'a> RunCtx<'a> {
                     &self.job.id,
                     format!("{} provider error, using offline fallback", label(step)),
                 ));
+                used_canned = true;
                 self.registry.canned().complete(req).await?
             }
         };
@@ -386,8 +412,10 @@ impl<'a> RunCtx<'a> {
 
         // ── ICM store at the END of every step ─────────────────────────────
         // Persist this step's result so later steps and future runs recall it.
-        // Skipped for read-only (marketplace) runs to protect the publisher.
-        if !self.read_only {
+        // Skipped for read-only (marketplace) runs to protect the publisher, and
+        // when the canned offline fallback was used (its generic demo content
+        // would poison the agent's recalled memory).
+        if !self.read_only && !used_canned {
             let trimmed: String = completion.content.chars().take(500).collect();
             if let Err(e) = self
                 .state

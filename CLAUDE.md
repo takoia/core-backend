@@ -1,14 +1,14 @@
 # CLAUDE.md - TakoIA Core Backend
 
 ## Project Overview
-`core-backend` is the orchestrator of the TakoIA ecosystem. Written in Rust for maximum reliability and speed, it manages the persistent task queue (PostgreSQL), handles multi-LLM routing, controls execution sandboxing, and talks to MCP servers to execute complex end-to-end workflows.
+`core-backend` is the orchestrator of the TakoIA ecosystem. Written in Rust for maximum reliability and speed, it manages the persistent task queue (SQLite today, Postgres as a future target), handles multi-LLM routing, controls execution sandboxing, and talks to MCP servers to execute complex end-to-end workflows.
 
 ## Tech Stack & Architecture
 - **Language:** Rust (Stable)
-- **Database:** PostgreSQL with `sqlx` (Async & compile-time checked queries)
+- **Database:** SQLite with `sqlx` (current implementation; Postgres is a future target)
 - **API Layer:** Axum (REST & WebSockets for live logging)
 - **LLM Routing:** Dynamic orchestration (e.g., fast model for Analysis, powerful model for Decision)
-- **State Management:** Tracking the 4 core steps: `Analyse`, `Décision`, `Action`, `Restitution`.
+- **State Management:** Tracking the 4 core steps: `Analyse`, `Decision`, `Action`, `Restitution`.
 
 ## Development Commands
 - Build project: `cargo build`

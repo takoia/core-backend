@@ -3,7 +3,6 @@
 
 mod agents;
 mod approvals;
-mod auth;
 mod connectors;
 mod health;
 mod integrations;
@@ -15,6 +14,7 @@ mod mcp;
 mod objectives;
 mod schedules;
 mod skills;
+pub mod users;
 mod tts;
 mod usage;
 mod video;
@@ -39,7 +39,12 @@ pub fn router(state: AppState) -> Router {
 
     let api = Router::new()
         .route("/health", get(health::health))
-        .route("/login", post(auth::login))
+        .route("/login", post(users::login))
+        .route("/logout", post(users::logout))
+        .route("/me", get(users::me))
+        // Multi-user management (org admin)
+        .route("/users", get(users::list_users).post(users::create_user))
+        .route("/users/:id", put(users::update_user).delete(users::delete_user))
         // Agents + per-step customization + marketplace publishing
         .route("/agents", get(agents::list).post(agents::create))
         .route("/agents/import", post(agents::import_toml))
@@ -51,6 +56,10 @@ pub fn router(state: AppState) -> Router {
         .route("/agents/:id/memories", get(agents::memories))
         .route("/agents/:id/icm-memories", get(agents::icm_memories))
         .route("/agents/:id/memory", post(agents::add_memory))
+        .route("/agents/:id/evolve-persona", post(agents::evolve_persona))
+        // Per-agent RBAC (owner / editor / viewer)
+        .route("/agents/:id/permissions", get(users::list_agent_permissions).post(users::set_agent_permission))
+        .route("/agents/:id/permissions/:user_id", delete(users::remove_agent_permission))
         // Objectives -> jobs
         .route("/objectives", get(objectives::list).post(objectives::create))
         // Jobs + live SSE

@@ -7,6 +7,20 @@ export interface Health {
   version: string;
 }
 
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  is_admin: boolean;
+}
+
+export interface AgentPermission {
+  user_id: string;
+  email: string;
+  name: string;
+  role: string;
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -92,10 +106,20 @@ export interface LogEntry {
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = localStorage.getItem("auth_token");
   const res = await fetch(path, {
     ...init,
-    headers: { Accept: "application/json", ...(init?.headers ?? {}) },
+    headers: {
+      Accept: "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers ?? {}),
+    },
   });
+  if (res.status === 401 && token) {
+    // Session expired or revoked: drop it and bounce back to the login screen.
+    localStorage.removeItem("auth_token");
+    location.reload();
+  }
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`${res.status}: ${text}`);
@@ -108,11 +132,27 @@ export const api = {
   health: () => req<Health>("/api/health"),
 
   login: (username: string, password: string) =>
-    req<{ token: string; username: string }>("/api/login", {
+    req<{ token: string; username: string; user: User }>("/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, password }),
     }),
+
+  // ── Auth + multi-user management ──────────────────────────────────────────
+  me: () => req<User>("/api/me"),
+  logout: () => req("/api/logout", { method: "POST" }).catch(() => {}),
+  listUsers: () => req<{ users: User[] }>("/api/users").then((r) => r.users),
+  createUser: (body: { email: string; name?: string; password: string; is_admin?: boolean }) =>
+    req<{ id: string }>("/api/users", { method: "POST", headers: jsonH, body: JSON.stringify(body) }),
+  updateUser: (id: string, body: { name?: string; password?: string; is_admin?: boolean }) =>
+    req(`/api/users/${id}`, { method: "PUT", headers: jsonH, body: JSON.stringify(body) }),
+  deleteUser: (id: string) => req(`/api/users/${id}`, { method: "DELETE" }),
+  agentPermissions: (id: string) =>
+    req<{ permissions: AgentPermission[] }>(`/api/agents/${id}/permissions`).then((r) => r.permissions),
+  setAgentPermission: (id: string, user_id: string, role: string) =>
+    req(`/api/agents/${id}/permissions`, { method: "POST", headers: jsonH, body: JSON.stringify({ user_id, role }) }),
+  removeAgentPermission: (id: string, user_id: string) =>
+    req(`/api/agents/${id}/permissions/${user_id}`, { method: "DELETE" }),
 
   listAgents: () => req<{ agents: Agent[] }>("/api/agents").then((r) => r.agents),
   getAgent: (id: string) => req<{ agent: Agent; steps: StepConfig[] }>(`/api/agents/${id}`),
@@ -160,6 +200,11 @@ export const api = {
       method: "POST",
       headers: jsonH,
       body: JSON.stringify({ content, key }),
+    }),
+  evolvePersona: (id: string) =>
+    req<{ persona: string; previous: string }>(`/api/agents/${id}/evolve-persona`, {
+      method: "POST",
+      headers: jsonH,
     }),
   memories: (id: string) =>
     req<{ memories: { key: string; content: string; created_at: string }[] }>(

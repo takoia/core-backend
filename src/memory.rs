@@ -49,12 +49,71 @@ impl Memory {
     /// Recall expertise relevant to `query` for prompt injection at the Analyse
     /// step. Tries ICM first (semantic), falls back to recent DB memories.
     pub async fn recall(&self, agent_id: &str, query: &str, limit: usize) -> String {
+        // 1) Query-scoped keyword recall.
         if let Some(text) = self.recall_icm(agent_id, query, limit).await {
+            if Self::toon_has_entries(&text) {
+                return text;
+            }
+        }
+        // 2) Keyword recall frequently misses (memories carry generic step-name
+        //    keywords, not content terms), in which case ICM returns an empty
+        //    `memories[0]{...}` header. Fall back to the agent's highest-weight
+        //    memories so accumulated expertise is ALWAYS injected.
+        if let Some(text) = self.recall_top(agent_id).await {
             if !text.trim().is_empty() {
                 return text;
             }
         }
+        // 3) Last resort: the DB mirror.
         self.recall_db(agent_id, limit).await.unwrap_or_default()
+    }
+
+    /// True when a TOON recall payload actually carries rows. ICM emits a header
+    /// like `memories[0]{id,topic,...}:` (note the `[0]`) with no rows when
+    /// nothing matched — that header is non-empty but must be treated as empty.
+    fn toon_has_entries(toon: &str) -> bool {
+        let t = toon.trim();
+        if t.is_empty() {
+            return false;
+        }
+        if let Some(rest) = t.strip_prefix("memories[") {
+            if let Some(end) = rest.find(']') {
+                return rest[..end].trim() != "0";
+            }
+        }
+        // Unknown shape: only trust it if there is more than the header line.
+        t.lines().count() > 1
+    }
+
+    /// Highest-weight memories for the agent's topic, independent of the query.
+    /// `icm recall` needs a keyword/embedding match; `icm list` does not, so this
+    /// reliably surfaces the consolidated expertise even when recall misses.
+    async fn recall_top(&self, agent_id: &str) -> Option<String> {
+        let output = Command::new("icm")
+            .arg("list")
+            .arg("--topic")
+            .arg(Self::topic(agent_id))
+            .arg("--db")
+            .arg(&self.icm_db_path)
+            .arg("--sort")
+            .arg("weight")
+            .output()
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        // `icm list` prints a human sentinel (e.g. "No memories found.") with a
+        // success exit code when the topic is empty. Only treat the output as
+        // real memory when it carries actual entry fields, so we never inject a
+        // sentinel string as recalled memory (and never shadow the DB fallback).
+        let looks_real = text.contains("summary:") || text.contains("topic:");
+        if text.is_empty() || !looks_real {
+            return None;
+        }
+        // Cap what we inject into the prompt regardless of how much ICM holds.
+        Some(text.chars().take(4000).collect())
     }
 
     async fn recall_icm(&self, agent_id: &str, query: &str, limit: usize) -> Option<String> {
@@ -97,22 +156,70 @@ impl Memory {
             .join("\n"))
     }
 
+    /// Salient keywords derived from memory content so keyword recall can match
+    /// content queries (not just the generic step-name key). Lowercases, splits
+    /// on non-alphanumeric chars, drops short tokens and common stopwords,
+    /// dedupes, and caps the list so the keyword set stays focused.
+    fn content_keywords(content: &str) -> Vec<String> {
+        // A small English + French stopword set: high-frequency, low-signal
+        // tokens (>= 4 chars) that would otherwise dilute keyword recall.
+        const STOPWORDS: &[&str] = &[
+            "this", "that", "with", "from", "have", "they", "them", "then",
+            "their", "there", "would", "could", "should", "about", "which",
+            "when", "what", "were", "will", "your",
+            "pour", "dans", "avec", "les", "des", "une", "que", "qui", "est",
+            "sont", "cette", "vous", "nous", "mais", "comme", "plus",
+        ];
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut out: Vec<String> = Vec::new();
+        for token in content
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+        {
+            if token.len() < 4 || STOPWORDS.contains(&token) {
+                continue;
+            }
+            if seen.insert(token.to_string()) {
+                out.push(token.to_string());
+                if out.len() >= 8 {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
     /// Persist a new memory at the Restitution step: ICM (best-effort) + DB.
     pub async fn store(&self, agent_id: &str, key: &str, content: &str) -> Result<()> {
+        // User-specific memories are protected from decay/consolidation by
+        // storing them at high importance; other (generic step) memories keep
+        // ICM's default (medium).
+        let high_importance = matches!(
+            key,
+            "correction" | "preference" | "demonstration" | "instruction"
+        );
+        // Keyword set: the key first (generic step name), then salient terms
+        // derived from the content so keyword recall can match content queries.
+        let mut keywords = vec![key.to_string()];
+        keywords.extend(Self::content_keywords(content));
+        let keywords = keywords.join(",");
+
         // ICM is best-effort: a failure must never break a run.
-        let icm = Command::new("icm")
-            .arg("store")
+        let mut cmd = Command::new("icm");
+        cmd.arg("store")
             .arg("--topic")
             .arg(Self::topic(agent_id))
             .arg("--content")
             .arg(content)
             .arg("--keywords")
-            .arg(key)
+            .arg(&keywords)
             .arg("--db")
             .arg(&self.icm_db_path)
-            .arg("--no-embeddings")
-            .output()
-            .await;
+            .arg("--no-embeddings");
+        if high_importance {
+            cmd.arg("--importance").arg("high");
+        }
+        let icm = cmd.output().await;
         if let Err(e) = &icm {
             tracing::warn!(agent_id, error = %e, "icm store failed (db still persisted)");
         }
@@ -186,7 +293,17 @@ impl Memory {
             .output()
             .await;
         match output {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            Ok(o) if o.status.success() => {
+                let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                // When nothing matched, ICM emits an empty TOON header (e.g.
+                // `memories[0]{...}:`) that must not be surfaced as fake
+                // corrections — treat it as "no feedback".
+                if Self::toon_has_entries(&text) {
+                    text
+                } else {
+                    String::new()
+                }
+            }
             _ => String::new(),
         }
     }
@@ -310,15 +427,6 @@ impl Memory {
         .unwrap_or_default()
     }
 
-    /// Number of stored memories for an agent (DB mirror).
-    pub async fn count(&self, agent_id: &str) -> i64 {
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM memories WHERE agent_id = ?")
-            .bind(agent_id)
-            .fetch_one(&self.db)
-            .await
-            .unwrap_or(0)
-    }
-
     /// Consolidate an agent's verbatim memories into a single distilled summary
     /// (ICM native consolidation, LLM summarizer via the inherited Max token).
     /// Best-effort: a failure must never break a run.
@@ -359,24 +467,72 @@ impl Memory {
     }
 
     /// After ICM consolidation removed the originals, rebuild the DB mirror for
-    /// this agent from what ICM now holds (the consolidated summary).
+    /// this agent from what ICM now holds (the consolidated summary/entries).
+    ///
+    /// Safety: this MUST never wipe a healthy mirror. We first collect real,
+    /// structured entries from ICM (via `icm_entries`, which parses JSON into
+    /// `summary` fields — never a raw TOON header). Only if we obtain at least
+    /// one non-empty entry do we replace the mirror, and we do so inside a single
+    /// transaction so a mid-way failure can never leave the mirror empty.
     async fn resync_mirror_from_icm(&self, agent_id: &str) {
-        let recalled = self.recall_icm(agent_id, "", 50).await.unwrap_or_default();
-        if recalled.trim().is_empty() {
+        // Collect first. `icm_entries` substitutes a safe keyword for blank
+        // queries and yields parsed entries; an empty Vec means "nothing real".
+        let entries: Vec<IcmEntry> = self
+            .icm_entries(agent_id, "memory", 50)
+            .await
+            .into_iter()
+            // Drop any entry without a genuine summary so a header/placeholder
+            // line can never be mirrored as a memory.
+            .filter(|e| !e.summary.trim().is_empty())
+            .collect();
+
+        if entries.is_empty() {
+            // Nothing real came back from ICM: leave the existing mirror intact
+            // rather than destroying healthy memories.
+            tracing::warn!(
+                agent_id,
+                "icm resync parsed zero real entries; keeping existing db mirror"
+            );
             return;
         }
-        let _ = sqlx::query("DELETE FROM memories WHERE agent_id = ?")
+
+        // Replace the mirror atomically: delete + insert in one transaction so a
+        // parse/insert failure can never leave the agent with an empty mirror.
+        let mut tx = match self.db.begin().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                tracing::warn!(agent_id, error = %e, "icm resync could not begin transaction; mirror untouched");
+                return;
+            }
+        };
+
+        if let Err(e) = sqlx::query("DELETE FROM memories WHERE agent_id = ?")
             .bind(agent_id)
-            .execute(&self.db)
-            .await;
-        let _ = sqlx::query(
-            r#"INSERT INTO memories (id, agent_id, key, content) VALUES (?, ?, 'consolidated', ?)"#,
-        )
-        .bind(Uuid::new_v4().to_string())
-        .bind(agent_id)
-        .bind(recalled.trim())
-        .execute(&self.db)
-        .await;
+            .execute(&mut *tx)
+            .await
+        {
+            tracing::warn!(agent_id, error = %e, "icm resync delete failed; rolling back, mirror untouched");
+            return; // dropping `tx` rolls back automatically
+        }
+
+        for entry in &entries {
+            if let Err(e) = sqlx::query(
+                r#"INSERT INTO memories (id, agent_id, key, content) VALUES (?, ?, 'consolidated', ?)"#,
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(agent_id)
+            .bind(entry.summary.trim())
+            .execute(&mut *tx)
+            .await
+            {
+                tracing::warn!(agent_id, error = %e, "icm resync insert failed; rolling back, mirror untouched");
+                return; // dropping `tx` rolls back automatically
+            }
+        }
+
+        if let Err(e) = tx.commit().await {
+            tracing::warn!(agent_id, error = %e, "icm resync commit failed; mirror untouched");
+        }
     }
 
     /// List stored memories for an agent (UI).

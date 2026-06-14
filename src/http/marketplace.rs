@@ -113,8 +113,8 @@ pub async fn earnings(State(state): State<AppState>) -> AppResult<Json<Value>> {
     let row: (i64, i64, f64, f64) = sqlx::query_as(
         r#"SELECT COUNT(*),
                   COALESCE(SUM(completion_tokens), 0),
-                  COALESCE(SUM(billed_usd), 0),
-                  COALESCE(SUM(publisher_usd), 0)
+                  COALESCE(SUM(billed_usd), 0.0),
+                  COALESCE(SUM(publisher_usd), 0.0)
            FROM marketplace_usage"#,
     )
     .fetch_one(&state.db)
@@ -144,9 +144,10 @@ async fn auth_key(state: &AppState, headers: &HeaderMap) -> AppResult<String> {
     if key.is_empty() {
         return Err(AppError::Unauthorized("missing API key".into()));
     }
+    let key_hash = hash_key(key);
     let row: Option<(String,)> =
         sqlx::query_as("SELECT account_id FROM api_keys WHERE key_hash = ? AND revoked = 0")
-            .bind(hash_key(key))
+            .bind(&key_hash)
             .fetch_optional(&state.db)
             .await?;
     let account = row
@@ -155,7 +156,7 @@ async fn auth_key(state: &AppState, headers: &HeaderMap) -> AppResult<String> {
     let _ = sqlx::query(
         "UPDATE api_keys SET last_used_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key_hash = ?",
     )
-    .bind(hash_key(key))
+    .bind(&key_hash)
     .execute(&state.db)
     .await;
     Ok(account)
@@ -203,7 +204,7 @@ pub async fn invoke(
     .bind(&body.input)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO jobs (id, objective_id, agent_id, status) VALUES (?, ?, ?, 'running')")
+    sqlx::query("INSERT INTO jobs (id, objective_id, agent_id, status, synchronous) VALUES (?, ?, ?, 'running', 1)")
         .bind(&job_id)
         .bind(&objective_id)
         .bind(&id)
@@ -217,8 +218,23 @@ pub async fn invoke(
         agent_id: id.clone(),
     };
     // read_only_memory = true: never write to the publisher's curated memory.
-    if let Err(e) = crate::agent::engine::run_job(&state, &claimed, true).await {
-        return Err(AppError::Other(anyhow::anyhow!("agent run failed: {e}")));
+    match crate::agent::engine::run_job(&state, &claimed, true).await {
+        Ok(crate::agent::engine::RunOutcome::AwaitingApproval) => {
+            crate::queue::mark_failed(
+                &state.db,
+                &job_id,
+                "agent requires interactive approval; not available via the synchronous invoke API",
+            )
+            .await
+            .ok();
+            return Err(AppError::BadRequest(
+                "This agent requires human approval before acting and cannot be invoked via the synchronous API".into(),
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return Err(AppError::Other(anyhow::anyhow!("agent run failed: {e}")));
+        }
     }
 
     // The deliverable is the restitution step output.
