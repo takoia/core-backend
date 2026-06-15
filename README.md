@@ -403,6 +403,10 @@ project, region…). When an external backend is active, the DB keeps only an
 encrypted **reference** (`@ext/<name>`) — the secret value lives in the vault.
 Secrets are passed to the CLIs via a `0600` temp file, never on the command line.
 
+For the **secretless** setup (managed / workload identity, no cloud credentials
+stored in TakoIA) and the minimal IAM/RBAC per cloud, see
+[`docs/secret-backends.md`](docs/secret-backends.md).
+
 ---
 
 ## License
