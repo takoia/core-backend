@@ -11,6 +11,13 @@
   let error = "";
   let busy = false;
 
+  // First-run setup wizard: shown when the instance has no users yet.
+  let needsSetup = false;
+  let suName = "";
+  let suEmail = "";
+  let suPassword = "";
+  let suConfirm = "";
+
   let canvasEl: HTMLCanvasElement;
   let raf = 0;
 
@@ -24,6 +31,25 @@
       onAuthed(r.token);
     } catch {
       error = $t("login.error");
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function submitSetup() {
+    error = "";
+    if (suPassword !== suConfirm) {
+      error = $t("setup.mismatch");
+      return;
+    }
+    busy = true;
+    try {
+      const r = await api.setup(suEmail.trim(), suName.trim(), suPassword);
+      localStorage.setItem("auth_token", r.token);
+      localStorage.setItem("auth_user", r.username);
+      onAuthed(r.token);
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t("login.error");
     } finally {
       busy = false;
     }
@@ -88,6 +114,7 @@
 
   onMount(() => {
     raf = requestAnimationFrame(draw);
+    api.setupStatus().then((s) => (needsSetup = s.needs_setup)).catch(() => {});
   });
   onDestroy(() => cancelAnimationFrame(raf));
 </script>
@@ -95,6 +122,34 @@
 <div class="wrap">
   <canvas bind:this={canvasEl} class="bg"></canvas>
 
+  {#if needsSetup}
+    <form class="box" on:submit|preventDefault={submitSetup}>
+      <img class="logo" src={logo} alt="TakoIA" />
+      <h2>{$t("setup.title")}</h2>
+      <p class="muted small">{$t("setup.subtitle")}</p>
+
+      <label>{$t("setup.name")}
+        <input bind:value={suName} autocomplete="name" />
+      </label>
+      <label>{$t("setup.email")}
+        <input type="email" bind:value={suEmail} autocomplete="username" />
+      </label>
+      <label>{$t("setup.password")}
+        <input type="password" bind:value={suPassword} autocomplete="new-password" />
+      </label>
+      <label>{$t("setup.confirm")}
+        <input type="password" bind:value={suConfirm} autocomplete="new-password" />
+      </label>
+
+      {#if error}<p class="err">{error}</p>{/if}
+      <button class="primary" type="submit" disabled={busy || !suEmail || !suPassword}>{$t("setup.submit")}</button>
+
+      <div class="lang">
+        <button type="button" class:active={$locale === "fr"} on:click={() => setLocale("fr")}>FR</button>
+        <button type="button" class:active={$locale === "en"} on:click={() => setLocale("en")}>EN</button>
+      </div>
+    </form>
+  {:else}
   <form class="box" on:submit|preventDefault={submit}>
     <img class="logo" src={logo} alt="TakoIA" />
     <h2>{$t("login.title")}</h2>
@@ -115,6 +170,7 @@
       <button type="button" class:active={$locale === "en"} on:click={() => setLocale("en")}>EN</button>
     </div>
   </form>
+  {/if}
 </div>
 
 <style>

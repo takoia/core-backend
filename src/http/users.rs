@@ -74,7 +74,14 @@ pub async fn ensure_admin_user(state: &AppState) -> anyhow::Result<()> {
     if count.0 > 0 {
         return Ok(());
     }
-    let hash = hash_password(&state.config.admin_password)?;
+    // Only seed an admin when ADMIN_PASSWORD was explicitly provided. Otherwise
+    // leave the users table empty so the first-run setup wizard creates the
+    // first admin — no shared default password, secure by design.
+    let Some(password) = &state.config.admin_password else {
+        tracing::info!("no users and no ADMIN_PASSWORD set; first-run setup wizard will create the admin");
+        return Ok(());
+    };
+    let hash = hash_password(password)?;
     sqlx::query(
         "INSERT INTO users (id, account_id, email, name, password_hash, is_admin) VALUES (?, ?, ?, 'Admin', ?, 1)",
     )
@@ -86,6 +93,70 @@ pub async fn ensure_admin_user(state: &AppState) -> anyhow::Result<()> {
     .await?;
     tracing::info!(email = %state.config.admin_username, "seeded initial admin user");
     Ok(())
+}
+
+/// `GET /api/setup/status` — public: whether the instance still needs first-run
+/// setup (no users yet). The login page shows the create-admin wizard when true.
+pub async fn setup_status(State(state): State<AppState>) -> AppResult<Json<Value>> {
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+        .fetch_one(&state.db)
+        .await?;
+    Ok(Json(json!({ "needs_setup": count.0 == 0 })))
+}
+
+#[derive(Deserialize)]
+pub struct SetupInput {
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
+    pub password: String,
+}
+
+/// `POST /api/setup` — create the first admin account on a fresh instance and
+/// return a session token (auto-login). Refuses once any user exists.
+pub async fn setup(
+    State(state): State<AppState>,
+    Json(body): Json<SetupInput>,
+) -> AppResult<Json<Value>> {
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+        .fetch_one(&state.db)
+        .await?;
+    if count.0 > 0 {
+        return Err(AppError::Forbidden("setup already completed".into()));
+    }
+    if body.email.trim().is_empty() || body.password.is_empty() {
+        return Err(AppError::BadRequest("email and password are required".into()));
+    }
+    let uid = Uuid::new_v4().to_string();
+    let name = if body.name.trim().is_empty() {
+        "Admin"
+    } else {
+        body.name.trim()
+    };
+    let hash = hash_password(&body.password).map_err(AppError::Other)?;
+    sqlx::query(
+        "INSERT INTO users (id, account_id, email, name, password_hash, is_admin) VALUES (?, ?, ?, ?, ?, 1)",
+    )
+    .bind(&uid)
+    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(body.email.trim())
+    .bind(name)
+    .bind(&hash)
+    .execute(&state.db)
+    .await?;
+    let token = new_token();
+    sqlx::query("INSERT INTO user_sessions (token, user_id) VALUES (?, ?)")
+        .bind(&token)
+        .bind(&uid)
+        .execute(&state.db)
+        .await?;
+    let user: User =
+        sqlx::query_as("SELECT id, account_id, email, name, is_admin FROM users WHERE id = ?")
+            .bind(&uid)
+            .fetch_one(&state.db)
+            .await?;
+    tracing::info!(email = %body.email.trim(), "first-run setup created the admin user");
+    Ok(Json(json!({ "token": token, "username": user.email, "user": user.to_json() })))
 }
 
 /// Extractor: the authenticated user behind the request's bearer token.

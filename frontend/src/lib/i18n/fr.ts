@@ -123,12 +123,20 @@ export const fr: Record<string, string> = {
 
   // Login
   "login.title": "Connexion",
-  "login.subtitle": "Le mot de passe admin est affiché dans les logs du serveur au démarrage.",
+  "login.subtitle": "Connectez-vous à votre espace TakoIA.",
   "login.username": "Identifiant",
   "login.password": "Mot de passe",
   "login.submit": "Se connecter",
   "login.error": "Identifiants invalides",
   "login.logout": "Déconnexion",
+  "setup.title": "Bienvenue sur TakoIA",
+  "setup.subtitle": "Créez votre compte administrateur pour démarrer.",
+  "setup.name": "Nom",
+  "setup.email": "Email",
+  "setup.password": "Mot de passe",
+  "setup.confirm": "Confirmer le mot de passe",
+  "setup.submit": "Créer le compte",
+  "setup.mismatch": "Les mots de passe ne correspondent pas",
 
   // Canvas
   "canvas.title": "Canvas des actions",

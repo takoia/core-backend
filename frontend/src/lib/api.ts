@@ -138,6 +138,15 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
 
+  // First-run setup wizard: create the first admin on a fresh instance.
+  setupStatus: () => req<{ needs_setup: boolean }>("/api/setup/status"),
+  setup: (email: string, name: string, password: string) =>
+    req<{ token: string; username: string; user: User }>("/api/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, name, password }),
+    }),
+
   // ── Auth + multi-user management ──────────────────────────────────────────
   me: () => req<User>("/api/me"),
   logout: () => req("/api/logout", { method: "POST" }).catch(() => {}),

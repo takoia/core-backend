@@ -122,12 +122,13 @@ The only prerequisite is Docker.
 
 ```bash
 docker compose up --build      # then open http://localhost:8080
-# login: admin / takoia
 ```
 
-This builds the frontend + backend and runs everything in one container. A
-`MASTER_KEY` is generated automatically at startup (set it explicitly in
-`docker-compose.yml` to persist encrypted connectors across restarts).
+On the **first visit**, a setup wizard asks you to create your admin account
+(email + password) — no shared default password. This builds the frontend +
+backend and runs everything in one container. A `MASTER_KEY` is generated
+automatically at startup (set it explicitly in `docker-compose.yml` to persist
+encrypted connectors across restarts).
 
 ### Quick start — local (Rust + Bun)
 
@@ -145,8 +146,9 @@ cp .env-sample .env
 openssl rand -base64 32
 ```
 
-Open the `.env` and set at least `MASTER_KEY` (and `ADMIN_PASSWORD` for a stable
-login — otherwise a random one is printed in the logs on each boot).
+Open the `.env` and set at least `MASTER_KEY`. Leave `ADMIN_PASSWORD` unset to
+create the admin account through the first-run setup wizard (recommended), or
+set `ADMIN_USERNAME` + `ADMIN_PASSWORD` to seed it non-interactively.
 
 ---
 
@@ -173,8 +175,8 @@ documents every variable read by `src/config.rs`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `ADMIN_USERNAME` | `admin` | Username for the UI login page. |
-| `ADMIN_PASSWORD` | *(generated)* | Password for the UI login. **IMPORTANT:** if this is unset/empty, a **random password is generated on every boot and printed in the server logs** (look for `admin login -> username: … password: …`). Set it explicitly to get a stable login. |
+| `ADMIN_USERNAME` | `admin` | Username used only when seeding the admin from `ADMIN_PASSWORD`. |
+| `ADMIN_PASSWORD` | *(unset)* | When set, seeds the admin account non-interactively at startup. When **unset/empty** (the default), no admin is created and the **first-run setup wizard** asks you to create one on first visit — no shared default password. |
 
 ### Server & frontend
 
@@ -222,8 +224,8 @@ it to `.env`, then set `MASTER_KEY` and `ADMIN_PASSWORD`:
 MASTER_KEY=REPLACE_ME_WITH_openssl_rand_base64_32
 
 # ── Auth ────────────────────────────────────────────────────────────────────
-# Stable admin login. If ADMIN_PASSWORD is empty, a random one is generated and
-# printed in the logs on EVERY boot — set it for a stable login.
+# Leave ADMIN_PASSWORD empty to create the admin via the first-run setup wizard
+# (recommended). Set both to seed the admin non-interactively instead.
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=
 
@@ -321,8 +323,8 @@ cargo test                   # or: make test
 
 ### 1. Log in
 
-Open the app and sign in with `ADMIN_USERNAME` / `ADMIN_PASSWORD` (or the
-random password from the logs if you left it unset).
+On a fresh instance, the first visit opens a setup wizard to create your admin
+account. If you seeded one via `ADMIN_PASSWORD`, sign in with those credentials.
 
 ### 2. Create / describe an agent
 

@@ -1,5 +1,5 @@
 # One command to try TakoIA:  docker compose up --build
-# Open http://localhost:8080  (login: admin / takoia)
+# Open http://localhost:8080  →  first visit asks you to create your admin account.
 #
 # Runs in demo mode (no Claude / no ICM needed): agent runs complete with offline
 # canned content and SQLite-backed memory. To use real Claude, set CLAUDE_MAX_TOKEN.
@@ -16,8 +16,11 @@ services:
       # Set MASTER_KEY to keep encrypted connectors across restarts; if omitted an
       # ephemeral one is generated at startup.
       # MASTER_KEY: "<openssl rand -base64 32>"
-      ADMIN_USERNAME: admin
-      ADMIN_PASSWORD: takoia
+      # No ADMIN_PASSWORD: the first visit opens a setup wizard to create the
+      # admin account (no shared default password). Set ADMIN_USERNAME +
+      # ADMIN_PASSWORD here to seed it non-interactively instead.
+      # ADMIN_USERNAME: admin
+      # ADMIN_PASSWORD: "change-me"
       # CLAUDE_MAX_TOKEN: ""   # paste a `claude setup-token` value for real Claude
     volumes:
       - takoia-data:/app/data

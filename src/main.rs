@@ -30,11 +30,15 @@ async fn main() -> Result<()> {
 
     let config = Config::from_env().context("failed to load configuration")?;
     tracing::info!(bind = %config.bind_addr, db = %config.database_url, "starting takoia-core");
-    tracing::info!(
-        "admin login -> username: {}  password: {}",
-        config.admin_username,
-        config.admin_password
-    );
+    match &config.admin_password {
+        Some(_) => tracing::info!(
+            username = %config.admin_username,
+            "admin seeded from ADMIN_PASSWORD"
+        ),
+        None => tracing::info!(
+            "no ADMIN_PASSWORD set; first-run setup wizard will create the admin on first visit"
+        ),
+    }
 
     let pool = db::connect(&config.database_url).await?;
     db::migrate(&pool).await?;

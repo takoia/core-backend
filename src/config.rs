@@ -31,8 +31,9 @@ pub struct Config {
     pub agent_workdir: String,
     /// Admin username for the login page.
     pub admin_username: String,
-    /// Admin password (from ADMIN_PASSWORD or generated and logged at startup).
-    pub admin_password: String,
+    /// Admin password, only set when `ADMIN_PASSWORD` is provided. When `None`,
+    /// no admin is seeded and the first-run setup wizard creates it instead.
+    pub admin_password: Option<String>,
     /// Opaque session token returned on successful login.
     pub session_token: String,
 }
@@ -59,8 +60,7 @@ impl Config {
         let admin_username = env_or("ADMIN_USERNAME", "admin");
         let admin_password = std::env::var("ADMIN_PASSWORD")
             .ok()
-            .filter(|p| !p.trim().is_empty())
-            .unwrap_or_else(|| random_token(9));
+            .filter(|p| !p.trim().is_empty());
         let session_token = random_token(24);
 
         Ok(Self {

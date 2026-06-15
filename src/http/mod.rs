@@ -39,6 +39,8 @@ pub fn router(state: AppState) -> Router {
 
     let api = Router::new()
         .route("/health", get(health::health))
+        .route("/setup/status", get(users::setup_status))
+        .route("/setup", post(users::setup))
         .route("/login", post(users::login))
         .route("/logout", post(users::logout))
         .route("/me", get(users::me))
