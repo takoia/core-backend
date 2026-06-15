@@ -276,6 +276,172 @@ pub async fn import_toml(State(state): State<AppState>, body: String) -> AppResu
     Ok(Json(json!({ "id": id })))
 }
 
+/// Run a one-shot `claude -p` generation and return the inner JSON object the
+/// model produced (tolerating surrounding prose / code fences).
+async fn generate_json(state: &AppState, prompt: &str) -> AppResult<Value> {
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.arg("-p")
+        .arg("--output-format")
+        .arg("json")
+        .arg("--permission-mode")
+        .arg("bypassPermissions");
+    if let Some(token) = &state.config.claude_max_token {
+        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+    }
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to start AI generation: {e}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(prompt.as_bytes()).await;
+        drop(stdin);
+    }
+    let output = match tokio::time::timeout(
+        Duration::from_secs(SCAFFOLD_TIMEOUT_SECS),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(res) => res.map_err(|e| AppError::Other(e.into()))?,
+        Err(_elapsed) => {
+            return Err(AppError::Other(anyhow::anyhow!(
+                "AI generation exceeded {SCAFFOLD_TIMEOUT_SECS}s timeout"
+            )));
+        }
+    };
+    if !output.status.success() {
+        return Err(AppError::Other(anyhow::anyhow!(
+            "AI generation failed: {}",
+            String::from_utf8_lossy(&output.stderr).chars().take(200).collect::<String>()
+        )));
+    }
+    let parsed: Value = serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
+        .map_err(|e| AppError::Other(anyhow::anyhow!("invalid AI generation output: {e}")))?;
+    let text = parsed.get("result").and_then(|v| v.as_str()).unwrap_or_default();
+    // The model returns a JSON object; tolerate surrounding prose/fences.
+    let slice = match (text.find('{'), text.rfind('}')) {
+        (Some(a), Some(b)) if b > a => &text[a..=b],
+        _ => text,
+    };
+    serde_json::from_str(slice)
+        .map_err(|e| AppError::Other(anyhow::anyhow!("model did not return JSON: {e}")))
+}
+
+#[derive(Deserialize)]
+pub struct ImportSoul {
+    /// Raw external agent definition (OpenClaw `SOUL.md`, Hermes config, …).
+    pub soul: String,
+    /// When true, publish the imported agent to the marketplace immediately.
+    /// Defaults to false: imports stay private until the owner opts in.
+    #[serde(default)]
+    pub publish: bool,
+    /// Price charged per 1k output tokens when published.
+    pub price_per_1k_output_tokens: Option<f64>,
+}
+
+/// `POST /api/agents/import-soul` — translate an external agent definition
+/// (an OpenClaw `SOUL.md` file or a Hermes agent config) into a native TakoIA
+/// agent running the 4-step loop. The agent is created PRIVATE and owned by the
+/// caller; pass `publish: true` to list it on the marketplace right away.
+pub async fn import_soul(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+    Json(body): Json<ImportSoul>,
+) -> AppResult<Json<Value>> {
+    if body.soul.trim().is_empty() {
+        return Err(AppError::BadRequest("agent definition is required".into()));
+    }
+    let prompt = format!(
+        "Translate this external AI agent definition (an OpenClaw SOUL.md file or a \
+         Hermes agent config) into a TakoIA agent that runs a 4-step loop: analyse, \
+         decision, action, restitution. Map the source agent's identity, voice and \
+         rules into a 'persona'; map its purpose into concise imperative system \
+         prompts for each step. Also pick a short 'name', a one-line 'description', \
+         and an 'expertise' domain. Answer in the same language as the source. \
+         Return ONLY a JSON object with keys name, description, expertise, persona, \
+         analyse, decision, action, restitution. No prose, no code fences.\n\n\
+         Agent definition:\n{}",
+        body.soul.trim()
+    );
+    let fields = generate_json(&state, &prompt).await?;
+    let field = |k: &str| {
+        fields
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let name = {
+        let n = field("name");
+        if n.trim().is_empty() {
+            "Imported agent".to_string()
+        } else {
+            n
+        }
+    };
+    let description = field("description");
+    let expertise = field("expertise");
+    let persona = field("persona");
+
+    let id = Uuid::new_v4().to_string();
+    let mut tx = state.db.begin().await?;
+    sqlx::query(
+        r#"INSERT INTO agents (id, account_id, name, description, autonomy_level, expertise_domain, persona)
+           VALUES (?, ?, ?, ?, 'full_auto', ?, ?)"#,
+    )
+    .bind(&id)
+    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(&name)
+    .bind(&description)
+    .bind(&expertise)
+    .bind(&persona)
+    .execute(&mut *tx)
+    .await?;
+
+    for (pos, step) in StepType::ALL.iter().enumerate() {
+        sqlx::query(
+            r#"INSERT INTO agent_step_configs (id, agent_id, step_type, system_prompt, options, position)
+               VALUES (?, ?, ?, ?, '{}', ?)"#,
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&id)
+        .bind(step.as_str())
+        .bind(field(step.as_str()))
+        .bind(pos as i64)
+        .execute(&mut *tx)
+        .await?;
+    }
+    // The importer owns the agent (RBAC).
+    sqlx::query("INSERT INTO agent_permissions (agent_id, user_id, role) VALUES (?, ?, 'owner')")
+        .bind(&id)
+        .bind(&me.id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    if body.publish {
+        sqlx::query(
+            r#"UPDATE agents SET
+                 visibility = 'public',
+                 price_per_1k_output_tokens = COALESCE(?, price_per_1k_output_tokens),
+                 revenue_share = COALESCE(revenue_share, 0.7),
+                 published_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+               WHERE id = ?"#,
+        )
+        .bind(body.price_per_1k_output_tokens)
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+    }
+
+    Ok(Json(json!({ "id": id, "name": name, "published": body.publish })))
+}
+
 /// `GET /api/agents/:id/export` — export the agent as a TOML definition.
 pub async fn export_toml(
     State(state): State<AppState>,

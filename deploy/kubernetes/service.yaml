@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: takoia
+  namespace: takoia
+  labels:
+    app: takoia
+spec:
+  type: ClusterIP
+  selector:
+    app: takoia
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

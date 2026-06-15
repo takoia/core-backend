@@ -183,6 +183,10 @@ export const api = {
   createKey: (name: string) => req<{ key: string; prefix: string }>("/api/keys", { method: "POST", headers: jsonH, body: JSON.stringify({ name }) }),
   revokeKey: (id: string) => req(`/api/keys/${id}`, { method: "DELETE" }),
   earnings: () => req<{ invokes: number; output_tokens: number; billed_usd: number; publisher_usd: number }>("/api/marketplace/earnings"),
+  marketplaceUsage: () =>
+    req<{ usage: { id: string; agent_id: string; agent_name: string; prompt_tokens: number; completion_tokens: number; billed_usd: number; publisher_usd: number; created_at: string }[] }>(
+      "/api/marketplace/usage",
+    ).then((r) => r.usage),
   invokeAgent: (id: string, key: string, input: string) =>
     req<{ agent: string; output: string; usage: { prompt_tokens: number; completion_tokens: number }; cost_usd: number; publisher_earned_usd: number }>(
       `/api/v1/agents/${id}/invoke`,
@@ -193,6 +197,18 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "text/plain" },
       body: toml,
+    }),
+  // Translate an OpenClaw SOUL.md / Hermes config into a native TakoIA agent.
+  // Private by default; pass publish to list it on the marketplace at once.
+  importSoul: (soul: string, publish = false, pricePer1kOutputTokens?: number) =>
+    req<{ id: string; name: string; published: boolean }>("/api/agents/import-soul", {
+      method: "POST",
+      headers: jsonH,
+      body: JSON.stringify({
+        soul,
+        publish,
+        price_per_1k_output_tokens: pricePer1kOutputTokens,
+      }),
     }),
   exportToml: (id: string) => req<string>(`/api/agents/${id}/export`),
   addAgentMemory: (id: string, content: string, key = "demonstration") =>

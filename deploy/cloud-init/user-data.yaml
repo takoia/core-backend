@@ -1,0 +1,62 @@
+#cloud-config
+# cloud-init user-data for a fresh Debian/Ubuntu cloud VM.
+# Installs Docker, then runs TakoIA core-backend as a systemd-managed container
+# that survives reboots. After boot, open http://<vm-ip>:8080 (admin / your password).
+#
+# REPLACE the placeholders below before use. Pass this file as the VM's user data
+# at creation time (see README.md).
+
+package_update: true
+package_upgrade: false
+
+write_files:
+  # Environment file consumed by the systemd unit. Replace the secrets.
+  - path: /etc/takoia/takoia.env
+    permissions: "0600"
+    owner: root:root
+    content: |
+      BIND_ADDR=0.0.0.0:8080
+      ADMIN_USERNAME=admin
+      ADMIN_PASSWORD=REPLACE_ME
+      # Keep encrypted connectors across restarts. Generate with:
+      #   openssl rand -base64 32
+      # If left blank/removed, an ephemeral key is generated each restart.
+      MASTER_KEY=REPLACE_ME_openssl_rand_base64_32
+      # Optional: paste a `claude setup-token` value for real Claude (else demo mode).
+      # CLAUDE_MAX_TOKEN=REPLACE_ME_claude_setup_token
+
+  # systemd unit that runs the container and pulls the image on (re)start.
+  - path: /etc/systemd/system/takoia.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=TakoIA core-backend container
+      Requires=docker.service
+      After=docker.service network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Restart=always
+      RestartSec=5
+      TimeoutStartSec=300
+      # Image to run — REPLACE with your registry if needed.
+      Environment=TAKOIA_IMAGE=ghcr.io/takoia/core-backend:latest
+      ExecStartPre=-/usr/bin/docker rm -f takoia
+      ExecStartPre=/usr/bin/docker volume create takoia-data
+      ExecStartPre=/usr/bin/docker pull ${TAKOIA_IMAGE}
+      ExecStart=/usr/bin/docker run --rm --name takoia \
+        -p 8080:8080 \
+        --env-file /etc/takoia/takoia.env \
+        -v takoia-data:/app/data \
+        ${TAKOIA_IMAGE}
+      ExecStop=/usr/bin/docker stop takoia
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # Install Docker from the official convenience script (Debian/Ubuntu).
+  - [sh, -c, "curl -fsSL https://get.docker.com | sh"]
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, --now, takoia.service]

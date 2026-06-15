@@ -200,6 +200,25 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
             }
         }
     }
+    // External agent-to-agent calls: invoke a published agent on this or another
+    // TakoIA instance via its billed invoke API. The callee meters + bills the
+    // call — the monetized agent-to-agent primitive.
+    if !action_done {
+        if let Some(arr) = params.get("a2a_calls").and_then(|v| v.as_array()) {
+            for c in arr {
+                let url = c.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let key = c.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                if url.is_empty() {
+                    continue;
+                }
+                bus.publish(JobEvent::log(&job.id, format!("A2A call: {url}")));
+                match run_a2a(url, key, &objective.prompt).await {
+                    Ok(r) => gathered.push_str(&format!("\na2a:\n{r}")),
+                    Err(e) => gathered.push_str(&format!("\na2a error: {e}")),
+                }
+            }
+        }
+    }
     let action_input = if gathered.trim().is_empty() {
         format!("Plan:\n{}\n\nInput to process:\n{}", decision, objective.prompt)
     } else {
@@ -696,4 +715,23 @@ async fn run_subagent(
         })
         .unwrap_or_default();
     Ok(text)
+}
+
+/// Call a published agent on this or another TakoIA instance through its billed
+/// invoke API (Bearer consumer key). The callee meters tokens and bills the
+/// call — the monetized agent-to-agent primitive. Returns the deliverable.
+async fn run_a2a(url: &str, key: &str, input: &str) -> Result<String> {
+    let resp = reqwest::Client::new()
+        .post(url)
+        .header("Authorization", format!("Bearer {key}"))
+        .json(&serde_json::json!({ "input": input }))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!("a2a call to {url} returned {}", resp.status()));
+    }
+    let v: serde_json::Value = resp.json().await?;
+    let out = v.get("output").and_then(|x| x.as_str()).unwrap_or_default();
+    let cost = v.get("cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    Ok(format!("{out}\n[billed via A2A: ${cost:.4}]"))
 }

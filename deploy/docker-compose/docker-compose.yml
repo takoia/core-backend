@@ -1,0 +1,43 @@
+# Self-contained Compose file for TakoIA core-backend.
+#
+#   docker compose -f deploy/docker-compose/docker-compose.yml up --build -d
+#   open http://localhost:8080   (login: admin / the ADMIN_PASSWORD below)
+#
+# Builds the image from the repository root Dockerfile, persists state in a named
+# volume, and adds a healthcheck on /api/health. No external database needed
+# (embedded SQLite). Runs in demo mode unless you set CLAUDE_MAX_TOKEN.
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: takoia:latest
+    container_name: takoia
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Required for containers — bind on all interfaces so the port mapping works.
+      BIND_ADDR: "0.0.0.0:8080"
+      ADMIN_USERNAME: admin
+      # Stable admin login. Replace before deploying.
+      ADMIN_PASSWORD: REPLACE_ME
+      # Set MASTER_KEY to keep encrypted connectors across restarts; if omitted an
+      # ephemeral one is generated at startup (fine for demo, not production):
+      #   MASTER_KEY: "REPLACE_ME_openssl_rand_base64_32"
+      # Paste a `claude setup-token` value to use real Claude instead of demo mode:
+      # CLAUDE_MAX_TOKEN: "REPLACE_ME_claude_setup_token"
+    volumes:
+      - takoia-data:/app/data
+    healthcheck:
+      # The runtime image has no curl/wget; use the binary's own TCP check via
+      # a tiny shell probe through /proc is unreliable, so we rely on a simple
+      # bash redirect to the TCP port being open.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /api/health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q 'status' <&3"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  takoia-data:

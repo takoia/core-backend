@@ -1,0 +1,15 @@
+# Persistent storage for /app/data (SQLite databases: takoia.db, icm.db).
+# ReadWriteOnce — a single replica mounts it. Do not scale the Deployment above
+# 1 replica with this volume (SQLite is single-writer).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: takoia-data
+  namespace: takoia
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  # storageClassName: standard   # uncomment / set to match your cluster

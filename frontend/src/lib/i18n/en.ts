@@ -54,6 +54,14 @@ export const en: Record<string, string> = {
   "agents.importTitle": "Import a declarative agent (TOML)",
   "agents.importHint": "An agent is a file. Wire two agents by matching one's emit to another's trigger.on.",
   "agents.import": "Import",
+  "agents.soulTitle": "Import from OpenClaw / Hermes",
+  "agents.soulHint": "Paste an OpenClaw SOUL.md or a Hermes agent config. We translate it into a native TakoIA agent. Private by default — tick to list it on the marketplace.",
+  "agents.soulPlaceholder": "# SOUL.md\\nYou are a helpful research assistant...",
+  "agents.soulPublish": "Publish to the marketplace right away",
+  "agents.soulPrice": "Price per 1k output tokens (USD)",
+  "agents.soulImport": "Import agent",
+  "agents.soulImporting": "Translating…",
+  "agents.soulImported": "Imported",
   "agents.exportedToClipboard": "exported {id} TOML to clipboard",
 
   // Settings view

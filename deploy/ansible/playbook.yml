@@ -1,0 +1,123 @@
+---
+# Install Docker on a Debian/Ubuntu host and run TakoIA core-backend as a
+# container. Idempotent: re-running converges to the desired state.
+#
+#   ansible-playbook -i deploy/ansible/inventory.ini deploy/ansible/playbook.yml
+#
+# Override secrets on the command line (recommended), e.g.:
+#   ansible-playbook ... -e takoia_admin_password='s3cret' \
+#                        -e takoia_master_key="$(openssl rand -base64 32)"
+- name: Deploy TakoIA core-backend
+  hosts: takoia
+  become: true
+
+  vars:
+    takoia_image: "ghcr.io/takoia/core-backend:latest"
+    takoia_container_name: "takoia"
+    takoia_http_port: 8080
+    takoia_data_volume: "takoia-data"
+    takoia_admin_username: "admin"
+    # REPLACE these via -e or a vault file. Empty master key => container
+    # generates an ephemeral one each restart (encrypted connectors won't persist).
+    takoia_admin_password: "REPLACE_ME"
+    takoia_master_key: ""        # e.g. output of `openssl rand -base64 32`
+    takoia_claude_max_token: ""  # optional `claude setup-token` value; empty => demo mode
+
+  tasks:
+    - name: Install prerequisites for the Docker apt repository
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+        update_cache: true
+
+    - name: Create keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Docker's official GPG key
+      ansible.builtin.get_url:
+        url: "https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg"
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Add the Docker apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch={{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}
+          signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/{{ ansible_distribution | lower }}
+          {{ ansible_distribution_release }} stable
+        filename: docker
+        state: present
+
+    - name: Install Docker Engine and the Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Ensure Docker is running and enabled
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Ensure the Python Docker SDK is available (for community.docker)
+      ansible.builtin.apt:
+        name: python3-docker
+        state: present
+
+    - name: Create the persistent data volume
+      community.docker.docker_volume:
+        name: "{{ takoia_data_volume }}"
+
+    - name: Pull the TakoIA image
+      community.docker.docker_image:
+        name: "{{ takoia_image }}"
+        source: pull
+        force_source: true
+
+    - name: Run the TakoIA container
+      community.docker.docker_container:
+        name: "{{ takoia_container_name }}"
+        image: "{{ takoia_image }}"
+        state: started
+        restart_policy: unless-stopped
+        # recreate when the image or config changes (idempotent convergence)
+        recreate: false
+        comparisons:
+          image: strict
+          env: strict
+        published_ports:
+          - "{{ takoia_http_port }}:8080"
+        volumes:
+          - "{{ takoia_data_volume }}:/app/data"
+        env: >-
+          {{
+            {
+              'BIND_ADDR': '0.0.0.0:8080',
+              'ADMIN_USERNAME': takoia_admin_username,
+              'ADMIN_PASSWORD': takoia_admin_password
+            }
+            | combine({'MASTER_KEY': takoia_master_key} if takoia_master_key | length > 0 else {})
+            | combine({'CLAUDE_MAX_TOKEN': takoia_claude_max_token} if takoia_claude_max_token | length > 0 else {})
+          }}
+
+    - name: Wait for the health endpoint to respond
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ takoia_http_port }}/api/health"
+        status_code: 200
+      register: takoia_health
+      retries: 20
+      delay: 3
+      until: takoia_health.status == 200

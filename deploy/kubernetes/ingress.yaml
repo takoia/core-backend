@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: takoia
+  namespace: takoia
+  annotations:
+    # For TLS with cert-manager, uncomment and set your issuer:
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    {}
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: REPLACE_ME.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: takoia
+                port:
+                  number: 8080
+  # Enable TLS once cert-manager (or your own secret) is set up:
+  # tls:
+  #   - hosts:
+  #       - REPLACE_ME.example.com
+  #     secretName: takoia-tls

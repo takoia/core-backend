@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Apply everything with:  kubectl apply -k deploy/kubernetes
+resources:
+  - namespace.yaml
+  - secret.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+# Pin a specific image tag here instead of editing deployment.yaml:
+# images:
+#   - name: ghcr.io/takoia/core-backend
+#     newTag: "v1.0.0"

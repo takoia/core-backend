@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: takoia
+  namespace: takoia
+  labels:
+    app: takoia
+spec:
+  # SQLite is single-writer and the PVC is ReadWriteOnce — keep this at 1.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: takoia
+  template:
+    metadata:
+      labels:
+        app: takoia
+    spec:
+      containers:
+        - name: takoia
+          # Build and push this image to a registry your cluster can pull from.
+          image: ghcr.io/takoia/core-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # Required inside containers so the server listens on all interfaces.
+            - name: BIND_ADDR
+              value: "0.0.0.0:8080"
+            - name: ADMIN_USERNAME
+              value: "admin"
+            - name: MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: takoia-secrets
+                  key: MASTER_KEY
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: takoia-secrets
+                  key: ADMIN_PASSWORD
+            # Optional — uncomment if you added CLAUDE_MAX_TOKEN to the Secret.
+            # - name: CLAUDE_MAX_TOKEN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: takoia-secrets
+            #       key: CLAUDE_MAX_TOKEN
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: takoia-data

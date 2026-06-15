@@ -54,6 +54,14 @@ export const fr: Record<string, string> = {
   "agents.importTitle": "Importer un agent déclaratif (TOML)",
   "agents.importHint": "Un agent est un fichier. Branchez deux agents en faisant correspondre le emit de l'un au trigger.on de l'autre.",
   "agents.import": "Importer",
+  "agents.soulTitle": "Importer depuis OpenClaw / Hermes",
+  "agents.soulHint": "Collez un SOUL.md OpenClaw ou une config d'agent Hermes. On le traduit en agent TakoIA natif. Privé par défaut — cochez pour le publier sur le marketplace.",
+  "agents.soulPlaceholder": "# SOUL.md\\nTu es un assistant de recherche...",
+  "agents.soulPublish": "Publier sur le marketplace immédiatement",
+  "agents.soulPrice": "Prix par 1k tokens de sortie (USD)",
+  "agents.soulImport": "Importer l'agent",
+  "agents.soulImporting": "Traduction…",
+  "agents.soulImported": "Importé",
   "agents.exportedToClipboard": "TOML de {id} copié dans le presse-papier",
 
   // Settings view

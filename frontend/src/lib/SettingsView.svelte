@@ -228,6 +228,26 @@ allowed_tools = ["web_search"]
     }
   }
 
+  // Import an OpenClaw SOUL.md / Hermes agent definition.
+  let soulText = "";
+  let soulPublish = false;
+  let soulPrice = 0.02;
+  let soulBusy = false;
+  let soulMsg = "";
+  async function importSoul() {
+    soulMsg = "";
+    soulBusy = true;
+    try {
+      const r = await api.importSoul(soulText, soulPublish, soulPublish ? soulPrice : undefined);
+      soulMsg = `${$t("agents.soulImported")}: ${r.name}${r.published ? " ✓ marketplace" : ""}`;
+      onChanged();
+    } catch (e) {
+      soulMsg = e instanceof Error ? e.message : String(e);
+    } finally {
+      soulBusy = false;
+    }
+  }
+
   const user = localStorage.getItem("auth_user") ?? "admin";
   function logout() {
     localStorage.removeItem("auth_token");
@@ -349,6 +369,28 @@ allowed_tools = ["web_search"]
     <div class="row">
       <button class="primary" on:click={importToml}>{$t("agents.import")}</button>
       {#if importMsg}<span class="muted small">{importMsg}</span>{/if}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>{$t("agents.soulTitle")}</h2>
+    <p class="muted small">{$t("agents.soulHint")}</p>
+    <textarea rows="12" bind:value={soulText} placeholder={$t("agents.soulPlaceholder")}></textarea>
+    <label class="check">
+      <input type="checkbox" bind:checked={soulPublish} />
+      {$t("agents.soulPublish")}
+    </label>
+    {#if soulPublish}
+      <label class="price">
+        {$t("agents.soulPrice")}
+        <input type="number" step="0.01" min="0" bind:value={soulPrice} />
+      </label>
+    {/if}
+    <div class="row">
+      <button class="primary" on:click={importSoul} disabled={soulBusy || !soulText.trim()}>
+        {soulBusy ? $t("agents.soulImporting") : $t("agents.soulImport")}
+      </button>
+      {#if soulMsg}<span class="muted small">{soulMsg}</span>{/if}
     </div>
   </div>
 

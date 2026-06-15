@@ -48,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         // Agents + per-step customization + marketplace publishing
         .route("/agents", get(agents::list).post(agents::create))
         .route("/agents/import", post(agents::import_toml))
+        .route("/agents/import-soul", post(agents::import_soul))
         .route("/agents/scaffold", post(agents::scaffold))
         .route("/agents/:id", get(agents::get).put(agents::update).delete(agents::delete))
         .route("/agents/:id/steps", put(agents::update_steps))
@@ -102,10 +103,14 @@ pub fn router(state: AppState) -> Router {
         // Public marketplace
         .route("/marketplace", get(marketplace::list))
         .route("/marketplace/earnings", get(marketplace::earnings))
+        .route("/marketplace/usage", get(marketplace::usage))
         // Consumer API keys + public hosted-agent API (token-billed).
         .route("/keys", get(marketplace::list_keys).post(marketplace::create_key))
         .route("/keys/:id", delete(marketplace::revoke_key))
         .route("/v1/agents/:id/invoke", post(marketplace::invoke))
+        // OpenAI-compatible API: point any OpenAI SDK base_url at `<host>/api/v1`.
+        .route("/v1/chat/completions", post(marketplace::chat_completions))
+        .route("/v1/models", get(marketplace::list_models))
         .with_state(state);
 
     Router::new()

@@ -9,6 +9,7 @@
   let mine = $state<Agent[]>([]);
   let keys = $state<{ id: string; name: string; key_prefix: string; revoked: number; last_used_at: string | null }[]>([]);
   let earn = $state<{ invokes: number; output_tokens: number; billed_usd: number; publisher_usd: number }>({ invokes: 0, output_tokens: 0, billed_usd: 0, publisher_usd: 0 });
+  let usageRows = $state<{ id: string; agent_id: string; agent_name: string; prompt_tokens: number; completion_tokens: number; billed_usd: number; publisher_usd: number; created_at: string }[]>([]);
 
   let newKeyName = $state("");
   let freshKey = $state(""); // shown once after creation
@@ -24,11 +25,12 @@
 
   async function load() {
     try {
-      [pub, mine, keys, earn] = await Promise.all([
+      [pub, mine, keys, earn, usageRows] = await Promise.all([
         api.marketplace() as Promise<PubAgent[]>,
         api.listAgents(),
         api.listKeys(),
         api.earnings(),
+        api.marketplaceUsage(),
       ]);
     } catch (e) { toast(e instanceof Error ? e.message : String(e), "error"); }
   }
@@ -81,6 +83,31 @@
     <div class="stat"><span class="n">${earn.billed_usd.toFixed(4)}</span><span class="l">facturé conso</span></div>
     <div class="stat"><span class="n">${earn.publisher_usd.toFixed(4)}</span><span class="l">revenu publisher</span></div>
   </div>
+</div>
+
+<div class="card">
+  <h2>Coût par requête <span class="muted small">— tokens & prix de chaque appel facturé</span></h2>
+  {#if usageRows.length === 0}
+    <p class="muted small">Aucun appel facturé pour l'instant.</p>
+  {:else}
+    <table class="usage">
+      <thead>
+        <tr><th>Date</th><th>Agent</th><th class="r">Tokens entrée</th><th class="r">Tokens sortie</th><th class="r">Facturé</th><th class="r">Revenu publisher</th></tr>
+      </thead>
+      <tbody>
+        {#each usageRows as u}
+          <tr>
+            <td class="muted small">{new Date(u.created_at).toLocaleString()}</td>
+            <td>{u.agent_name}</td>
+            <td class="r">{u.prompt_tokens.toLocaleString()}</td>
+            <td class="r">{u.completion_tokens.toLocaleString()}</td>
+            <td class="r">${u.billed_usd.toFixed(4)}</td>
+            <td class="r">${u.publisher_usd.toFixed(4)}</td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  {/if}
 </div>
 
 <div class="card">
@@ -176,6 +203,7 @@
   .freshkey code, .mono { font-family: ui-monospace, monospace; }
   table { width: 100%; border-collapse: collapse; font-size: 0.84rem; margin-top: 0.6rem; }
   th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent); }
+  th.r, td.r { text-align: right; font-variant-numeric: tabular-nums; }
   tr.revoked { opacity: 0.5; }
   .small { font-size: 0.78rem; color: var(--muted); }
   .pubgrid { display: flex; flex-direction: column; gap: 0.4rem; }
