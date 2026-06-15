@@ -14,6 +14,7 @@ mod llm;
 mod memory;
 mod queue;
 mod scheduler;
+mod secrets;
 mod state;
 mod tools;
 
@@ -59,7 +60,10 @@ async fn main() -> Result<()> {
     scheduler::spawn(state.clone());
 
     // Background memory maintenance: consolidate / decay / prune ICM memories.
-    memory::spawn_maintenance(state.memory.clone());
+    memory::spawn_maintenance(
+        state.memory.clone(),
+        config.memory_maintenance_interval_secs,
+    );
 
     let app = http::router(state);
 

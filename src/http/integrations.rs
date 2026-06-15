@@ -78,7 +78,10 @@ pub async fn email_test(
         AppError::BadRequest("email integration has no stored credentials".into())
     })?;
 
-    let plaintext = state.cipher.decrypt(&blob).map_err(AppError::Other)?;
+    let plaintext = crate::secrets::SecretManager::new(&state.cipher, &state.db)
+        .resolve_blob(&blob)
+        .await
+        .map_err(AppError::Other)?;
     let secret: SmtpSecret = serde_json::from_str(&plaintext).map_err(|e| {
         AppError::BadRequest(format!(
             "stored SMTP credentials are not valid JSON (expected host/port/user/password): {e}"

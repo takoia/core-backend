@@ -552,17 +552,21 @@ impl Memory {
 /// enough verbatim memories, consolidate them into a distilled summary (ICM
 /// native), then apply temporal decay and prune faded entries. Keeps memory
 /// from growing as a verbatim pile and surfaces the important/recent facts.
-pub fn spawn_maintenance(memory: Memory) {
+pub fn spawn_maintenance(memory: Memory, interval_secs: u64) {
     use std::time::Duration;
+    let interval = Duration::from_secs(interval_secs);
+    // Let the server settle before the first pass, but never wait longer than
+    // one full interval (so a short demo cadence starts consolidating quickly).
+    let settle = Duration::from_secs(interval_secs.min(120));
+    tracing::info!(interval_secs, "memory maintenance loop started");
     tokio::spawn(async move {
-        // Let the server settle before the first pass.
-        tokio::time::sleep(Duration::from_secs(120)).await;
+        tokio::time::sleep(settle).await;
         loop {
             for agent_id in memory.agents_with_memory(6).await {
                 memory.consolidate(&agent_id).await;
             }
             memory.decay_and_prune().await;
-            tokio::time::sleep(Duration::from_secs(1800)).await; // every 30 min
+            tokio::time::sleep(interval).await;
         }
     });
 }

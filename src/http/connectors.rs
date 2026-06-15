@@ -90,8 +90,14 @@ pub async fn upsert(
     if body.name.trim().is_empty() {
         return Err(AppError::BadRequest("name is required".into()));
     }
+    // Route the secret through the active backend (local cipher, or an external
+    // vault). Scope is stable across upserts (the conflict key is kind + name).
     let encrypted = match body.secret.as_ref().filter(|s| !s.trim().is_empty()) {
-        Some(secret) => Some(state.cipher.encrypt(secret).map_err(AppError::Other)?),
+        Some(secret) => {
+            let scope = format!("{}-{}", body.kind, body.name.trim());
+            let sm = crate::secrets::SecretManager::new(&state.cipher, &state.db);
+            Some(sm.store_secret(&scope, secret).await.map_err(AppError::Other)?)
+        }
         None => None,
     };
 

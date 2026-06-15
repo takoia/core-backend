@@ -60,7 +60,10 @@ pub async fn synthesize(
     })?;
 
     let key = match row.encrypted_secret {
-        Some(blob) if !blob.is_empty() => state.cipher.decrypt(&blob).map_err(AppError::Other)?,
+        Some(blob) if !blob.is_empty() => crate::secrets::SecretManager::new(&state.cipher, &state.db)
+            .resolve_blob(&blob)
+            .await
+            .map_err(AppError::Other)?,
         _ => return Err(AppError::BadRequest("OpenAI provider has no key".into())),
     };
     let base_url = row.base_url.trim_end_matches('/');

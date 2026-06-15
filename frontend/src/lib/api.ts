@@ -260,6 +260,25 @@ export const api = {
   upsertConnector: (body: Record<string, unknown>) =>
     req("/api/connectors", { method: "POST", headers: jsonH, body: JSON.stringify(body) }),
 
+  // ── Secret backend (where connector / AI-tool secrets are stored) ─────────
+  // Sensitive params come back masked as "********" if set, or "" if unset.
+  getSecretBackend: () =>
+    req<{ kind: string; params: Record<string, string>; backends: string[] }>(
+      "/api/settings/secret-backend",
+    ),
+  setSecretBackend: (kind: string, params: Record<string, string>) =>
+    req<{ ok: boolean; kind: string }>("/api/settings/secret-backend", {
+      method: "PUT",
+      headers: jsonH,
+      body: JSON.stringify({ kind, params }),
+    }),
+  testSecretBackend: (kind: string, params: Record<string, string>) =>
+    req<{ ok: boolean; message: string }>("/api/settings/secret-backend/test", {
+      method: "POST",
+      headers: jsonH,
+      body: JSON.stringify({ kind, params }),
+    }),
+
   usage: () =>
     req<{ totals: UsageTotal[]; estimated_total_usd: number }>("/api/usage"),
 
