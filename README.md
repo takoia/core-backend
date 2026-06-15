@@ -383,6 +383,26 @@ before deploying anywhere real. Connector credentials are encrypted at rest with
 `MASTER_KEY`, so keep that key secret and back it up: losing it makes stored
 credentials unrecoverable.
 
+### Secret storage backends
+
+Connector / AI-tool secrets are stored through a pluggable backend, selected in
+**Settings → Secret storage** (admin only):
+
+| Backend | Where secrets live | Requirement on the host |
+|---|---|---|
+| `local` (default) | encrypted in the DB with `MASTER_KEY` | none |
+| `vault` | HashiCorp Vault (KV v2) | `vault` CLI, `addr` + `token` |
+| `azure` | Azure Key Vault | `az` CLI, authenticated; `vault_name` |
+| `gcp` | GCP Secret Manager | `gcloud` CLI, authenticated; `project` |
+| `aws` | AWS Secrets Manager | `aws` CLI, authenticated; `region` |
+
+External backends are driven through their CLI (the same way the engine shells
+out to `claude` / `icm`): the operator authenticates the CLI on the host (CLI
+login or instance identity) and TakoIA only stores the locator (vault name,
+project, region…). When an external backend is active, the DB keeps only an
+encrypted **reference** (`@ext/<name>`) — the secret value lives in the vault.
+Secrets are passed to the CLIs via a `0600` temp file, never on the command line.
+
 ---
 
 ## License

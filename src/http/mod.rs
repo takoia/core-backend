@@ -17,6 +17,7 @@ mod skills;
 pub mod users;
 mod tts;
 mod usage;
+mod vaults;
 mod video;
 mod webhooks;
 
@@ -81,6 +82,12 @@ pub fn router(state: AppState) -> Router {
         // Settings / connectors (encrypted)
         .route("/connectors", get(connectors::list).post(connectors::upsert))
         .route("/connectors/:id", delete(connectors::delete))
+        // Pluggable secret storage backend (local / vault / azure / gcp / aws)
+        .route(
+            "/settings/secret-backend",
+            get(vaults::get_backend).put(vaults::set_backend),
+        )
+        .route("/settings/secret-backend/test", post(vaults::test_backend))
         // MCP catalog + connect
         .route("/mcp/catalog", get(mcp::catalog))
         .route("/mcp/installed", get(mcp::installed))

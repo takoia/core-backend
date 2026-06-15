@@ -10,7 +10,7 @@
   export let connectors: Connector[] = [];
   export let onChanged: () => void = () => {};
 
-  type Tab = "appearance" | "agents" | "providers" | "integrations" | "expert" | "users" | "account";
+  type Tab = "appearance" | "agents" | "providers" | "integrations" | "expert" | "users" | "secrets" | "account";
   let tab: Tab = "appearance";
 
   // Users & Roles (admin only)
@@ -248,6 +248,90 @@ allowed_tools = ["web_search"]
     }
   }
 
+  // Secret storage backend (admin only). Where connector / AI-tool secrets live.
+  type SecretKind = "local" | "vault" | "azure" | "gcp" | "aws";
+  let secretKind: SecretKind = "local";
+  let secretBackends: string[] = ["local", "vault", "azure", "gcp", "aws"];
+  let secretParams: Record<string, string> = {};
+  // Tracks which sensitive fields the user edited, so we only send changed ones.
+  let secretTouched: Record<string, boolean> = {};
+  let secretMsg = "";
+  let secretTestMsg = "";
+  let secretTestOk = false;
+  let secretLoaded = false;
+
+  // Sensitive fields per backend: sent only when the user types a new value.
+  const sensitiveFields: Record<string, string[]> = {
+    vault: ["token"],
+    aws: ["access_key", "secret_key"],
+  };
+
+  function isSensitive(field: string): boolean {
+    return (sensitiveFields[secretKind] ?? []).includes(field);
+  }
+
+  function markTouched(field: string) {
+    secretTouched[field] = true;
+  }
+
+  async function loadSecretBackend() {
+    try {
+      const r = await api.getSecretBackend();
+      secretKind = (r.kind as SecretKind) ?? "local";
+      secretParams = { ...r.params };
+      secretBackends = r.backends?.length ? r.backends : secretBackends;
+      secretTouched = {};
+      secretLoaded = true;
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
+
+  // Build the params payload: for sensitive fields, only send the value if the
+  // user typed a new one; otherwise send "" so the backend keeps the old value.
+  function buildSecretParams(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [field, value] of Object.entries(secretParams)) {
+      if (isSensitive(field) && !secretTouched[field]) {
+        out[field] = "";
+      } else {
+        out[field] = value ?? "";
+      }
+    }
+    return out;
+  }
+
+  async function saveSecretBackend() {
+    secretMsg = "";
+    secretTestMsg = "";
+    try {
+      await api.setSecretBackend(secretKind, buildSecretParams());
+      secretMsg = $t("secrets.saved");
+      toast($t("secrets.saved"), "success");
+      await loadSecretBackend();
+    } catch (e) {
+      secretMsg = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function testSecretBackend() {
+    secretMsg = "";
+    secretTestMsg = "";
+    try {
+      const r = await api.testSecretBackend(secretKind, buildSecretParams());
+      secretTestOk = r.ok;
+      secretTestMsg = r.message;
+    } catch (e) {
+      secretTestOk = false;
+      secretTestMsg = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  // Lazily load the secret config the first time the tab is opened.
+  $: if (tab === "secrets" && me?.is_admin && !secretLoaded) {
+    loadSecretBackend();
+  }
+
   const user = localStorage.getItem("auth_user") ?? "admin";
   function logout() {
     localStorage.removeItem("auth_token");
@@ -263,6 +347,7 @@ allowed_tools = ["web_search"]
   <button class:active={tab === "expert"} on:click={() => (tab = "expert")}>{$t("settings.tab.expert")}</button>
   {#if me?.is_admin}
     <button class:active={tab === "users"} on:click={() => (tab = "users")}>{$t("settings.tab.users")}</button>
+    <button class:active={tab === "secrets"} on:click={() => (tab = "secrets")}>{$t("settings.tab.secrets")}</button>
   {/if}
   <button class:active={tab === "account"} on:click={() => (tab = "account")}>{$t("settings.tab.account")}</button>
 </div>
@@ -495,6 +580,78 @@ allowed_tools = ["web_search"]
     </div>
   {/if}
 
+{:else if tab === "secrets"}
+  {#if !me?.is_admin}
+    <div class="card">
+      <p class="muted">{$t("users.adminOnly")}</p>
+    </div>
+  {:else}
+    <div class="card">
+      <h2>{$t("secrets.title")}</h2>
+      <p class="muted small">{$t("secrets.hint")}</p>
+      <div class="form">
+        <label>{$t("secrets.backend")}
+          <select bind:value={secretKind}>
+            {#each secretBackends as b}
+              <option value={b}>{$t(`secrets.backend.${b}`)}</option>
+            {/each}
+          </select>
+        </label>
+      </div>
+
+      {#if secretKind === "local"}
+        <p class="muted small">{$t("secrets.backend.local")}</p>
+
+      {:else if secretKind === "vault"}
+        <div class="form">
+          <label>{$t("secrets.field.addr")}
+            <input bind:value={secretParams.addr} placeholder="https://vault.example.com:8200" />
+          </label>
+          <label>{$t("secrets.field.token")}
+            <input type="password" bind:value={secretParams.token} on:input={() => markTouched("token")} placeholder={$t("secrets.secretKept")} />
+          </label>
+          <label>{$t("secrets.field.mount")}
+            <input bind:value={secretParams.mount} placeholder="secret" />
+          </label>
+        </div>
+
+      {:else if secretKind === "azure"}
+        <div class="form">
+          <label>{$t("secrets.field.vaultName")}
+            <input bind:value={secretParams.vault_name} />
+          </label>
+        </div>
+
+      {:else if secretKind === "gcp"}
+        <div class="form">
+          <label>{$t("secrets.field.project")}
+            <input bind:value={secretParams.project} />
+          </label>
+        </div>
+
+      {:else if secretKind === "aws"}
+        <div class="form">
+          <label>{$t("secrets.field.region")}
+            <input bind:value={secretParams.region} placeholder="eu-west-1" />
+          </label>
+          <label>{$t("secrets.field.accessKey")}
+            <input type="password" bind:value={secretParams.access_key} on:input={() => markTouched("access_key")} placeholder={$t("secrets.secretKept")} />
+          </label>
+          <label>{$t("secrets.field.secretKey")}
+            <input type="password" bind:value={secretParams.secret_key} on:input={() => markTouched("secret_key")} placeholder={$t("secrets.secretKept")} />
+          </label>
+        </div>
+      {/if}
+
+      <div class="row">
+        <button class="primary" on:click={saveSecretBackend}>{$t("secrets.save")}</button>
+        <button on:click={testSecretBackend}>{$t("secrets.test")}</button>
+        {#if secretMsg}<span class="muted small">{secretMsg}</span>{/if}
+        {#if secretTestMsg}<span class="small" class:ok={secretTestOk} class:err={!secretTestOk}>{secretTestMsg}</span>{/if}
+      </div>
+    </div>
+  {/if}
+
 {:else if tab === "account"}
   <div class="card">
     <h2>{$t("settings.tab.account")}</h2>
@@ -527,6 +684,9 @@ allowed_tools = ["web_search"]
   button.danger { background: var(--err); border: 1px solid var(--err); color: #2a0707; border-radius: 8px; padding: 0.5rem 0.9rem; cursor: pointer; font: inherit; }
   .small { font-size: 0.78rem; }
   .muted { color: var(--muted); }
+  .ok { color: var(--ok, #2ecc71); }
+  .err { color: var(--err); }
+  .row button:not(.primary):not(.danger) { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.5rem 0.9rem; cursor: pointer; font: inherit; }
   select { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 7px; padding: 0.45rem 0.6rem; font: inherit; margin-top: 0.2rem; }
   .badge { display: inline-block; background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--text); border: 1px solid var(--accent); border-radius: 6px; padding: 0.1rem 0.45rem; font-size: 0.72rem; }
   .actions { display: flex; flex-wrap: wrap; gap: 0.35rem; }

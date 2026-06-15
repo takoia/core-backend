@@ -36,6 +36,9 @@ pub struct Config {
     pub admin_password: Option<String>,
     /// Opaque session token returned on successful login.
     pub session_token: String,
+    /// How often the background memory maintenance pass runs (consolidate +
+    /// decay + prune), in seconds. Lower it to see memory grow in near real time.
+    pub memory_maintenance_interval_secs: u64,
 }
 
 impl Config {
@@ -63,6 +66,14 @@ impl Config {
             .filter(|p| !p.trim().is_empty());
         let session_token = random_token(24);
 
+        // Memory maintenance cadence. Default 300s (5 min) so consolidation is
+        // visible without hammering the LLM; clamped to >= 30s.
+        let memory_maintenance_interval_secs = std::env::var("MEMORY_MAINTENANCE_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n >= 30)
+            .unwrap_or(300);
+
         Ok(Self {
             bind_addr,
             frontend_dev_origin,
@@ -77,6 +88,7 @@ impl Config {
             admin_username,
             admin_password,
             session_token,
+            memory_maintenance_interval_secs,
         })
     }
 }

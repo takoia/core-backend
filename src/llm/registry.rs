@@ -47,9 +47,12 @@ impl ProviderRegistry {
         let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
         let mut default_name = config_default.to_string();
 
+        // Resolve secrets through the active backend (local cipher decrypt, or an
+        // external vault when the stored blob is an `@ext/<name>` reference).
+        let secrets = crate::secrets::SecretManager::new(cipher, db);
         for row in rows {
             let secret = match row.encrypted_secret {
-                Some(blob) if !blob.is_empty() => Some(cipher.decrypt(&blob)?),
+                Some(blob) if !blob.is_empty() => Some(secrets.resolve_blob(&blob).await?),
                 _ => None,
             };
 
