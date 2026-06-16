@@ -242,6 +242,18 @@ export const fr: Record<string, string> = {
   "personalization.latestReflection": "Dernière réflexion",
   "personalization.openCommitments": "Engagements ouverts",
 
+  // Agent profile presets (sensible defaults for the personalization form)
+  "preset.title": "Profil",
+  "preset.hint": "Choisissez un profil pour appliquer des valeurs par défaut sensées, puis ajustez ci-dessous.",
+  "preset.alerting.name": "Bot d'alerte",
+  "preset.alerting.desc": "Calme, déterministe, économique.",
+  "preset.assistant.name": "Assistant",
+  "preset.assistant.desc": "Serviable, demande avant d'agir.",
+  "preset.strategist.name": "Stratège",
+  "preset.strategist.desc": "Pleinement vivant, rigoureux, conscient du risque.",
+  "preset.researcher.name": "Chercheur",
+  "preset.researcher.desc": "Curieux, proactif.",
+
   // Secret storage backend
   "secrets.title": "Stockage des secrets",
   "secrets.hint": "Choisissez où sont stockés les secrets des connecteurs et des outils IA. Les backends externes nécessitent que la CLI correspondante (vault / az / gcloud / aws) soit installée ET authentifiée sur le serveur ; TakoIA l'appelle en sous-processus.",

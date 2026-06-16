@@ -242,6 +242,18 @@ export const en: Record<string, string> = {
   "personalization.latestReflection": "Latest reflection",
   "personalization.openCommitments": "Open commitments",
 
+  // Agent profile presets (sensible defaults for the personalization form)
+  "preset.title": "Profile",
+  "preset.hint": "Pick a profile to set sensible defaults, then tweak below.",
+  "preset.alerting.name": "Alerting bot",
+  "preset.alerting.desc": "Calm, deterministic, cheap.",
+  "preset.assistant.name": "Assistant",
+  "preset.assistant.desc": "Helpful, asks before acting.",
+  "preset.strategist.name": "Strategist",
+  "preset.strategist.desc": "Fully alive, rigorous, risk-aware.",
+  "preset.researcher.name": "Researcher",
+  "preset.researcher.desc": "Curious, proactive.",
+
   // Secret storage backend
   "secrets.title": "Secret storage",
   "secrets.hint": "Choose where connector and AI-tool secrets are stored. External backends require the matching CLI (vault / az / gcloud / aws) to be installed AND authenticated on the server host; TakoIA shells out to it.",
