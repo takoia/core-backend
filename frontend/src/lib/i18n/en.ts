@@ -173,7 +173,18 @@ export const en: Record<string, string> = {
   "settings.tab.users": "Users & Roles",
   "settings.tab.secrets": "Secret storage",
   "settings.tab.sandbox": "Sandboxing",
+  "settings.tab.security": "Security",
   "settings.tab.account": "Account",
+
+  // Security: brute-force auto-ban
+  "security.title": "Brute-force protection",
+  "security.hint": "Automatically ban a client IP after too many failed logins in a short window. The client IP is read from the reverse proxy in front of TakoIA, so make sure it forwards the real client address.",
+  "security.autoBan": "Auto-ban after repeated failed logins",
+  "security.maxAttempts": "Max failed attempts",
+  "security.windowMinutes": "Window (minutes)",
+  "security.banMinutes": "Ban duration (minutes)",
+  "security.save": "Save",
+  "security.saved": "saved",
 
   // Sandboxing backend
   "sandbox.title": "Sandboxing",
