@@ -145,7 +145,7 @@ pub async fn setup(
     .execute(&state.db)
     .await?;
     let token = new_token();
-    sqlx::query("INSERT INTO user_sessions (token, user_id) VALUES (?, ?)")
+    sqlx::query("INSERT INTO user_sessions (token, user_id, expires_at) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now','+7 days'))")
         .bind(&token)
         .bind(&uid)
         .execute(&state.db)
@@ -176,7 +176,9 @@ impl FromRequestParts<AppState> for CurrentUser {
             .ok_or_else(|| AppError::Unauthorized("missing bearer token".into()))?;
         let user: Option<User> = sqlx::query_as(
             "SELECT u.id, u.account_id, u.email, u.name, u.is_admin
-             FROM user_sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?",
+             FROM user_sessions s JOIN users u ON u.id = s.user_id
+             WHERE s.token = ?
+               AND (s.expires_at IS NULL OR s.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
         )
         .bind(&token)
         .fetch_optional(&state.db)
@@ -185,6 +187,53 @@ impl FromRequestParts<AppState> for CurrentUser {
         user.map(CurrentUser)
             .ok_or_else(|| AppError::Unauthorized("invalid or expired session".into()))
     }
+}
+
+/// Routes that are reachable WITHOUT a user session: the login/setup flow, the
+/// health check, and the key-authenticated public API (`/v1/*` invoke/chat/models
+/// + the marketplace catalog + inbound webhooks, which authenticate by their own
+/// means). The path is matched with or without the `/api` nest prefix.
+fn is_public_path(path: &str) -> bool {
+    let p = path.strip_prefix("/api").unwrap_or(path);
+    matches!(p, "/health" | "/setup" | "/setup/status" | "/login" | "/marketplace")
+        || p.starts_with("/v1/")
+        || p.starts_with("/webhooks/")
+}
+
+/// Global authentication gate for the `/api` surface: every route requires a
+/// valid, unexpired session bearer token except the explicitly public ones.
+/// This is the security boundary — individual handlers add RBAC on top.
+pub async fn require_session(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if is_public_path(req.uri().path()) {
+        return next.run(req).await;
+    }
+    let token = req
+        .headers()
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string());
+    if let Some(token) = token {
+        let valid: Option<(String,)> = sqlx::query_as(
+            "SELECT user_id FROM user_sessions
+             WHERE token = ?
+               AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        )
+        .bind(&token)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+        if valid.is_some() {
+            return next.run(req).await;
+        }
+    }
+    AppError::Unauthorized("authentication required".into()).into_response()
 }
 
 #[derive(Deserialize)]
@@ -206,7 +255,7 @@ pub async fn login(State(state): State<AppState>, Json(body): Json<LoginInput>) 
         return Err(AppError::BadRequest("invalid credentials".into()));
     }
     let token = new_token();
-    sqlx::query("INSERT INTO user_sessions (token, user_id) VALUES (?, ?)")
+    sqlx::query("INSERT INTO user_sessions (token, user_id, expires_at) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now','+7 days'))")
         .bind(&token)
         .bind(&uid)
         .execute(&state.db)

@@ -84,6 +84,18 @@ pub fn parse(toml_str: &str) -> Result<AgentDef> {
     if def.agent.id.trim().is_empty() {
         return Err(anyhow!("agent.id is required"));
     }
+    // The id becomes a filesystem path component (the agent workdir). Restrict it
+    // to a strict slug so it can never traverse outside the agent workspace.
+    if !def
+        .agent
+        .id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(anyhow!(
+            "agent.id must contain only letters, digits, '-' or '_'"
+        ));
+    }
     if def.agent.name.trim().is_empty() {
         return Err(anyhow!("agent.name is required"));
     }

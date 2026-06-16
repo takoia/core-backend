@@ -374,10 +374,16 @@ fn attach_landlock(cmd: &mut std::process::Command, workdir: &str) {
             }
         }
         Err(e) => {
-            // The kernel does not support Landlock: warn and run unconfined rather
-            // than break every run. Operators wanting hard isolation can pick a
-            // container/microVM backend instead.
-            tracing::warn!(error = %e, "landlock unavailable; running this step unsandboxed");
+            // Fail closed: the operator selected the Landlock sandbox, so if the
+            // ruleset cannot be applied we refuse to spawn rather than silently
+            // running the agent unconfined on the host.
+            let msg = format!("landlock sandbox unavailable, refusing to run unconfined: {e}");
+            tracing::error!("{msg}");
+            unsafe {
+                cmd.pre_exec(move || {
+                    Err(std::io::Error::new(std::io::ErrorKind::Other, msg.clone()))
+                });
+            }
         }
     }
 }

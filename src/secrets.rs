@@ -177,13 +177,15 @@ fn write_temp_secret(value: &str) -> Result<std::path::PathBuf> {
 async fn run(cmd: &mut Command) -> Result<String> {
     let out = cmd.output().await?;
     if !out.status.success() {
+        // The CLI stderr can echo the supplied token/value — log it only at debug,
+        // never surface it to the caller (it flows into the API error response).
+        tracing::debug!(
+            stderr = %String::from_utf8_lossy(&out.stderr).chars().take(300).collect::<String>(),
+            "secret backend command failed"
+        );
         return Err(anyhow!(
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-                .trim()
-                .chars()
-                .take(300)
-                .collect::<String>()
+            "secret backend command failed (exit {})",
+            out.status.code().unwrap_or(-1)
         ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
