@@ -299,7 +299,11 @@ pub fn selftest(workdir: &str) -> String {
     };
     let _ = std::fs::create_dir_all(workdir);
     let abi = ABI::V1;
-    let ro = ["/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64", "/dev", "/proc"];
+    // `/run` is needed so the systemd-resolved resolv.conf symlink resolves
+    // (DNS); without it `claude` cannot reach the model API and exits.
+    let ro = [
+        "/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64", "/dev", "/proc", "/run", "/sys",
+    ];
     let rw = [workdir.to_string(), "/tmp".to_string()];
     let applied = (|| {
         Ruleset::default()
@@ -345,7 +349,11 @@ fn attach_landlock(cmd: &mut std::process::Command, workdir: &str) {
     // kernel still applies what it can and an older one degrades gracefully.
     let abi = ABI::V1;
     // Read-only system paths the runtime needs; read/write only the workdir + /tmp.
-    let ro = ["/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64", "/dev", "/proc"];
+    // `/run` is needed so the systemd-resolved resolv.conf symlink resolves
+    // (DNS); without it `claude` cannot reach the model API and exits.
+    let ro = [
+        "/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64", "/dev", "/proc", "/run", "/sys",
+    ];
     let rw = [workdir.to_string(), "/tmp".to_string()];
 
     let built = (|| {
