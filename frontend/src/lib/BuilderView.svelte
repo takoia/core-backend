@@ -9,6 +9,10 @@
   import { t, locale } from "./i18n";
   import { get } from "svelte/store";
   import { toast, confirmModal } from "./toast";
+  import alertingIcon from "./assets/presets/alerting.png";
+  import assistantIcon from "./assets/presets/assistant.png";
+  import strategistIcon from "./assets/presets/strategist.png";
+  import researcherIcon from "./assets/presets/researcher.png";
 
   // Instruct the LLM to answer in the language currently selected on the site.
   const langDirective = () => (get(locale) === "fr" ? "Réponds en français." : "Respond in English.");
@@ -206,6 +210,7 @@
       big_five: { openness: 0.5, conscientiousness: 0.5, extraversion: 0.5, agreeableness: 0.5, neuroticism: 0.5 },
     };
     innerState = { state: null, commitments: [] };
+    selectedPreset = null;
     agentsModalOpen = false;
   }
 
@@ -254,6 +259,42 @@
     commitments: { description: string; due_at: string | null; done: boolean }[];
   }>({ state: null, commitments: [] });
   let savingPerso = $state(false);
+
+  // ── Profile presets ────────────────────────────────────────────────────────
+  // Each preset fills the personalization form + the agent autonomy field with
+  // sensible defaults; the user still clicks Save to persist.
+  type Preset = {
+    key: string; icon: string;
+    autonomy: "full_auto" | "confirm_before_action";
+    perso: {
+      reflection: boolean; emotions: boolean; initiative: boolean;
+      commitments: boolean; persona_evolution: boolean; personality: boolean;
+      big_five: BigFive;
+    };
+  };
+  const PRESETS: Preset[] = [
+    { key: "alerting", icon: alertingIcon, autonomy: "full_auto",
+      perso: { reflection: false, emotions: false, initiative: false, commitments: false, persona_evolution: false, personality: false,
+        big_five: { openness: 0.5, conscientiousness: 0.5, extraversion: 0.5, agreeableness: 0.5, neuroticism: 0.5 } } },
+    { key: "assistant", icon: assistantIcon, autonomy: "confirm_before_action",
+      perso: { reflection: true, emotions: true, initiative: false, commitments: true, persona_evolution: true, personality: true,
+        big_five: { openness: 0.5, conscientiousness: 0.6, extraversion: 0.6, agreeableness: 0.8, neuroticism: 0.4 } } },
+    { key: "strategist", icon: strategistIcon, autonomy: "full_auto",
+      perso: { reflection: true, emotions: true, initiative: true, commitments: true, persona_evolution: true, personality: true,
+        big_five: { openness: 0.7, conscientiousness: 0.85, extraversion: 0.5, agreeableness: 0.4, neuroticism: 0.6 } } },
+    { key: "researcher", icon: researcherIcon, autonomy: "full_auto",
+      perso: { reflection: true, emotions: false, initiative: true, commitments: true, persona_evolution: true, personality: true,
+        big_five: { openness: 0.9, conscientiousness: 0.7, extraversion: 0.5, agreeableness: 0.6, neuroticism: 0.4 } } },
+  ];
+  let selectedPreset = $state<string | null>(null);
+  function applyPreset(p: Preset) {
+    selectedPreset = p.key;
+    autonomy = p.autonomy;
+    personalization = {
+      ...p.perso,
+      big_five: { ...p.perso.big_five },
+    };
+  }
 
   async function loadPersonalization(id: string) {
     try {
@@ -872,6 +913,18 @@
         <h3>{$t("personalization.title")}</h3>
         <p class="hint">{$t("personalization.hint")}</p>
 
+        <h4>{$t("preset.title")}</h4>
+        <p class="hint">{$t("preset.hint")}</p>
+        <div class="presets">
+          {#each PRESETS as p}
+            <button class="presetcard" class:on={selectedPreset === p.key} onclick={() => applyPreset(p)}>
+              <img class="presetimg" src={p.icon} alt="" />
+              <span class="presetname">{$t(`preset.${p.key}.name`)}</span>
+              <span class="presetdesc">{$t(`preset.${p.key}.desc`)}</span>
+            </button>
+          {/each}
+        </div>
+
         <label class="toggle"><input type="checkbox" bind:checked={personalization.reflection} /> {$t("personalization.reflection")}</label>
         <p class="hint sub">{$t("personalization.reflectionHelp")}</p>
         <label class="toggle"><input type="checkbox" bind:checked={personalization.emotions} /> {$t("personalization.emotions")}</label>
@@ -1141,6 +1194,13 @@
   .toggle { display: flex; align-items: center; gap: 0.45rem; font-size: 0.82rem; color: var(--text); margin-top: 0.6rem; cursor: pointer; }
   .toggle input { width: auto; margin-top: 0; flex: 0 0 auto; cursor: pointer; }
   .hint.sub { margin: 0.1rem 0 0.2rem 1.6rem; font-size: 0.7rem; }
+  .presets { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem; margin: 0.3rem 0 0.6rem; }
+  .presetcard { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 0.25rem; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 0.55rem 0.4rem; cursor: pointer; color: var(--text); font: inherit; }
+  .presetcard:hover { border-color: var(--accent); }
+  .presetcard.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--bg)); }
+  .presetimg { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; }
+  .presetname { font-size: 0.8rem; font-weight: 600; }
+  .presetdesc { font-size: 0.68rem; color: var(--muted); line-height: 1.2; }
   .bigfive { background: color-mix(in srgb, var(--accent) 6%, var(--panel)); border: 1px solid var(--border); border-radius: 10px; padding: 0.6rem; margin-top: 0.6rem; }
   .trait { margin-bottom: 0.6rem; }
   .trait input[type="range"] { width: 100%; margin: 0.2rem 0 0.1rem; }
