@@ -132,6 +132,13 @@ pub fn router(state: AppState) -> Router {
         // OpenAI-compatible API: point any OpenAI SDK base_url at `<host>/api/v1`.
         .route("/v1/chat/completions", post(marketplace::chat_completions))
         .route("/v1/models", get(marketplace::list_models))
+        // Global authentication gate: every /api route requires a valid session
+        // except the public allow-list (login/setup/health + key-authed /v1, the
+        // marketplace catalog, and inbound webhooks). Handlers add RBAC on top.
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            users::require_session,
+        ))
         .with_state(state);
 
     Router::new()

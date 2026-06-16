@@ -85,6 +85,17 @@ fn default_branch() -> String {
 /// `POST /api/skills/install` — fetch a skill's SKILL.md from GitHub and write it
 /// into ~/.claude/skills/<id>/.
 pub async fn install(Json(body): Json<InstallSkill>) -> AppResult<Json<Value>> {
+    // The id becomes a directory name under the skills dir; reject path traversal.
+    if body.id.trim().is_empty()
+        || !body
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::BadRequest(
+            "skill id must contain only letters, digits, '-' or '_'".into(),
+        ));
+    }
     let path = body.path.trim_matches('/');
     let raw_url = if path.is_empty() {
         format!(
