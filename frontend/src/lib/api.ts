@@ -333,6 +333,23 @@ export const api = {
       body: JSON.stringify({ kind, params }),
     }),
 
+  // ── Security settings (brute-force auto-ban) — admin only ─────────────────
+  getSecuritySettings: () =>
+    req<{ auto_ban_enabled: boolean; max_failed_attempts: number; window_secs: number; ban_secs: number }>(
+      "/api/settings/security",
+    ),
+  setSecuritySettings: (body: {
+    auto_ban_enabled?: boolean;
+    max_failed_attempts?: number;
+    window_secs?: number;
+    ban_secs?: number;
+  }) =>
+    req<{ ok: boolean }>("/api/settings/security", {
+      method: "PUT",
+      headers: jsonH,
+      body: JSON.stringify(body),
+    }),
+
   // ── Per-agent personalization (reflection, emotions, Big Five, …) ─────────
   getPersonalization: (id: string) =>
     req<Personalization>(`/api/agents/${id}/personalization`),

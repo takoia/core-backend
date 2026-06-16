@@ -10,7 +10,7 @@
   export let connectors: Connector[] = [];
   export let onChanged: () => void = () => {};
 
-  type Tab = "appearance" | "agents" | "providers" | "integrations" | "expert" | "users" | "secrets" | "sandbox" | "account";
+  type Tab = "appearance" | "agents" | "providers" | "integrations" | "expert" | "users" | "secrets" | "sandbox" | "security" | "account";
   let tab: Tab = "appearance";
 
   // Users & Roles (admin only)
@@ -408,6 +408,50 @@ allowed_tools = ["web_search"]
     loadSandbox();
   }
 
+  // ── Security: brute-force auto-ban (admin only) ───────────────────────────
+  // Durations are stored in seconds by the backend but edited in minutes here.
+  let secAutoBan = true;
+  let secMaxAttempts = 5;
+  let secWindowMin = 5;
+  let secBanMin = 15;
+  let securityMsg = "";
+  let securityLoaded = false;
+
+  async function loadSecurity() {
+    try {
+      const r = await api.getSecuritySettings();
+      secAutoBan = r.auto_ban_enabled;
+      secMaxAttempts = r.max_failed_attempts;
+      secWindowMin = Math.round(r.window_secs / 60);
+      secBanMin = Math.round(r.ban_secs / 60);
+      securityLoaded = true;
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
+
+  async function saveSecurity() {
+    securityMsg = "";
+    try {
+      await api.setSecuritySettings({
+        auto_ban_enabled: secAutoBan,
+        max_failed_attempts: Math.max(1, Math.round(secMaxAttempts)),
+        window_secs: Math.max(1, Math.round(secWindowMin)) * 60,
+        ban_secs: Math.max(1, Math.round(secBanMin)) * 60,
+      });
+      securityMsg = $t("security.saved");
+      toast($t("security.saved"), "success");
+      await loadSecurity();
+    } catch (e) {
+      securityMsg = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  // Lazily load the security config the first time the tab is opened.
+  $: if (tab === "security" && me?.is_admin && !securityLoaded) {
+    loadSecurity();
+  }
+
   const user = localStorage.getItem("auth_user") ?? "admin";
   function logout() {
     localStorage.removeItem("auth_token");
@@ -425,6 +469,7 @@ allowed_tools = ["web_search"]
     <button class:active={tab === "users"} on:click={() => (tab = "users")}>{$t("settings.tab.users")}</button>
     <button class:active={tab === "secrets"} on:click={() => (tab = "secrets")}>{$t("settings.tab.secrets")}</button>
     <button class:active={tab === "sandbox"} on:click={() => (tab = "sandbox")}>{$t("settings.tab.sandbox")}</button>
+    <button class:active={tab === "security"} on:click={() => (tab = "security")}>{$t("settings.tab.security")}</button>
   {/if}
   <button class:active={tab === "account"} on:click={() => (tab = "account")}>{$t("settings.tab.account")}</button>
 </div>
@@ -793,6 +838,37 @@ allowed_tools = ["web_search"]
         <button on:click={testSandbox}>{$t("sandbox.test")}</button>
         {#if sandboxMsg}<span class="muted small">{sandboxMsg}</span>{/if}
         {#if sandboxTestMsg}<span class="small" class:ok={sandboxTestOk} class:err={!sandboxTestOk}>{sandboxTestMsg}</span>{/if}
+      </div>
+    </div>
+  {/if}
+
+{:else if tab === "security"}
+  {#if !me?.is_admin}
+    <div class="card">
+      <p class="muted">{$t("users.adminOnly")}</p>
+    </div>
+  {:else}
+    <div class="card">
+      <h2>{$t("security.title")}</h2>
+      <p class="muted small">{$t("security.hint")}</p>
+      <label class="check">
+        <input type="checkbox" bind:checked={secAutoBan} />
+        {$t("security.autoBan")}
+      </label>
+      <div class="form">
+        <label>{$t("security.maxAttempts")}
+          <input type="number" min="1" bind:value={secMaxAttempts} disabled={!secAutoBan} />
+        </label>
+        <label>{$t("security.windowMinutes")}
+          <input type="number" min="1" bind:value={secWindowMin} disabled={!secAutoBan} />
+        </label>
+        <label>{$t("security.banMinutes")}
+          <input type="number" min="1" bind:value={secBanMin} disabled={!secAutoBan} />
+        </label>
+      </div>
+      <div class="row">
+        <button class="primary" on:click={saveSecurity}>{$t("security.save")}</button>
+        {#if securityMsg}<span class="muted small">{securityMsg}</span>{/if}
       </div>
     </div>
   {/if}
