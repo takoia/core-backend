@@ -11,13 +11,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::time::Duration;
 use uuid::Uuid;
-
-/// Hard wall-clock limit for the `claude -p` scaffold invocation. A hung CLI
-/// must not pin the HTTP handler (and its checked-out DB connection); on
-/// timeout the child is dropped and `kill_on_drop(true)` terminates it.
-const SCAFFOLD_TIMEOUT_SECS: u64 = 180;
 
 #[derive(Serialize, sqlx::FromRow)]
 struct AgentRow {
@@ -277,58 +271,12 @@ pub async fn import_toml(State(state): State<AppState>, body: String) -> AppResu
 }
 
 /// Run a one-shot `claude -p` generation and return the inner JSON object the
-/// model produced (tolerating surrounding prose / code fences).
+/// model produced. Delegates to the sandboxed one-shot helper so the call is
+/// confined by the active execution sandbox like every other run.
 async fn generate_json(state: &AppState, prompt: &str) -> AppResult<Value> {
-    let mut cmd = tokio::process::Command::new("claude");
-    cmd.arg("-p")
-        .arg("--output-format")
-        .arg("json")
-        .arg("--permission-mode")
-        .arg("bypassPermissions");
-    if let Some(token) = &state.config.claude_max_token {
-        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
-    }
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to start AI generation: {e}")))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(prompt.as_bytes()).await;
-        drop(stdin);
-    }
-    let output = match tokio::time::timeout(
-        Duration::from_secs(SCAFFOLD_TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(res) => res.map_err(|e| AppError::Other(e.into()))?,
-        Err(_elapsed) => {
-            return Err(AppError::Other(anyhow::anyhow!(
-                "AI generation exceeded {SCAFFOLD_TIMEOUT_SECS}s timeout"
-            )));
-        }
-    };
-    if !output.status.success() {
-        return Err(AppError::Other(anyhow::anyhow!(
-            "AI generation failed: {}",
-            String::from_utf8_lossy(&output.stderr).chars().take(200).collect::<String>()
-        )));
-    }
-    let parsed: Value = serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
-        .map_err(|e| AppError::Other(anyhow::anyhow!("invalid AI generation output: {e}")))?;
-    let text = parsed.get("result").and_then(|v| v.as_str()).unwrap_or_default();
-    // The model returns a JSON object; tolerate surrounding prose/fences.
-    let slice = match (text.find('{'), text.rfind('}')) {
-        (Some(a), Some(b)) if b > a => &text[a..=b],
-        _ => text,
-    };
-    serde_json::from_str(slice)
-        .map_err(|e| AppError::Other(anyhow::anyhow!("model did not return JSON: {e}")))
+    crate::llm::oneshot::generate_json(state, prompt)
+        .await
+        .ok_or_else(|| AppError::Other(anyhow::anyhow!("AI generation failed or returned no JSON")))
 }
 
 #[derive(Deserialize)]
@@ -536,59 +484,9 @@ pub async fn scaffold(
         body.description.trim()
     );
 
-    let mut cmd = tokio::process::Command::new("claude");
-    cmd.arg("-p")
-        .arg("--output-format")
-        .arg("json")
-        .arg("--permission-mode")
-        .arg("bypassPermissions");
-    if let Some(token) = &state.config.claude_max_token {
-        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
-    }
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        // Guarantee the subprocess dies if we drop the child on timeout.
-        .kill_on_drop(true);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to start AI generation: {e}")))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(prompt.as_bytes()).await;
-        drop(stdin);
-    }
-    // Race the subprocess against a hard timeout. On elapse, the child is
-    // dropped here and `kill_on_drop(true)` terminates the hung process.
-    let output = match tokio::time::timeout(
-        Duration::from_secs(SCAFFOLD_TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(res) => res.map_err(|e| AppError::Other(e.into()))?,
-        Err(_elapsed) => {
-            return Err(AppError::Other(anyhow::anyhow!(
-                "AI generation exceeded {SCAFFOLD_TIMEOUT_SECS}s timeout"
-            )));
-        }
-    };
-    if !output.status.success() {
-        return Err(AppError::Other(anyhow::anyhow!(
-            "AI generation failed: {}",
-            String::from_utf8_lossy(&output.stderr).chars().take(200).collect::<String>()
-        )));
-    }
-    let parsed: Value = serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
-        .map_err(|e| AppError::Other(anyhow::anyhow!("invalid AI generation output: {e}")))?;
-    let text = parsed.get("result").and_then(|v| v.as_str()).unwrap_or_default();
-    // The model returns a JSON object; tolerate surrounding prose/fences.
-    let slice = match (text.find('{'), text.rfind('}')) {
-        (Some(a), Some(b)) if b > a => &text[a..=b],
-        _ => text,
-    };
-    let fields: Value = serde_json::from_str(slice)
-        .unwrap_or_else(|_| json!({ "persona": "", "analyse": text, "decision": "", "action": "", "restitution": "" }));
+    let fields = crate::llm::oneshot::generate_json(&state, &prompt)
+        .await
+        .unwrap_or_else(|| json!({ "persona": "", "analyse": "", "decision": "", "action": "", "restitution": "" }));
     Ok(Json(fields))
 }
 
@@ -635,57 +533,11 @@ pub async fn evolve_persona(
          Accumulated memories:\n{memories}"
     );
 
-    let mut cmd = tokio::process::Command::new("claude");
-    cmd.arg("-p")
-        .arg("--output-format")
-        .arg("json")
-        .arg("--permission-mode")
-        .arg("bypassPermissions");
-    if let Some(token) = &state.config.claude_max_token {
-        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
-    }
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to start AI generation: {e}")))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(prompt.as_bytes()).await;
-        drop(stdin);
-    }
-    let output = match tokio::time::timeout(
-        Duration::from_secs(SCAFFOLD_TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(res) => res.map_err(|e| AppError::Other(e.into()))?,
-        Err(_elapsed) => {
-            return Err(AppError::Other(anyhow::anyhow!(
-                "AI generation exceeded {SCAFFOLD_TIMEOUT_SECS}s timeout"
-            )));
-        }
-    };
-    if !output.status.success() {
-        return Err(AppError::Other(anyhow::anyhow!(
-            "AI generation failed: {}",
-            String::from_utf8_lossy(&output.stderr).chars().take(200).collect::<String>()
-        )));
-    }
-    let parsed: Value = serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
-        .map_err(|e| AppError::Other(anyhow::anyhow!("invalid AI generation output: {e}")))?;
-    let new_persona = parsed
-        .get("result")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if new_persona.is_empty() {
-        return Err(AppError::Other(anyhow::anyhow!("AI returned an empty persona")));
-    }
+    let new_persona = crate::llm::oneshot::generate_text(&state, &prompt)
+        .await
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| AppError::Other(anyhow::anyhow!("AI returned an empty persona")))?;
 
     sqlx::query("UPDATE agents SET persona = ? WHERE id = ?")
         .bind(&new_persona)
