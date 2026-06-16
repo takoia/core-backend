@@ -35,6 +35,7 @@ impl ProviderRegistry {
         account_id: &str,
         config_default: &str,
         agent_workdir: &str,
+        sandbox: &crate::sandbox::SandboxConfig,
     ) -> Result<Self> {
         let rows = sqlx::query_as::<_, LlmRow>(
             r#"SELECT name, base_url, model, encrypted_secret, is_default
@@ -65,6 +66,7 @@ impl ProviderRegistry {
                     Some(row.model),
                     secret,
                     Some(agent_workdir.to_string()),
+                    sandbox.clone(),
                 ))
             } else {
                 Arc::new(OpenAiCompatProvider::new(

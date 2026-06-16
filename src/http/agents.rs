@@ -696,6 +696,138 @@ pub async fn evolve_persona(
     Ok(Json(json!({ "persona": new_persona, "previous": current_persona })))
 }
 
+/// `GET /api/agents/:id/inner-state` — the agent's current "inner life": mood,
+/// energy, familiarity, latest reflection, and its open commitments.
+pub async fn inner_state(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let st: Option<(String, f64, i64, Option<String>, Option<String>, String)> = sqlx::query_as(
+        "SELECT mood, energy, familiarity, reflection, emotions, updated_at FROM agent_state WHERE agent_id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    #[derive(Serialize, sqlx::FromRow)]
+    struct Commitment {
+        description: String,
+        due_at: Option<String>,
+        done: i64,
+    }
+    let commitments = sqlx::query_as::<_, Commitment>(
+        "SELECT description, due_at, done FROM agent_commitments
+         WHERE agent_id = ? ORDER BY created_at DESC LIMIT 10",
+    )
+    .bind(&id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let emotions = |e: Option<String>| -> Value {
+        e.and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or(Value::Null)
+    };
+    let state_json = match st {
+        Some((mood, energy, familiarity, reflection, emo, updated_at)) => json!({
+            "mood": mood,
+            "energy": energy,
+            "familiarity": familiarity,
+            "reflection": reflection,
+            "emotions": emotions(emo),
+            "updated_at": updated_at,
+        }),
+        None => json!({
+            "mood": "curious",
+            "energy": 0.6,
+            "familiarity": 0,
+            "reflection": null,
+            "emotions": null,
+            "updated_at": null,
+        }),
+    };
+    Ok(Json(json!({ "state": state_json, "commitments": commitments })))
+}
+
+/// `GET /api/agents/:id/personalization` — the per-agent feature toggles + Big Five.
+pub async fn get_personalization(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let p = crate::agent::inner_life::personalization(&state.db, &id).await;
+    Ok(Json(json!({
+        "reflection": p.reflection,
+        "emotions": p.emotions,
+        "initiative": p.initiative,
+        "commitments": p.commitments,
+        "persona_evolution": p.persona_evolution,
+        "personality": p.personality,
+        "big_five": p.big_five,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct PersonalizationInput {
+    pub reflection: Option<bool>,
+    pub emotions: Option<bool>,
+    pub initiative: Option<bool>,
+    pub commitments: Option<bool>,
+    pub persona_evolution: Option<bool>,
+    pub personality: Option<bool>,
+    pub big_five: Option<crate::agent::inner_life::BigFive>,
+}
+
+/// `PUT /api/agents/:id/personalization` — enable/disable features + set Big Five.
+pub async fn set_personalization(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+    Path(id): Path<String>,
+    Json(body): Json<PersonalizationInput>,
+) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "editor").await?;
+    let cur = crate::agent::inner_life::personalization(&state.db, &id).await;
+    let reflection = body.reflection.unwrap_or(cur.reflection);
+    let emotions = body.emotions.unwrap_or(cur.emotions);
+    let initiative = body.initiative.unwrap_or(cur.initiative);
+    let commitments = body.commitments.unwrap_or(cur.commitments);
+    let persona_evolution = body.persona_evolution.unwrap_or(cur.persona_evolution);
+    let personality = body.personality.unwrap_or(cur.personality);
+    let mut big_five = body.big_five.unwrap_or(cur.big_five);
+    for v in [
+        &mut big_five.openness,
+        &mut big_five.conscientiousness,
+        &mut big_five.extraversion,
+        &mut big_five.agreeableness,
+        &mut big_five.neuroticism,
+    ] {
+        *v = v.clamp(0.0, 1.0);
+    }
+    let bf_json = serde_json::to_string(&big_five).unwrap_or_default();
+    sqlx::query(
+        r#"INSERT INTO agent_personalization
+             (agent_id, reflection, emotions, initiative, commitments, persona_evolution, personality, big_five)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(agent_id) DO UPDATE SET
+             reflection = excluded.reflection,
+             emotions = excluded.emotions,
+             initiative = excluded.initiative,
+             commitments = excluded.commitments,
+             persona_evolution = excluded.persona_evolution,
+             personality = excluded.personality,
+             big_five = excluded.big_five,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')"#,
+    )
+    .bind(&id)
+    .bind(reflection as i64)
+    .bind(emotions as i64)
+    .bind(initiative as i64)
+    .bind(commitments as i64)
+    .bind(persona_evolution as i64)
+    .bind(personality as i64)
+    .bind(&bf_json)
+    .execute(&state.db)
+    .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 /// ICM memories with native importance metadata (weight, access_count) so the
 /// memory map can size/color entries by real importance relative to others.
 pub async fn icm_memories(

@@ -30,6 +30,8 @@ pub struct ClaudeCliProvider {
     /// Isolated working directory so the agent does not inherit the host
     /// project's CLAUDE.md / project ICM context.
     workdir: Option<String>,
+    /// Execution sandbox applied to the subprocess (Landlock / container / …).
+    sandbox: crate::sandbox::SandboxConfig,
 }
 
 impl ClaudeCliProvider {
@@ -38,6 +40,7 @@ impl ClaudeCliProvider {
         default_model: Option<String>,
         token: Option<String>,
         workdir: Option<String>,
+        sandbox: crate::sandbox::SandboxConfig,
     ) -> Self {
         Self {
             name: name.into(),
@@ -45,6 +48,7 @@ impl ClaudeCliProvider {
             default_model: default_model.filter(|m| !m.is_empty()),
             token: token.filter(|t| !t.is_empty()),
             workdir: workdir.filter(|w| !w.is_empty()),
+            sandbox,
         }
     }
 }
@@ -82,42 +86,55 @@ impl LlmProvider for ClaudeCliProvider {
 
         let model = req.model.clone().or_else(|| self.default_model.clone());
 
-        let mut cmd = Command::new(&self.binary);
-        cmd.arg("-p")
-            .arg("--output-format")
-            .arg("json")
+        // Build the `claude` argv. Headless `-p` can't answer permission prompts,
+        // so every step runs with bypassPermissions; the OS-level sandbox (chosen
+        // in Settings) is what actually confines the subprocess.
+        let mut argv: Vec<String> = vec![
+            "-p".into(),
+            "--output-format".into(),
+            "json".into(),
             // Do not inherit the host's configured MCP servers.
-            .arg("--strict-mcp-config")
-            .stdin(std::process::Stdio::piped())
+            "--strict-mcp-config".into(),
+        ];
+        if let Some(model) = &model {
+            argv.push("--model".into());
+            argv.push(model.clone());
+        }
+        if !system.trim().is_empty() {
+            argv.push("--append-system-prompt".into());
+            argv.push(system.clone());
+        }
+        argv.push("--permission-mode".into());
+        argv.push("bypassPermissions".into());
+        argv.push("--allowedTools".into());
+        argv.push("WebSearch,WebFetch,Read".into());
+
+        // Run in an isolated, per-agent workdir, confined by the active sandbox.
+        let mut cmd = match &self.workdir {
+            Some(workdir) => {
+                ensure_isolated_workdir(workdir);
+                crate::sandbox::build_command(
+                    &self.sandbox,
+                    workdir,
+                    &self.binary,
+                    &argv,
+                    self.token.as_deref(),
+                )
+            }
+            None => {
+                let mut c = Command::new(&self.binary);
+                c.args(&argv);
+                if let Some(token) = &self.token {
+                    c.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+                }
+                c
+            }
+        };
+        cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             // Guarantee the subprocess dies if we drop the child on timeout.
             .kill_on_drop(true);
-
-        // Run in an isolated, non-project directory so the agent does not pick
-        // up the host's CLAUDE.md or project-scoped ICM recall. A steering
-        // CLAUDE.md scopes the agent to its task only.
-        if let Some(workdir) = &self.workdir {
-            ensure_isolated_workdir(workdir);
-            cmd.current_dir(workdir);
-        }
-        if let Some(model) = &model {
-            cmd.arg("--model").arg(model);
-        }
-        if !system.trim().is_empty() {
-            cmd.arg("--append-system-prompt").arg(&system);
-        }
-        // Headless `-p` can't answer permission prompts, so EVERY step must run
-        // without them — otherwise a step's LLM that reaches for WebFetch/WebSearch
-        // hangs and emits "please approve the permission" instead of doing the work.
-        // The agent runs in an isolated workdir, so this stays scoped.
-        cmd.arg("--permission-mode").arg("bypassPermissions");
-        // Allow the safe read/web tools in every step (comma-separated; a space
-        // would be parsed as one invalid tool name and block everything).
-        cmd.arg("--allowedTools").arg("WebSearch,WebFetch,Read");
-        if let Some(token) = &self.token {
-            cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
-        }
 
         let mut child = cmd
             .spawn()

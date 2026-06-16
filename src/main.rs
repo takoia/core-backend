@@ -13,6 +13,7 @@ mod http;
 mod llm;
 mod memory;
 mod queue;
+mod sandbox;
 mod scheduler;
 mod secrets;
 mod state;
@@ -25,6 +26,18 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Throwaway sandbox self-test: `takoia sandbox-selftest [workdir]`. Runs on a
+    // dedicated thread (Landlock restrict_self is per-thread) and exits.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("sandbox-selftest") {
+        let workdir = args.get(2).cloned().unwrap_or_else(|| "/tmp/ll-selftest".to_string());
+        let report = std::thread::spawn(move || sandbox::selftest(&workdir))
+            .join()
+            .unwrap_or_else(|_| "selftest thread panicked".to_string());
+        print!("{report}");
+        return Ok(());
+    }
+
     // Load `.env` if present; real environment always wins.
     let _ = dotenvy::dotenv();
     init_tracing();
@@ -64,6 +77,9 @@ async fn main() -> Result<()> {
         state.memory.clone(),
         config.memory_maintenance_interval_secs,
     );
+
+    // Inner life: reflection, mood drift, initiative, and kept commitments.
+    agent::inner_life::spawn(state.clone(), config.inner_life_interval_secs);
 
     let app = http::router(state);
 

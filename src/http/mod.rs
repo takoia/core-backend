@@ -16,6 +16,7 @@ mod schedules;
 mod skills;
 pub mod users;
 mod tts;
+mod sandbox_settings;
 mod usage;
 mod vaults;
 mod video;
@@ -61,6 +62,11 @@ pub fn router(state: AppState) -> Router {
         .route("/agents/:id/icm-memories", get(agents::icm_memories))
         .route("/agents/:id/memory", post(agents::add_memory))
         .route("/agents/:id/evolve-persona", post(agents::evolve_persona))
+        .route("/agents/:id/inner-state", get(agents::inner_state))
+        .route(
+            "/agents/:id/personalization",
+            get(agents::get_personalization).put(agents::set_personalization),
+        )
         // Per-agent RBAC (owner / editor / viewer)
         .route("/agents/:id/permissions", get(users::list_agent_permissions).post(users::set_agent_permission))
         .route("/agents/:id/permissions/:user_id", delete(users::remove_agent_permission))
@@ -88,6 +94,12 @@ pub fn router(state: AppState) -> Router {
             get(vaults::get_backend).put(vaults::set_backend),
         )
         .route("/settings/secret-backend/test", post(vaults::test_backend))
+        // Pluggable execution sandbox (none / landlock / bubblewrap / nsjail / …)
+        .route(
+            "/settings/sandbox",
+            get(sandbox_settings::get_sandbox).put(sandbox_settings::set_sandbox),
+        )
+        .route("/settings/sandbox/test", post(sandbox_settings::test_sandbox))
         // MCP catalog + connect
         .route("/mcp/catalog", get(mcp::catalog))
         .route("/mcp/installed", get(mcp::installed))

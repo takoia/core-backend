@@ -39,6 +39,9 @@ pub struct Config {
     /// How often the background memory maintenance pass runs (consolidate +
     /// decay + prune), in seconds. Lower it to see memory grow in near real time.
     pub memory_maintenance_interval_secs: u64,
+    /// How often the inner-life pass runs (reflection, mood update, initiative,
+    /// kept commitments), in seconds. Lower it to watch the agent come alive.
+    pub inner_life_interval_secs: u64,
 }
 
 impl Config {
@@ -74,6 +77,14 @@ impl Config {
             .filter(|n| *n >= 30)
             .unwrap_or(300);
 
+        // Inner-life cadence (reflection/mood/initiative). Default 900s (15 min);
+        // clamped to >= 60s. Each pass is one LLM call per agent with memory.
+        let inner_life_interval_secs = std::env::var("INNER_LIFE_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n >= 60)
+            .unwrap_or(900);
+
         Ok(Self {
             bind_addr,
             frontend_dev_origin,
@@ -89,6 +100,7 @@ impl Config {
             admin_password,
             session_token,
             memory_maintenance_interval_secs,
+            inner_life_interval_secs,
         })
     }
 }

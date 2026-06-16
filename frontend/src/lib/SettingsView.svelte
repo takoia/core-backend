@@ -10,7 +10,7 @@
   export let connectors: Connector[] = [];
   export let onChanged: () => void = () => {};
 
-  type Tab = "appearance" | "agents" | "providers" | "integrations" | "expert" | "users" | "secrets" | "account";
+  type Tab = "appearance" | "agents" | "providers" | "integrations" | "expert" | "users" | "secrets" | "sandbox" | "account";
   let tab: Tab = "appearance";
 
   // Users & Roles (admin only)
@@ -332,6 +332,82 @@ allowed_tools = ["web_search"]
     loadSecretBackend();
   }
 
+  // ── Sandboxing backend (how agent tool execution is isolated) ─────────────
+  let sandboxKind = "landlock";
+  let sandboxBackends: string[] = ["none", "landlock", "bubblewrap", "nsjail", "docker", "podman", "firecracker", "microsandbox"];
+  let sandboxParams: Record<string, unknown> = {};
+  let sandboxMsg = "";
+  let sandboxTestMsg = "";
+  let sandboxTestOk = false;
+  let sandboxLoaded = false;
+
+  async function loadSandbox() {
+    try {
+      const r = await api.getSandbox();
+      sandboxKind = r.kind || "landlock";
+      sandboxParams = { ...r.params };
+      sandboxBackends = r.backends?.length ? r.backends : sandboxBackends;
+      sandboxLoaded = true;
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
+
+  // Build the params payload sent to the backend for the selected engine.
+  // Only the fields relevant to the current backend are included.
+  function buildSandboxParams(): Record<string, unknown> {
+    const p = sandboxParams;
+    switch (sandboxKind) {
+      case "bubblewrap":
+      case "nsjail":
+        return { allow_network: p.allow_network !== false };
+      case "docker":
+      case "podman":
+        return {
+          image: (p.image as string) ?? "",
+          allow_network: p.allow_network !== false,
+          mem_mb: Number(p.mem_mb) || 0,
+          cpus: Number(p.cpus) || 0,
+        };
+      case "firecracker":
+      case "microsandbox":
+        return { launcher: (p.launcher as string) ?? "" };
+      default:
+        return {};
+    }
+  }
+
+  async function saveSandbox() {
+    sandboxMsg = "";
+    sandboxTestMsg = "";
+    try {
+      await api.setSandbox(sandboxKind, buildSandboxParams());
+      sandboxMsg = $t("sandbox.saved");
+      toast($t("sandbox.saved"), "success");
+      await loadSandbox();
+    } catch (e) {
+      sandboxMsg = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function testSandbox() {
+    sandboxMsg = "";
+    sandboxTestMsg = "";
+    try {
+      const r = await api.testSandbox(sandboxKind, buildSandboxParams());
+      sandboxTestOk = r.ok;
+      sandboxTestMsg = r.message;
+    } catch (e) {
+      sandboxTestOk = false;
+      sandboxTestMsg = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  // Lazily load the sandbox config the first time the tab is opened.
+  $: if (tab === "sandbox" && me?.is_admin && !sandboxLoaded) {
+    loadSandbox();
+  }
+
   const user = localStorage.getItem("auth_user") ?? "admin";
   function logout() {
     localStorage.removeItem("auth_token");
@@ -348,6 +424,7 @@ allowed_tools = ["web_search"]
   {#if me?.is_admin}
     <button class:active={tab === "users"} on:click={() => (tab = "users")}>{$t("settings.tab.users")}</button>
     <button class:active={tab === "secrets"} on:click={() => (tab = "secrets")}>{$t("settings.tab.secrets")}</button>
+    <button class:active={tab === "sandbox"} on:click={() => (tab = "sandbox")}>{$t("settings.tab.sandbox")}</button>
   {/if}
   <button class:active={tab === "account"} on:click={() => (tab = "account")}>{$t("settings.tab.account")}</button>
 </div>
@@ -648,6 +725,74 @@ allowed_tools = ["web_search"]
         <button on:click={testSecretBackend}>{$t("secrets.test")}</button>
         {#if secretMsg}<span class="muted small">{secretMsg}</span>{/if}
         {#if secretTestMsg}<span class="small" class:ok={secretTestOk} class:err={!secretTestOk}>{secretTestMsg}</span>{/if}
+      </div>
+    </div>
+  {/if}
+
+{:else if tab === "sandbox"}
+  {#if !me?.is_admin}
+    <div class="card">
+      <p class="muted">{$t("users.adminOnly")}</p>
+    </div>
+  {:else}
+    <div class="card">
+      <h2>{$t("sandbox.title")}</h2>
+      <p class="muted small">{$t("sandbox.hint")}</p>
+      <div class="form">
+        <label>{$t("sandbox.engine")}
+          <select bind:value={sandboxKind}>
+            {#each sandboxBackends as b}
+              <option value={b}>{$t(`sandbox.backend.${b}`)}</option>
+            {/each}
+          </select>
+        </label>
+      </div>
+
+      {#if sandboxKind === "landlock"}
+        <p class="muted small">{$t("sandbox.landlockHint")}</p>
+
+      {:else if sandboxKind === "none"}
+        <p class="muted small">{$t("sandbox.noneHint")}</p>
+
+      {:else if sandboxKind === "bubblewrap" || sandboxKind === "nsjail"}
+        <label class="check">
+          <input type="checkbox" checked={sandboxParams.allow_network !== false} on:change={(e) => (sandboxParams.allow_network = e.currentTarget.checked)} />
+          {$t("sandbox.field.allowNetwork")}
+        </label>
+
+      {:else if sandboxKind === "docker" || sandboxKind === "podman"}
+        <div class="form">
+          <label>{$t("sandbox.field.image")}
+            <input value={(sandboxParams.image ?? "") as string} on:input={(e) => (sandboxParams.image = e.currentTarget.value)} placeholder="debian:stable-slim" />
+          </label>
+          <label>{$t("sandbox.field.memMb")}
+            <input type="number" min="0" value={(sandboxParams.mem_mb ?? "") as number} on:input={(e) => (sandboxParams.mem_mb = e.currentTarget.value)} />
+          </label>
+          <label>{$t("sandbox.field.cpus")}
+            <input type="number" min="0" step="0.5" value={(sandboxParams.cpus ?? "") as number} on:input={(e) => (sandboxParams.cpus = e.currentTarget.value)} />
+          </label>
+          <label class="check">
+            <input type="checkbox" checked={sandboxParams.allow_network !== false} on:change={(e) => (sandboxParams.allow_network = e.currentTarget.checked)} />
+            {$t("sandbox.field.allowNetwork")}
+          </label>
+        </div>
+
+      {:else if sandboxKind === "firecracker" || sandboxKind === "microsandbox"}
+        <div class="form">
+          <label>{$t("sandbox.field.launcher")}
+            <input value={(sandboxParams.launcher ?? "") as string} on:input={(e) => (sandboxParams.launcher = e.currentTarget.value)} placeholder={$t("sandbox.field.launcherOptional")} />
+          </label>
+        </div>
+        <p class="muted small">{$t("sandbox.vmHint")}</p>
+      {/if}
+
+      <p class="muted small">{$t("sandbox.cliHint")}</p>
+
+      <div class="row">
+        <button class="primary" on:click={saveSandbox}>{$t("sandbox.save")}</button>
+        <button on:click={testSandbox}>{$t("sandbox.test")}</button>
+        {#if sandboxMsg}<span class="muted small">{sandboxMsg}</span>{/if}
+        {#if sandboxTestMsg}<span class="small" class:ok={sandboxTestOk} class:err={!sandboxTestOk}>{sandboxTestMsg}</span>{/if}
       </div>
     </div>
   {/if}
