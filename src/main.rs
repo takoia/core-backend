@@ -12,6 +12,7 @@ mod error;
 mod http;
 mod llm;
 mod memory;
+mod net;
 mod queue;
 mod sandbox;
 mod scheduler;

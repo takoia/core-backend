@@ -90,6 +90,14 @@ pub async fn upsert(
     if body.name.trim().is_empty() {
         return Err(AppError::BadRequest("name is required".into()));
     }
+    // SSRF guard: the server later calls this base_url with the stored key, so
+    // reject internal/metadata targets. The "claude-cli" sentinel is not a URL.
+    let base = body.base_url.trim();
+    if !base.is_empty() && base != crate::llm::CLAUDE_CLI_SENTINEL {
+        crate::net::validate_outbound_url(base)
+            .await
+            .map_err(|e| AppError::BadRequest(format!("base_url rejected: {e}")))?;
+    }
     // Route the secret through the active backend (local cipher, or an external
     // vault). Scope is stable across upserts (the conflict key is kind + name).
     let encrypted = match body.secret.as_ref().filter(|s| !s.trim().is_empty()) {

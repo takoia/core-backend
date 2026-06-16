@@ -51,9 +51,11 @@ pub async fn send_discord(webhook_url: &str, content: &str) -> Result<()> {
     if webhook_url.trim().is_empty() {
         return Err(anyhow!("no discord webhook configured"));
     }
+    // SSRF guard: the webhook URL is agent-controlled — block internal targets.
+    crate::net::validate_outbound_url(webhook_url).await?;
     let body = serde_json::json!({ "content": content.chars().take(1900).collect::<String>() });
     // Discord's Cloudflare rejects requests with no User-Agent (error 1010).
-    let resp = reqwest::Client::new()
+    let resp = crate::net::safe_client()
         .post(webhook_url)
         .header("User-Agent", "TakoIA-bot/1.0 (+https://takoia.szymkowiak.fr)")
         .json(&body)

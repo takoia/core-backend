@@ -149,9 +149,11 @@ pub struct UpdateAgent {
 /// `PUT /api/agents/:id` — update agent settings (autonomy, pricing, …).
 pub async fn update(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
     Json(body): Json<UpdateAgent>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "editor").await?;
     sqlx::query(
         r#"UPDATE agents SET
              name = COALESCE(?, name),
@@ -234,9 +236,11 @@ pub struct PublishInput {
 /// `POST /api/agents/:id/publish` — make the expert agent public or private.
 pub async fn publish(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
     Json(body): Json<PublishInput>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "owner").await?;
     let visibility = match body.visibility.as_str() {
         "public" | "private" => body.visibility.as_str(),
         _ => return Err(AppError::BadRequest("visibility must be public or private".into())),
@@ -435,9 +439,11 @@ fn default_mem_key() -> String {
 /// improving the agent over time.
 pub async fn add_memory(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
     Json(body): Json<AddMemory>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "editor").await?;
     if body.content.trim().is_empty() {
         return Err(AppError::BadRequest("content is required".into()));
     }
@@ -496,8 +502,10 @@ pub async fn scaffold(
 /// from the same persona diverge as their memories diverge.
 pub async fn evolve_persona(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "editor").await?;
     let row: Option<(String, String, String)> =
         sqlx::query_as("SELECT name, expertise_domain, persona FROM agents WHERE id = ?")
             .bind(&id)

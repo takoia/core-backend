@@ -737,7 +737,9 @@ async fn run_subagent(
 /// invoke API (Bearer consumer key). The callee meters tokens and bills the
 /// call — the monetized agent-to-agent primitive. Returns the deliverable.
 async fn run_a2a(url: &str, key: &str, input: &str) -> Result<String> {
-    let resp = reqwest::Client::new()
+    // SSRF guard: never let an agent point an A2A call at an internal address.
+    crate::net::validate_outbound_url(url).await?;
+    let resp = crate::net::safe_client()
         .post(url)
         .header("Authorization", format!("Bearer {key}"))
         .json(&serde_json::json!({ "input": input }))

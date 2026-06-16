@@ -2,7 +2,6 @@
 //! API, billed per outgoing token. The agent and its ICM memory never leave the
 //! platform — consumers call an API; the memory stays read-only and integrated.
 
-use crate::bootstrap::DEFAULT_ACCOUNT_ID;
 use crate::error::{AppError, AppResult};
 use crate::queue::ClaimedJob;
 use crate::state::AppState;
@@ -56,6 +55,7 @@ pub struct NewKey {
 /// `POST /api/keys` — create a consumer API key (plaintext shown once).
 pub async fn create_key(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Json(body): Json<NewKey>,
 ) -> AppResult<Json<Value>> {
     let secret = format!("sk_takoia_{}", Uuid::new_v4().simple());
@@ -65,7 +65,7 @@ pub async fn create_key(
            VALUES (?, ?, ?, ?, ?)"#,
     )
     .bind(Uuid::new_v4().to_string())
-    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(&me.account_id)
     .bind(&body.name)
     .bind(hash_key(&secret))
     .bind(&prefix)
@@ -76,7 +76,10 @@ pub async fn create_key(
 }
 
 /// `GET /api/keys` — list the account's API keys (prefixes only).
-pub async fn list_keys(State(state): State<AppState>) -> AppResult<Json<Value>> {
+pub async fn list_keys(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+) -> AppResult<Json<Value>> {
     #[derive(Serialize, sqlx::FromRow)]
     struct KeyRow {
         id: String,
@@ -90,19 +93,21 @@ pub async fn list_keys(State(state): State<AppState>) -> AppResult<Json<Value>> 
         "SELECT id, name, key_prefix, revoked, last_used_at, created_at
          FROM api_keys WHERE account_id = ? ORDER BY created_at DESC",
     )
-    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(&me.account_id)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "keys": rows })))
 }
 
-/// `DELETE /api/keys/:id` — revoke an API key.
+/// `DELETE /api/keys/:id` — revoke an API key (scoped to the caller's account).
 pub async fn revoke_key(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
-    sqlx::query("UPDATE api_keys SET revoked = 1 WHERE id = ?")
+    sqlx::query("UPDATE api_keys SET revoked = 1 WHERE id = ? AND account_id = ?")
         .bind(&id)
+        .bind(&me.account_id)
         .execute(&state.db)
         .await?;
     Ok(Json(json!({ "ok": true })))
