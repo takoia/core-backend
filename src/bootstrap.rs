@@ -15,7 +15,42 @@ pub const DEFAULT_ACCOUNT_ID: &str = "00000000-0000-0000-0000-000000000001";
 pub async fn run(db: &Db, cipher: &Cipher, config: &Config) -> Result<()> {
     ensure_account(db).await?;
     seed_providers(db, cipher, config).await?;
-    // No default agents are seeded — users create their own.
+    seed_showcase_agent(db).await?;
+    Ok(())
+}
+
+/// On a FRESH install (no agents yet), seed a single showcase agent: a real
+/// windsurf/kitesurf weather scout for Wissant that fetches live wind from the
+/// free Open-Meteo API and alerts only on a rideable session. Demonstrates a
+/// data-backed agent end to end. Disable with `SEED_SHOWCASE_AGENT=false`.
+async fn seed_showcase_agent(db: &Db) -> Result<()> {
+    let disabled = std::env::var("SEED_SHOWCASE_AGENT")
+        .map(|v| matches!(v.trim(), "false" | "0" | "no"))
+        .unwrap_or(false);
+    if disabled {
+        return Ok(());
+    }
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM agents")
+        .fetch_one(db)
+        .await?;
+    if count.0 > 0 {
+        return Ok(()); // not a fresh install — never recreate a deleted agent.
+    }
+    const SEED: &str = include_str!("seed/windsurf-wissant.toml");
+    let id = crate::agentdef::import(db, DEFAULT_ACCOUNT_ID, SEED).await?;
+    // Check the spot every 6 hours; NULL next_run_at runs it on the next tick.
+    sqlx::query(
+        r#"INSERT INTO schedules
+             (id, agent_id, title, prompt, cron_expr, interval_seconds, enabled, next_run_at)
+           VALUES (?, ?, ?, ?, '', 21600, 1, NULL)"#,
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&id)
+    .bind("Windsurf session check — Wissant")
+    .bind("Check today's windsurf/kitesurf conditions at Wissant; alert only on a rideable window.")
+    .execute(db)
+    .await?;
+    tracing::info!(agent_id = %id, "seeded showcase windsurf-weather agent");
     Ok(())
 }
 
