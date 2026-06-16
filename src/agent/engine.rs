@@ -103,6 +103,7 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
         recalled_memory: memory_ctx.clone(),
         mood_flavor,
         read_only: read_only_memory,
+        last_step_canned: false,
     };
 
     // ── Analyse ────────────────────────────────────────────────────────────
@@ -269,14 +270,20 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
         super::inner_life::note_activity(&state.db, &job.agent_id).await;
     }
 
-    // Discord alert: if the agent uses send_discord and a webhook is set.
-    // Skip on a resumed run whose Restitution was already done, so the alert is
-    // never sent twice for the same job.
+    // Discord alert: only when the agent actually produced an alert. The agent
+    // emits `NO_ALERT` (anywhere in the restitution) when there is nothing
+    // actionable, so a routine "no signal" run stays silent instead of spamming.
+    // Skip on a resumed run whose Restitution was already done (never twice).
+    let suppressed = ctx.last_step_canned || report.to_ascii_uppercase().contains("NO_ALERT");
     if !restitution_was_done && allowed.iter().any(|t| t == "send_discord") {
-        let webhook = params.get("discord_webhook").and_then(|v| v.as_str()).unwrap_or("");
-        match tools::send_discord(webhook, &format!("**{}**\n{}", objective.title, report)).await {
-            Ok(_) => bus.publish(JobEvent::log(&job.id, "alert sent to Discord")),
-            Err(e) => bus.publish(JobEvent::log(&job.id, format!("discord notify failed: {e}"))),
+        if suppressed {
+            bus.publish(JobEvent::log(&job.id, "no alert (agent reported no actionable signal)"));
+        } else {
+            let webhook = params.get("discord_webhook").and_then(|v| v.as_str()).unwrap_or("");
+            match tools::send_discord(webhook, &format!("**{}**\n{}", objective.title, report)).await {
+                Ok(_) => bus.publish(JobEvent::log(&job.id, "alert sent to Discord")),
+                Err(e) => bus.publish(JobEvent::log(&job.id, format!("discord notify failed: {e}"))),
+            }
         }
     }
 
@@ -319,6 +326,9 @@ struct RunCtx<'a> {
     mood_flavor: String,
     /// Recall memory but never write it (marketplace consumer invokes).
     read_only: bool,
+    /// Whether the most recent step fell back to the canned offline provider
+    /// (its generic demo content must not be pushed as a real Discord alert).
+    last_step_canned: bool,
 }
 
 impl<'a> RunCtx<'a> {
@@ -496,6 +506,7 @@ impl<'a> RunCtx<'a> {
             step.as_str(),
             serde_json::json!({ "text": completion.content }),
         ));
+        self.last_step_canned = used_canned;
         Ok(completion.content)
     }
 
