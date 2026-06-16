@@ -200,6 +200,12 @@
     nodes = g.nodes;
     edges = g.edges;
     selected = "agent"; resetRun();
+    personalization = {
+      reflection: false, emotions: false, initiative: false,
+      commitments: false, persona_evolution: false, personality: false,
+      big_five: { openness: 0.5, conscientiousness: 0.5, extraversion: 0.5, agreeableness: 0.5, neuroticism: 0.5 },
+    };
+    innerState = { state: null, commitments: [] };
     agentsModalOpen = false;
   }
 
@@ -230,6 +236,62 @@
     } catch (e) { toast(e instanceof Error ? e.message : String(e), "error"); }
     finally { evolving = false; }
   }
+
+  // ── Per-agent personalization (reflection, emotions, Big Five, …) ──────────
+  type BigFive = { openness: number; conscientiousness: number; extraversion: number; agreeableness: number; neuroticism: number };
+  let personalization = $state<{
+    reflection: boolean; emotions: boolean; initiative: boolean;
+    commitments: boolean; persona_evolution: boolean; personality: boolean;
+    big_five: BigFive;
+  }>({
+    reflection: false, emotions: false, initiative: false,
+    commitments: false, persona_evolution: false, personality: false,
+    big_five: { openness: 0.5, conscientiousness: 0.5, extraversion: 0.5, agreeableness: 0.5, neuroticism: 0.5 },
+  });
+  const BIG_FIVE_TRAITS = ["openness", "conscientiousness", "extraversion", "agreeableness", "neuroticism"] as const;
+  let innerState = $state<{
+    state: { mood: string; energy: number; familiarity: number; reflection: string | null; emotions: Record<string, number> | null; updated_at: string | null } | null;
+    commitments: { description: string; due_at: string | null; done: boolean }[];
+  }>({ state: null, commitments: [] });
+  let savingPerso = $state(false);
+
+  async function loadPersonalization(id: string) {
+    try {
+      const p = await api.getPersonalization(id);
+      personalization = {
+        reflection: !!p.reflection, emotions: !!p.emotions, initiative: !!p.initiative,
+        commitments: !!p.commitments, persona_evolution: !!p.persona_evolution, personality: !!p.personality,
+        big_five: { ...personalization.big_five, ...(p.big_five ?? {}) },
+      };
+    } catch { /* personalization may be unset on a fresh agent */ }
+    await loadInnerState(id);
+  }
+
+  async function loadInnerState(id: string) {
+    try {
+      const s = await api.innerState(id);
+      innerState = { state: s.state ?? null, commitments: s.commitments ?? [] };
+    } catch { innerState = { state: null, commitments: [] }; }
+  }
+
+  async function savePersonalization() {
+    if (!editingId) return;
+    savingPerso = true;
+    try {
+      await api.setPersonalization(editingId, personalization);
+      toast($t("personalization.saved"), "success");
+      await loadInnerState(editingId);
+    } catch (e) { toast(e instanceof Error ? e.message : String(e), "error"); }
+    finally { savingPerso = false; }
+  }
+
+  // Top emotions (descending intensity) for the live inner-state readout.
+  const topEmotions = $derived(
+    Object.entries(innerState.state?.emotions ?? {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3),
+  );
+  const openCommitments = $derived(innerState.commitments.filter((c) => !c.done));
 
   function addBlock(key: string, pos?: { x: number; y: number }) {
     const b = ALL_BLOCKS[key];
@@ -471,6 +533,7 @@
         for (const pk of PARAM_KEYS[tk] ?? []) if (tParams[pk]) { params[id2] = { ...(params[id2]||{}), [pk]: tParams[pk] }; } }
     }
     selected = "agent"; resetRun();
+    await loadPersonalization(d.agent.id);
   }
 
   async function save(quiet = false) {
@@ -803,6 +866,63 @@
       <label class="blk">{$t("builder.loopEvery")}<input type="number" min="0" bind:value={loopMinutes} /></label>
       <label class="blk">{$t("builder.goals")}<input bind:value={goals} placeholder={$t("builder.goalsPlaceholder")} /></label>
       <p class="hint">{$t("builder.goalsHint")}</p>
+
+      {#if editingId}
+        <hr />
+        <h3>{$t("personalization.title")}</h3>
+        <p class="hint">{$t("personalization.hint")}</p>
+
+        <label class="toggle"><input type="checkbox" bind:checked={personalization.reflection} /> {$t("personalization.reflection")}</label>
+        <p class="hint sub">{$t("personalization.reflectionHelp")}</p>
+        <label class="toggle"><input type="checkbox" bind:checked={personalization.emotions} /> {$t("personalization.emotions")}</label>
+        <p class="hint sub">{$t("personalization.emotionsHelp")}</p>
+        <label class="toggle"><input type="checkbox" bind:checked={personalization.initiative} /> {$t("personalization.initiative")}</label>
+        <p class="hint sub">{$t("personalization.initiativeHelp")}</p>
+        <label class="toggle"><input type="checkbox" bind:checked={personalization.commitments} /> {$t("personalization.commitments")}</label>
+        <p class="hint sub">{$t("personalization.commitmentsHelp")}</p>
+        <label class="toggle"><input type="checkbox" bind:checked={personalization.persona_evolution} /> {$t("personalization.personaEvolution")}</label>
+        <p class="hint sub">{$t("personalization.personaEvolutionHelp")}</p>
+        <label class="toggle"><input type="checkbox" bind:checked={personalization.personality} /> {$t("personalization.personality")}</label>
+        <p class="hint sub">{$t("personalization.personalityHelp")}</p>
+
+        {#if personalization.personality}
+          <div class="bigfive">
+            <h4>{$t("personalization.bigFive")}</h4>
+            {#each BIG_FIVE_TRAITS as trait}
+              <div class="trait">
+                <div class="tlabel"><span>{$t(`personalization.trait.${trait}`)}</span><span class="tval">{personalization.big_five[trait].toFixed(2)}</span></div>
+                <input type="range" min="0" max="1" step="0.05" bind:value={personalization.big_five[trait]} />
+                <div class="tends"><span>{$t(`personalization.trait.${trait}.low`)}</span><span>{$t(`personalization.trait.${trait}.high`)}</span></div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        <button class="genbtn" onclick={savePersonalization} disabled={savingPerso}>{savingPerso ? "…" : $t("personalization.save")}</button>
+
+        <div class="innerstate">
+          <h4>{$t("personalization.innerState")}</h4>
+          {#if innerState.state}
+            <div class="isrow"><span class="iskey">{$t("personalization.mood")}</span><span>{innerState.state.mood || "—"}</span></div>
+            <div class="isrow"><span class="iskey">{$t("personalization.energy")}</span><span>{Math.round((innerState.state.energy ?? 0) * 100)}%</span></div>
+            {#if topEmotions.length}
+              <div class="isrow"><span class="iskey">{$t("personalization.topEmotions")}</span>
+                <span>{topEmotions.map(([k, v]) => `${k} (${Math.round(v * 100)}%)`).join(", ")}</span>
+              </div>
+            {/if}
+            {#if innerState.state.reflection}
+              <div class="isref"><span class="iskey">{$t("personalization.latestReflection")}</span><p>{innerState.state.reflection}</p></div>
+            {/if}
+            {#if openCommitments.length}
+              <div class="iscom"><span class="iskey">{$t("personalization.openCommitments")}</span>
+                <ul>{#each openCommitments as c}<li>{c.description}{#if c.due_at} — {c.due_at}{/if}</li>{/each}</ul>
+              </div>
+            {/if}
+          {:else}
+            <p class="hint">{$t("personalization.innerStateEmpty")}</p>
+          {/if}
+        </div>
+      {/if}
     {:else if selNode}
       {@const kind = selNode.data.kind}
       <div class="phead"><h3>{#if isImg(selNode.data.glyph)}<img class="hicon" src={selNode.data.glyph as string} alt="" />{:else}{selNode.data.glyph}{/if} {selNode.data.label}</h3><button class="del" onclick={() => removeNode(selNode.id)}>🗑</button></div>
@@ -1017,6 +1137,23 @@
   .ic.on { border-color: var(--accent); }
   .blk { display: block; font-size: 0.8rem; color: var(--muted); margin-top: 0.5rem; }
   input, select, textarea { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.45rem 0.6rem; font: inherit; margin-top: 0.2rem; }
+  .inspector h4 { margin: 0.6rem 0 0.3rem; font-size: 0.85rem; }
+  .toggle { display: flex; align-items: center; gap: 0.45rem; font-size: 0.82rem; color: var(--text); margin-top: 0.6rem; cursor: pointer; }
+  .toggle input { width: auto; margin-top: 0; flex: 0 0 auto; cursor: pointer; }
+  .hint.sub { margin: 0.1rem 0 0.2rem 1.6rem; font-size: 0.7rem; }
+  .bigfive { background: color-mix(in srgb, var(--accent) 6%, var(--panel)); border: 1px solid var(--border); border-radius: 10px; padding: 0.6rem; margin-top: 0.6rem; }
+  .trait { margin-bottom: 0.6rem; }
+  .trait input[type="range"] { width: 100%; margin: 0.2rem 0 0.1rem; }
+  .tlabel { display: flex; justify-content: space-between; font-size: 0.78rem; color: var(--text); }
+  .tval { color: var(--muted); }
+  .tends { display: flex; justify-content: space-between; font-size: 0.66rem; color: var(--muted); }
+  .innerstate { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 0.6rem; margin-top: 0.8rem; }
+  .isrow { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.78rem; margin-bottom: 0.25rem; }
+  .iskey { color: var(--muted); }
+  .isref { margin-top: 0.3rem; font-size: 0.76rem; }
+  .isref p { margin: 0.2rem 0 0; color: var(--text); white-space: pre-wrap; }
+  .iscom { margin-top: 0.3rem; font-size: 0.76rem; }
+  .iscom ul { margin: 0.2rem 0 0; padding-left: 1.1rem; color: var(--text); }
   .blk textarea { font-family: ui-monospace, monospace; font-size: 0.82rem; }
   :global(.svelte-flow__attribution) { display: none; }
   /* Landing / agent picker */

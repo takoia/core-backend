@@ -71,7 +71,7 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
     let autonomy = AutonomyLevel::from_db(&agent.autonomy_level);
 
     let configs = load_step_configs(state, &job.agent_id).await?;
-    let registry = state.load_registry(&objective.account_id).await?;
+    let registry = state.load_registry(&objective.account_id, &job.agent_id).await?;
     let done = load_done_steps(state, &job.id).await?;
 
     // Permanent memory: recall accumulated expertise for prompt injection.
@@ -85,6 +85,12 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
         bus.publish(JobEvent::log(&job.id, "applying past corrections"));
     }
 
+    // Inner life: the agent's mood/emotions + personality colour this run's tone,
+    // gated by the agent's personalization toggles.
+    let inner = super::inner_life::current(&state.db, &job.agent_id).await;
+    let pers = super::inner_life::personalization(&state.db, &job.agent_id).await;
+    let mood_flavor = super::inner_life::flavor_line(&inner, &pers);
+
     let mut ctx = RunCtx {
         state,
         job,
@@ -95,6 +101,7 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
         account_id: &objective.account_id,
         session: Vec::new(),
         recalled_memory: memory_ctx.clone(),
+        mood_flavor,
         read_only: read_only_memory,
     };
 
@@ -258,6 +265,8 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
             .memory
             .store(&job.agent_id, "interaction", &interaction)
             .await;
+        // Inner life: a completed interaction grows familiarity and lifts energy.
+        super::inner_life::note_activity(&state.db, &job.agent_id).await;
     }
 
     // Discord alert: if the agent uses send_discord and a webhook is set.
@@ -305,6 +314,9 @@ struct RunCtx<'a> {
     /// ICM recall computed once per run (the query — the objective prompt — is
     /// constant across steps).
     recalled_memory: String,
+    /// One line describing the agent's current mood/energy, injected so its tone
+    /// reflects how it feels right now (its "inner life").
+    mood_flavor: String,
     /// Recall memory but never write it (marketplace consumer invokes).
     read_only: bool,
 }
@@ -391,6 +403,10 @@ impl<'a> RunCtx<'a> {
         // personalization that grows as memory consolidates.
         if !self.persona.trim().is_empty() {
             messages.push(Message::system(format!("Your persona / identity:\n{}", self.persona)));
+        }
+        // The agent's current inner state (mood / energy / familiarity).
+        if !self.mood_flavor.trim().is_empty() {
+            messages.push(Message::system(self.mood_flavor.clone()));
         }
         // Tell the agent it owns a persistent ICM memory it recalls and writes to.
         messages.push(Message::system(

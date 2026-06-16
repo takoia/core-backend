@@ -86,6 +86,42 @@ export interface Connector {
   is_default: boolean;
 }
 
+export interface BigFive {
+  openness: number;
+  conscientiousness: number;
+  extraversion: number;
+  agreeableness: number;
+  neuroticism: number;
+}
+
+export interface Personalization {
+  reflection: boolean;
+  emotions: boolean;
+  initiative: boolean;
+  commitments: boolean;
+  persona_evolution: boolean;
+  personality: boolean;
+  big_five: BigFive;
+}
+
+export interface Commitment {
+  description: string;
+  due_at: string | null;
+  done: boolean;
+}
+
+export interface InnerState {
+  state: {
+    mood: string;
+    energy: number;
+    familiarity: number;
+    reflection: string | null;
+    emotions: Record<string, number> | null;
+    updated_at: string | null;
+  };
+  commitments: Commitment[];
+}
+
 export interface UsageTotal {
   provider: string;
   prompt_tokens: number;
@@ -278,6 +314,35 @@ export const api = {
       headers: jsonH,
       body: JSON.stringify({ kind, params }),
     }),
+
+  // ── Sandboxing backend (how agent tool execution is isolated) ─────────────
+  getSandbox: () =>
+    req<{ kind: string; params: Record<string, unknown>; backends: string[] }>(
+      "/api/settings/sandbox",
+    ),
+  setSandbox: (kind: string, params: Record<string, unknown>) =>
+    req<{ ok: boolean; kind: string }>("/api/settings/sandbox", {
+      method: "PUT",
+      headers: jsonH,
+      body: JSON.stringify({ kind, params }),
+    }),
+  testSandbox: (kind: string, params: Record<string, unknown>) =>
+    req<{ ok: boolean; message: string }>("/api/settings/sandbox/test", {
+      method: "POST",
+      headers: jsonH,
+      body: JSON.stringify({ kind, params }),
+    }),
+
+  // ── Per-agent personalization (reflection, emotions, Big Five, …) ─────────
+  getPersonalization: (id: string) =>
+    req<Personalization>(`/api/agents/${id}/personalization`),
+  setPersonalization: (id: string, body: Partial<Personalization>) =>
+    req<{ ok: boolean }>(`/api/agents/${id}/personalization`, {
+      method: "PUT",
+      headers: jsonH,
+      body: JSON.stringify(body),
+    }),
+  innerState: (id: string) => req<InnerState>(`/api/agents/${id}/inner-state`),
 
   usage: () =>
     req<{ totals: UsageTotal[]; estimated_total_usd: number }>("/api/usage"),

@@ -136,8 +136,16 @@ async fn enqueue_run(db: &Db, s: &ScheduleRow) -> Result<()> {
 
 /// Compute the next run time as an ISO-8601 string.
 fn compute_next(s: &ScheduleRow, now: chrono::DateTime<Utc>) -> String {
+    use chrono::Timelike;
+    use rand::Rng;
     if let Some(secs) = s.interval_seconds.filter(|v| *v > 0) {
-        return (now + chrono::Duration::seconds(secs))
+        // Circadian rhythm: the agent slows down during quiet hours (00–06 UTC),
+        // like a person resting at night.
+        let circadian = if (0..6).contains(&now.hour()) { 2.0 } else { 1.0 };
+        // Jitter ±15% so the cadence feels organic instead of metronomic.
+        let jitter = rand::thread_rng().gen_range(0.85..1.15);
+        let effective = (((secs as f64) * circadian * jitter).round() as i64).max(1);
+        return (now + chrono::Duration::seconds(effective))
             .format("%Y-%m-%dT%H:%M:%S%.3fZ")
             .to_string();
     }

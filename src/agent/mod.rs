@@ -4,6 +4,7 @@
 pub mod choreography;
 pub mod engine;
 pub mod events;
+pub mod inner_life;
 pub mod steps;
 pub mod worker;
 
