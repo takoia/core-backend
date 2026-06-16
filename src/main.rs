@@ -15,6 +15,7 @@ mod memory;
 mod queue;
 mod sandbox;
 mod scheduler;
+mod security;
 mod secrets;
 mod state;
 mod tools;

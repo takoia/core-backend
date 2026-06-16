@@ -100,6 +100,11 @@ pub fn router(state: AppState) -> Router {
             get(sandbox_settings::get_sandbox).put(sandbox_settings::set_sandbox),
         )
         .route("/settings/sandbox/test", post(sandbox_settings::test_sandbox))
+        // Brute-force auto-ban configuration
+        .route(
+            "/settings/security",
+            get(users::get_security).put(users::set_security),
+        )
         // MCP catalog + connect
         .route("/mcp/catalog", get(mcp::catalog))
         .route("/mcp/installed", get(mcp::installed))

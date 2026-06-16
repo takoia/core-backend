@@ -243,17 +243,37 @@ pub struct LoginInput {
     pub password: String,
 }
 
-/// `POST /api/login` — verify credentials, open a bearer session.
-pub async fn login(State(state): State<AppState>, Json(body): Json<LoginInput>) -> AppResult<Json<Value>> {
+/// `POST /api/login` — verify credentials, open a bearer session. Auto-bans the
+/// client IP after too many failed attempts (brute-force protection).
+pub async fn login(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<LoginInput>,
+) -> AppResult<Json<Value>> {
+    let ip = crate::security::client_ip(&headers);
+    let sec = crate::security::settings(&state.db).await;
+    if sec.auto_ban_enabled && crate::security::is_banned(&state.db, &ip).await {
+        return Err(AppError::Forbidden(
+            "too many failed attempts — temporarily blocked, try again later".into(),
+        ));
+    }
+
     let row: Option<(String, String)> =
         sqlx::query_as("SELECT id, password_hash FROM users WHERE email = ?")
             .bind(body.email.trim())
             .fetch_optional(&state.db)
             .await?;
-    let (uid, hash) = row.ok_or_else(|| AppError::BadRequest("invalid credentials".into()))?;
-    if !verify_password(&body.password, &hash) {
+    let bad = match &row {
+        Some((_, hash)) => !verify_password(&body.password, hash),
+        None => true,
+    };
+    if bad {
+        crate::security::record_failure(&state.db, &ip, &sec).await;
         return Err(AppError::BadRequest("invalid credentials".into()));
     }
+    let (uid, _) = row.expect("checked above");
+    crate::security::clear(&state.db, &ip).await;
+
     let token = new_token();
     sqlx::query("INSERT INTO user_sessions (token, user_id, expires_at) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now','+7 days'))")
         .bind(&token)
@@ -286,6 +306,47 @@ pub async fn logout(State(state): State<AppState>, parts: axum::http::HeaderMap)
 /// `GET /api/me` — the current user.
 pub async fn me(CurrentUser(user): CurrentUser) -> AppResult<Json<Value>> {
     Ok(Json(user.to_json()))
+}
+
+/// `GET /api/settings/security` — brute-force auto-ban config (admin).
+pub async fn get_security(
+    State(state): State<AppState>,
+    CurrentUser(me): CurrentUser,
+) -> AppResult<Json<Value>> {
+    require_admin(&me)?;
+    let s = crate::security::settings(&state.db).await;
+    Ok(Json(json!({
+        "auto_ban_enabled": s.auto_ban_enabled,
+        "max_failed_attempts": s.max_failed_attempts,
+        "window_secs": s.window_secs,
+        "ban_secs": s.ban_secs,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct SecurityInput {
+    pub auto_ban_enabled: Option<bool>,
+    pub max_failed_attempts: Option<i64>,
+    pub window_secs: Option<i64>,
+    pub ban_secs: Option<i64>,
+}
+
+/// `PUT /api/settings/security` — update the auto-ban config (admin).
+pub async fn set_security(
+    State(state): State<AppState>,
+    CurrentUser(me): CurrentUser,
+    Json(body): Json<SecurityInput>,
+) -> AppResult<Json<Value>> {
+    require_admin(&me)?;
+    let cur = crate::security::settings(&state.db).await;
+    let s = crate::security::SecuritySettings {
+        auto_ban_enabled: body.auto_ban_enabled.unwrap_or(cur.auto_ban_enabled),
+        max_failed_attempts: body.max_failed_attempts.unwrap_or(cur.max_failed_attempts).max(1),
+        window_secs: body.window_secs.unwrap_or(cur.window_secs).max(1),
+        ban_secs: body.ban_secs.unwrap_or(cur.ban_secs).max(1),
+    };
+    crate::security::set_settings(&state.db, &s).await.map_err(AppError::Other)?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// `GET /api/users` — list users (org admin only).
