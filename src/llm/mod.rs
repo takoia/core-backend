@@ -5,6 +5,7 @@
 mod canned;
 mod claude_cli;
 mod openai_compat;
+pub mod oneshot;
 mod registry;
 
 pub use canned::CannedProvider;

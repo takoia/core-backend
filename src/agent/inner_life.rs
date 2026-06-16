@@ -340,7 +340,7 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
         },
     );
 
-    let fields = match generate_json(state, &prompt).await {
+    let fields = match crate::llm::oneshot::generate_json(state, &prompt).await {
         Some(v) => v,
         None => return,
     };
@@ -534,41 +534,4 @@ async fn enqueue_self_objective(state: &AppState, agent_id: &str, title: &str, p
         .execute(&mut *tx)
         .await;
     let _ = tx.commit().await;
-}
-
-/// One-shot `claude -p` returning the inner JSON object, or None on failure.
-async fn generate_json(state: &AppState, prompt: &str) -> Option<Value> {
-    let mut cmd = tokio::process::Command::new("claude");
-    cmd.arg("-p")
-        .arg("--output-format")
-        .arg("json")
-        .arg("--permission-mode")
-        .arg("bypassPermissions");
-    if let Some(token) = &state.config.claude_max_token {
-        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
-    }
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = cmd.spawn().ok()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(prompt.as_bytes()).await;
-        drop(stdin);
-    }
-    let output = tokio::time::timeout(Duration::from_secs(180), child.wait_with_output())
-        .await
-        .ok()?
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let parsed: Value = serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).ok()?;
-    let text = parsed.get("result").and_then(|v| v.as_str()).unwrap_or_default();
-    let slice = match (text.find('{'), text.rfind('}')) {
-        (Some(a), Some(b)) if b > a => &text[a..=b],
-        _ => text,
-    };
-    serde_json::from_str(slice).ok()
 }
