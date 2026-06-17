@@ -50,6 +50,20 @@ async fn seed_showcase_agent(db: &Db) -> Result<()> {
     .bind("Check today's windsurf/kitesurf conditions at Wissant; alert only on a rideable window.")
     .execute(db)
     .await?;
+    // Keep the scout calm and cheap: inner-life OFF by default. Without an
+    // explicit row the toggles default to ON (migration 0016), which makes an
+    // alerting agent reflect / take initiative / accrue commitments every tick,
+    // burning LLM runs for no signal. An alerting bot should just run on its
+    // schedule and stay quiet otherwise.
+    sqlx::query(
+        r#"INSERT INTO agent_personalization
+             (agent_id, reflection, emotions, initiative, commitments, persona_evolution, personality)
+           VALUES (?, 0, 0, 0, 0, 0, 0)
+           ON CONFLICT(agent_id) DO NOTHING"#,
+    )
+    .bind(&id)
+    .execute(db)
+    .await?;
     tracing::info!(agent_id = %id, "seeded showcase windsurf-weather agent");
     Ok(())
 }
