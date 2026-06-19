@@ -374,21 +374,25 @@ impl Memory {
         Ok(())
     }
 
-    /// ICM memories with their native importance metadata (weight, access_count,
-    /// importance), used to size/color the memory map by real importance. The
-    /// query keyword-matches the agent's domain so its memories surface.
-    pub async fn icm_entries(&self, agent_id: &str, query: &str, limit: usize) -> Vec<IcmEntry> {
-        let q = if query.trim().is_empty() { "memory" } else { query };
+    /// All of an agent's stored ICM memories with their native importance
+    /// metadata (weight, access_count, importance), used to rebuild the DB
+    /// mirror after consolidation and to size/color the memory map.
+    ///
+    /// Enumerates the topic with `icm list`, NOT `icm recall <keyword>`:
+    /// keyword recall (with `--no-embeddings`) only returns entries whose
+    /// content matches the query term, so a generic query matched none of the
+    /// agents' domain content and returned `[]` — which made the mirror resync
+    /// log "parsed zero real entries" and never refresh. `list` returns the
+    /// whole topic regardless of keywords.
+    pub async fn icm_entries(&self, agent_id: &str, _query: &str, limit: usize) -> Vec<IcmEntry> {
         let out = Command::new("icm")
-            .arg("recall")
-            .arg(q)
+            .arg("list")
             .arg("--topic")
             .arg(Self::topic(agent_id))
             .arg("--limit")
             .arg(limit.to_string())
             .arg("--db")
             .arg(&self.icm_db_path)
-            .arg("--no-embeddings")
             .arg("--format")
             .arg("json")
             .output()
