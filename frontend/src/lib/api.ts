@@ -433,6 +433,12 @@ export const api = {
     }),
 };
 
+export interface McpEnvField {
+  key: string; // env var name passed to the server, e.g. BRAVE_API_KEY
+  label: string; // human-friendly label shown in the form
+  link?: string; // where to get this credential
+}
+
 export interface McpServer {
   id: string;
   name: string;
@@ -443,6 +449,7 @@ export interface McpServer {
   command?: string;
   url?: string;
   docs: string;
+  env?: McpEnvField[]; // credentials required to connect (absent = one-click)
 }
 
 export interface Skill {

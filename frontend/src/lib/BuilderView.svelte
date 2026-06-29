@@ -70,6 +70,29 @@
   const ALL_BLOCKS: Record<string, Block> = Object.fromEntries(
     PALETTE.flatMap((g) => g.items).map((b) => [b.key, b]),
   );
+  // Connected MCP servers, surfaced in the toolbox as draggable tool blocks so
+  // an agent can use them. Loaded from the account's connectors (kind = "mcp").
+  let mcpServers = $state.raw<{ id: string; label: string }[]>([]);
+  const mcpBlocks = $derived(
+    Object.fromEntries(
+      mcpServers.map((s) => [
+        `mcp_${s.id}`,
+        { key: `mcp_${s.id}`, label: s.label, glyph: "🔌", kind: "tool" } as Block,
+      ]),
+    ) as Record<string, Block>,
+  );
+  // Static palette blocks + live MCP tools — used for adding and reload lookups.
+  const allBlocks = $derived({ ...ALL_BLOCKS, ...mcpBlocks });
+  async function loadMcpTools() {
+    try {
+      const conns = await api.listConnectors();
+      mcpServers = conns
+        .filter((c) => c.kind === "mcp")
+        .map((c) => ({ id: c.name, label: c.name.charAt(0).toUpperCase() + c.name.slice(1) }));
+    } catch {
+      mcpServers = [];
+    }
+  }
   const PARAM_KEYS: Record<string, string[]> = {
     trigger_manual: ["event"], trigger_email: ["event"], trigger_webhook: ["event"],
     trigger_ftp: ["event"], trigger_schedule: ["interval_min"],
@@ -149,6 +172,7 @@
   // one). The "My agents" list is a modal opened from the ☰ button.
   onMount(async () => {
     await refreshAgents();
+    loadMcpTools();
     const last = localStorage.getItem("takoia.lastAgent");
     if (last && agentList.some((a) => a.id === last)) await loadAgent(last);
     else if (agentList.length) await loadAgent(agentList[0].id);
@@ -376,7 +400,7 @@
   const openCommitments = $derived(innerState.commitments.filter((c) => !c.done));
 
   function addBlock(key: string, pos?: { x: number; y: number }) {
-    const b = ALL_BLOCKS[key];
+    const b = allBlocks[key];
     if (!b) return;
     counter += 1;
     const id = `${key}-${counter}`;
@@ -484,7 +508,7 @@
     const nm = name, ic = icon, ss = stepStatus, rs = runStatus, cs = currentStep;
     const running = rs === "running" || rs === "queued";
     const agentStatus = running ? "running" : rs === "done" ? "done" : undefined;
-    const stepLabel = cs && ALL_BLOCKS[cs] ? ALL_BLOCKS[cs].label : cs;
+    const stepLabel = cs && allBlocks[cs] ? allBlocks[cs].label : cs;
     const agentSub = running && stepLabel ? `▶ ${stepLabel}` : rs === "done" ? "terminé" : "agent";
     nodes = untrack(() => nodes).map((n) => {
       if (n.id === "agent") return { ...n, data: { ...n.data, label: nm, glyph: ic, status: agentStatus, sub: agentSub } };
@@ -613,7 +637,7 @@
     prompts = { ...prompts, ...corePrompts };
     // Add tool boxes (chained after the last step) with their params.
     for (const tk of toolKeys) {
-      if (ALL_BLOCKS[tk]) { addBlock(tk); const id2 = lastId;
+      if (allBlocks[tk]) { addBlock(tk); const id2 = lastId;
         for (const pk of PARAM_KEYS[tk] ?? []) if (tParams[pk]) { params[id2] = { ...(params[id2]||{}), [pk]: tParams[pk] }; } }
     }
     // Restore the saved layout + canvas view so the schema reopens exactly as left.
@@ -869,6 +893,18 @@
           </button>
         {/each}
       {/each}
+      <div class="pgroup">MCP</div>
+      {#if mcpServers.length}
+        {#each mcpServers as s}
+          <button class="pblock tool" draggable="true"
+            ondragstart={(e) => { if (e.dataTransfer) { e.dataTransfer.effectAllowed = "copy"; e.dataTransfer.setData("text/plain", `mcp_${s.id}`); } }}
+            onclick={() => addBlock(`mcp_${s.id}`)}>
+            <span class="pg">🔌</span> {s.label}
+          </button>
+        {/each}
+      {:else}
+        <p class="hint mcp-empty">{$t("builder.mcpEmpty")}</p>
+      {/if}
     </aside>
   {:else}
     <aside class="railbar card"><button class="collapse" onclick={() => (paletteOpen = true)} title={$t("builder.toolbox")}>»</button></aside>

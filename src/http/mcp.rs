@@ -70,21 +70,30 @@ pub async fn connect(
     let transport = entry.get("transport").and_then(|v| v.as_str()).unwrap_or("stdio");
     let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or(&body.id);
 
-    // Build `claude mcp add` arguments.
+    // Build `claude mcp add` arguments. NOTE: `-e/--env` is variadic in the
+    // Claude CLI, so it must come AFTER the server name (and be terminated by a
+    // positional like the url or the `--` command separator). Putting `-e`
+    // before the name makes the CLI swallow the name as an env value.
     let mut cmd = Command::new("claude");
     cmd.arg("mcp").arg("add").arg("-s").arg("user");
-    for kv in &body.env {
-        cmd.arg("-e").arg(kv);
-    }
     let target: String;
     if transport == "http" {
         let url = entry.get("url").and_then(|v| v.as_str()).unwrap_or("");
         target = url.to_string();
+        // name + url are positional first; env flags trail at the end.
         cmd.arg("--transport").arg("http").arg(&body.id).arg(url);
+        for kv in &body.env {
+            cmd.arg("-e").arg(kv);
+        }
     } else {
         let command = entry.get("command").and_then(|v| v.as_str()).unwrap_or("");
         target = command.to_string();
-        cmd.arg(&body.id).arg("--");
+        // name first, then env flags, then `--` terminates env and starts the command.
+        cmd.arg(&body.id);
+        for kv in &body.env {
+            cmd.arg("-e").arg(kv);
+        }
+        cmd.arg("--");
         for part in command.split_whitespace() {
             cmd.arg(part);
         }
