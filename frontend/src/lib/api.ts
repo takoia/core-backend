@@ -33,6 +33,7 @@ export interface Agent {
   created_at: string;
   author?: string;
   icon?: string;
+  layout?: string; // JSON map: { "<block_key>": { x, y } }
 }
 
 export interface StepConfig {
@@ -174,6 +175,14 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
 
+  // Public self-service sign-up: create a non-admin account and auto-login.
+  register: (email: string, name: string, password: string) =>
+    req<{ token: string; username: string; user: User }>("/api/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, name, password }),
+    }),
+
   // First-run setup wizard: create the first admin on a fresh instance.
   setupStatus: () => req<{ needs_setup: boolean }>("/api/setup/status"),
   setup: (email: string, name: string, password: string) =>
@@ -205,6 +214,9 @@ export const api = {
     req<{ id: string }>("/api/agents", { method: "POST", headers: jsonH, body: JSON.stringify(body) }),
   updateSteps: (id: string, steps: unknown[]) =>
     req(`/api/agents/${id}/steps`, { method: "PUT", headers: jsonH, body: JSON.stringify({ steps }) }),
+  // Persist the builder graph layout (node positions) for an agent.
+  setLayout: (id: string, layout: Record<string, { x: number; y: number }>) =>
+    req(`/api/agents/${id}/layout`, { method: "PUT", headers: jsonH, body: JSON.stringify({ layout }) }),
   deleteAgent: (id: string) => req(`/api/agents/${id}`, { method: "DELETE" }),
   publishAgent: (id: string, visibility: string, opts?: { pricePerKTokens?: number; revenueShare?: number }) =>
     req(`/api/agents/${id}/publish`, {

@@ -194,12 +194,53 @@
   let edges = $state.raw<Edge[]>(_g0.edges);
   let lastId = $state("restitution");
 
+  // Builder graph layout. Node positions are persisted server-side on the agent
+  // when you click "Enregistrer", then restored on load — so every box keeps the
+  // exact place you put it, across navigation and sessions. The layout is keyed
+  // by block type (blockKey), which is stable across reloads, unlike the raw node
+  // id whose numeric suffix is regenerated each time the graph is rebuilt.
+  function currentLayout(): Record<string, { x: number; y: number }> {
+    const map: Record<string, { x: number; y: number }> = {};
+    for (const n of nodes) map[blockKey(n.id)] = { x: n.position.x, y: n.position.y };
+    return map;
+  }
+  function applyLayout(layout: Record<string, { x: number; y: number }> | null | undefined) {
+    if (!layout) return;
+    nodes = nodes.map((n) =>
+      layout[blockKey(n.id)] ? { ...n, position: { ...layout[blockKey(n.id)] } } : n,
+    );
+  }
+  function parseLayout(raw: unknown): Record<string, any> | null {
+    if (!raw) return null;
+    try {
+      return typeof raw === "string" ? JSON.parse(raw || "{}") : (raw as any);
+    } catch {
+      return null;
+    }
+  }
+  // The full payload saved with the agent: every box position + the current
+  // pan/zoom of the canvas (under a reserved key) so the view also stays put.
+  function layoutPayload(): Record<string, any> {
+    const map: Record<string, any> = currentLayout();
+    map.__viewport = { x: viewport.x, y: viewport.y, zoom: viewport.zoom };
+    return map;
+  }
+  function applyViewport(layout: Record<string, any> | null | undefined) {
+    const v = layout?.__viewport;
+    if (v && typeof v.zoom === "number") {
+      viewport = { x: v.x ?? 0, y: v.y ?? 0, zoom: v.zoom };
+      viewRestored = true;
+    }
+  }
+
   function newAgent() {
     editingId = null; agentVisible = false;
     name = "Nouvel agent"; icon = "🐙"; description = ""; author = "You"; expertise = "";
     persona = ""; scaffoldDesc = "";
     autonomy = "full_auto"; triggerOn = ""; emit = ""; loopMinutes = defaultLoopMin(); goals = ""; checks = "";
     prompts = {}; params = { "trigger-0": { event: "manual" } }; counter = 0; lastId = "restitution";
+    // Reset the view guard so each agent re-fits unless it has a saved viewport.
+    viewRestored = false; viewport = { x: 0, y: 0, zoom: 1 };
     const g = freshGraph();
     nodes = g.nodes;
     edges = g.edges;
@@ -372,6 +413,8 @@
   // Drag from palette -> drop on canvas.
   let flowEl: HTMLDivElement;
   let viewport = $state.raw({ x: 0, y: 0, zoom: 1 });
+  // Once a saved view has been restored, stop auto-fitting so it stays put.
+  let viewRestored = $state(false);
   // Convert a screen position into flow coordinates (accounts for pan/zoom).
   // Defensive: if the canvas ref is stale (HMR) fall back so drop/context-menu
   // never throw and silently stop working.
@@ -573,6 +616,10 @@
       if (ALL_BLOCKS[tk]) { addBlock(tk); const id2 = lastId;
         for (const pk of PARAM_KEYS[tk] ?? []) if (tParams[pk]) { params[id2] = { ...(params[id2]||{}), [pk]: tParams[pk] }; } }
     }
+    // Restore the saved layout + canvas view so the schema reopens exactly as left.
+    const savedLayout = parseLayout((d.agent as any).layout);
+    applyLayout(savedLayout);
+    applyViewport(savedLayout);
     selected = "agent"; resetRun();
     await loadPersonalization(d.agent.id);
   }
@@ -582,6 +629,8 @@
     try {
       const r = await api.importToml(buildToml());
       editingId = r.id;
+      // Persist box positions + canvas view so the schema reopens exactly as left.
+      try { await api.setLayout(r.id, layoutPayload()); } catch { /* non-fatal */ }
       // A scheduled trigger node's interval overrides the global loop field.
       const schedNode = nodes.find((n) => blockKey(n.id) === "trigger_schedule");
       const schedMin = schedNode ? parseInt(params[schedNode.id]?.interval_min ?? "", 10) : NaN;
@@ -846,7 +895,7 @@
       </div>
     </div>
     <div class="flowwrap card" bind:this={flowEl} ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; }} ondrop={onDrop}>
-      <SvelteFlow colorMode="dark" bind:nodes bind:edges bind:viewport {nodeTypes} fitView onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu} onedgecontextmenu={onEdgeContextMenu} onpanecontextmenu={onPaneContextMenu} onconnect={onConnect}>
+      <SvelteFlow colorMode="dark" bind:nodes bind:edges bind:viewport {nodeTypes} fitView={!viewRestored} onnodeclick={onNodeClick} onnodecontextmenu={onNodeContextMenu} onedgecontextmenu={onEdgeContextMenu} onpanecontextmenu={onPaneContextMenu} onconnect={onConnect}>
         <Background gap={22} />
         <Controls />
         <MiniMap pannable zoomable />

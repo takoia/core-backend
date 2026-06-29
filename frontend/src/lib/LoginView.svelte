@@ -11,6 +11,18 @@
   let error = "";
   let busy = false;
 
+  // Toggle between signing in and self-service sign-up (when setup is done).
+  let mode: "login" | "register" = "login";
+  let rgName = "";
+  let rgEmail = "";
+  let rgPassword = "";
+  let rgConfirm = "";
+
+  function setMode(m: "login" | "register") {
+    mode = m;
+    error = "";
+  }
+
   // First-run setup wizard: shown when the instance has no users yet.
   let needsSetup = false;
   let suName = "";
@@ -31,6 +43,25 @@
       onAuthed(r.token);
     } catch {
       error = $t("login.error");
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function submitRegister() {
+    error = "";
+    if (rgPassword !== rgConfirm) {
+      error = $t("register.mismatch");
+      return;
+    }
+    busy = true;
+    try {
+      const r = await api.register(rgEmail.trim(), rgName.trim(), rgPassword);
+      localStorage.setItem("auth_token", r.token);
+      localStorage.setItem("auth_user", r.username);
+      onAuthed(r.token);
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t("register.error");
     } finally {
       busy = false;
     }
@@ -150,20 +181,47 @@
       </div>
     </form>
   {:else}
-  <form class="box" on:submit|preventDefault={submit}>
+  <form class="box" on:submit|preventDefault={mode === "login" ? submit : submitRegister}>
     <img class="logo" src={logo} alt="TakoIA" />
-    <h2>{$t("login.title")}</h2>
-    <p class="muted small">{$t("login.subtitle")}</p>
 
-    <label>{$t("login.username")}
-      <input bind:value={username} autocomplete="username" />
-    </label>
-    <label>{$t("login.password")}
-      <input type="password" bind:value={password} autocomplete="current-password" />
-    </label>
+    <div class="tabs">
+      <button type="button" class:active={mode === "login"} on:click={() => setMode("login")}>{$t("login.tab_signin")}</button>
+      <button type="button" class:active={mode === "register"} on:click={() => setMode("register")}>{$t("login.tab_signup")}</button>
+    </div>
 
-    {#if error}<p class="err">{error}</p>{/if}
-    <button class="primary" type="submit" disabled={busy || !password}>{$t("login.submit")}</button>
+    {#if mode === "login"}
+      <h2>{$t("login.title")}</h2>
+      <p class="muted small">{$t("login.subtitle")}</p>
+
+      <label>{$t("login.username")}
+        <input bind:value={username} autocomplete="username" />
+      </label>
+      <label>{$t("login.password")}
+        <input type="password" bind:value={password} autocomplete="current-password" />
+      </label>
+
+      {#if error}<p class="err">{error}</p>{/if}
+      <button class="primary" type="submit" disabled={busy || !password}>{$t("login.submit")}</button>
+    {:else}
+      <h2>{$t("register.title")}</h2>
+      <p class="muted small">{$t("register.subtitle")}</p>
+
+      <label>{$t("register.name")}
+        <input bind:value={rgName} autocomplete="name" />
+      </label>
+      <label>{$t("register.email")}
+        <input type="email" bind:value={rgEmail} autocomplete="username" />
+      </label>
+      <label>{$t("register.password")}
+        <input type="password" bind:value={rgPassword} autocomplete="new-password" />
+      </label>
+      <label>{$t("register.confirm")}
+        <input type="password" bind:value={rgConfirm} autocomplete="new-password" />
+      </label>
+
+      {#if error}<p class="err">{error}</p>{/if}
+      <button class="primary" type="submit" disabled={busy || !rgEmail || !rgPassword}>{$t("register.submit")}</button>
+    {/if}
 
     <div class="lang">
       <button type="button" class:active={$locale === "fr"} on:click={() => setLocale("fr")}>FR</button>
@@ -178,6 +236,9 @@
   .bg { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
   .box { position: relative; z-index: 1; background: color-mix(in srgb, var(--panel) 80%, transparent); border: 1.5px solid color-mix(in srgb, var(--accent) 60%, transparent); border-radius: 16px; padding: 2rem; width: 360px; max-width: 90vw; text-align: center; backdrop-filter: blur(10px); box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55), 0 0 56px color-mix(in srgb, var(--accent) 24%, transparent), inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent); }
   .logo { width: 120px; height: 120px; border-radius: 50%; box-shadow: 0 0 34px color-mix(in srgb, var(--accent) 45%, transparent); }
+  .tabs { display: flex; gap: 0.4rem; margin-top: 1rem; background: color-mix(in srgb, var(--bg) 70%, transparent); border: 1px solid var(--border); border-radius: 10px; padding: 0.25rem; }
+  .tabs button { flex: 1; background: transparent; border: none; color: var(--muted); border-radius: 7px; padding: 0.45rem 0.5rem; cursor: pointer; font: inherit; font-size: 0.85rem; font-weight: 600; transition: background 0.15s, color 0.15s; }
+  .tabs button.active { background: var(--accent); color: #04231a; }
   h2 { margin: 0.8rem 0 0.2rem; font-size: 1.15rem; }
   label { display: block; font-size: 0.85rem; color: var(--muted); margin-top: 0.9rem; text-align: left; }
   input { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.55rem 0.7rem; font: inherit; margin-top: 0.25rem; }

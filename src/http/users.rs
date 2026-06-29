@@ -195,7 +195,7 @@ impl FromRequestParts<AppState> for CurrentUser {
 /// means). The path is matched with or without the `/api` nest prefix.
 fn is_public_path(path: &str) -> bool {
     let p = path.strip_prefix("/api").unwrap_or(path);
-    matches!(p, "/health" | "/setup" | "/setup/status" | "/login" | "/marketplace")
+    matches!(p, "/health" | "/setup" | "/setup/status" | "/login" | "/register" | "/marketplace")
         || p.starts_with("/v1/")
         || p.starts_with("/webhooks/")
 }
@@ -285,6 +285,66 @@ pub async fn login(
             .bind(&uid)
             .fetch_one(&state.db)
             .await?;
+    Ok(Json(json!({ "token": token, "username": user.email, "user": user.to_json() })))
+}
+
+#[derive(Deserialize)]
+pub struct RegisterInput {
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
+    pub password: String,
+}
+
+/// `POST /api/register` — public self-service sign-up. Creates a non-admin user
+/// in the default account and opens a session (auto-login). The very first user
+/// of a fresh instance must use `/api/setup` instead (becomes the admin); this
+/// endpoint is for everyone who joins afterwards.
+pub async fn register(
+    State(state): State<AppState>,
+    Json(body): Json<RegisterInput>,
+) -> AppResult<Json<Value>> {
+    let email = body.email.trim();
+    if email.is_empty() || body.password.is_empty() {
+        return Err(AppError::BadRequest("email and password are required".into()));
+    }
+    // Refuse on a fresh instance: the first account must be the admin via setup.
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+        .fetch_one(&state.db)
+        .await?;
+    if count.0 == 0 {
+        return Err(AppError::Forbidden("run first-run setup before registering".into()));
+    }
+    let name = if body.name.trim().is_empty() {
+        email
+    } else {
+        body.name.trim()
+    };
+    let uid = Uuid::new_v4().to_string();
+    let hash = hash_password(&body.password).map_err(AppError::Other)?;
+    sqlx::query(
+        "INSERT INTO users (id, account_id, email, name, password_hash, is_admin) VALUES (?, ?, ?, ?, ?, 0)",
+    )
+    .bind(&uid)
+    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(email)
+    .bind(name)
+    .bind(&hash)
+    .execute(&state.db)
+    .await
+    .map_err(|_| AppError::BadRequest("email already exists".into()))?;
+    let token = new_token();
+    sqlx::query("INSERT INTO user_sessions (token, user_id, expires_at) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now','+7 days'))")
+        .bind(&token)
+        .bind(&uid)
+        .execute(&state.db)
+        .await?;
+    let user: User =
+        sqlx::query_as("SELECT id, account_id, email, name, is_admin FROM users WHERE id = ?")
+            .bind(&uid)
+            .fetch_one(&state.db)
+            .await?;
+    tracing::info!(email = %email, "new user self-registered");
     Ok(Json(json!({ "token": token, "username": user.email, "user": user.to_json() })))
 }
 

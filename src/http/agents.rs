@@ -29,13 +29,14 @@ struct AgentRow {
     emit: String,
     icon: String,
     persona: String,
+    layout: String,
 }
 
 /// `GET /api/agents` — list this account's agents.
 pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
     let rows = sqlx::query_as::<_, AgentRow>(
         r#"SELECT id, name, description, autonomy_level, expertise_domain, visibility,
-                  price_per_run_usd, runs_count, created_at, author, trigger_on, emit, icon, persona
+                  price_per_run_usd, runs_count, created_at, author, trigger_on, emit, icon, persona, layout
            FROM agents WHERE account_id = ? ORDER BY created_at DESC"#,
     )
     .bind(DEFAULT_ACCOUNT_ID)
@@ -48,7 +49,7 @@ pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
 pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Value>> {
     let agent = sqlx::query_as::<_, AgentRow>(
         r#"SELECT id, name, description, autonomy_level, expertise_domain, visibility,
-                  price_per_run_usd, runs_count, created_at, author, trigger_on, emit, icon, persona
+                  price_per_run_usd, runs_count, created_at, author, trigger_on, emit, icon, persona, layout
            FROM agents WHERE id = ?"#,
     )
     .bind(&id)
@@ -272,6 +273,28 @@ pub async fn import_toml(State(state): State<AppState>, body: String) -> AppResu
         .await
         .map_err(AppError::Other)?;
     Ok(Json(json!({ "id": id })))
+}
+
+/// `PUT /api/agents/:id/layout` — persist the builder graph layout (node
+/// positions) so every box keeps its place across sessions. Accepts either a
+/// bare JSON map or `{ "layout": { ... } }`.
+pub async fn set_layout(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> AppResult<Json<Value>> {
+    let layout = body.get("layout").cloned().unwrap_or(body);
+    let serialized = serde_json::to_string(&layout).unwrap_or_else(|_| "{}".into());
+    let res = sqlx::query("UPDATE agents SET layout = ? WHERE id = ? AND account_id = ?")
+        .bind(&serialized)
+        .bind(&id)
+        .bind(DEFAULT_ACCOUNT_ID)
+        .execute(&state.db)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound("agent not found".into()));
+    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// Run a one-shot `claude -p` generation and return the inner JSON object the

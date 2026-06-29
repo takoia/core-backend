@@ -20,3 +20,7 @@ frontend/.vite
 # OS / editor
 .DS_Store
 *.swp
+
+# Local-only: userspace build toolchain + runtime logs
+/.toolchain
+server.log
