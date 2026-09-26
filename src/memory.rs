@@ -164,18 +164,14 @@ impl Memory {
         // A small English + French stopword set: high-frequency, low-signal
         // tokens (>= 4 chars) that would otherwise dilute keyword recall.
         const STOPWORDS: &[&str] = &[
-            "this", "that", "with", "from", "have", "they", "them", "then",
-            "their", "there", "would", "could", "should", "about", "which",
-            "when", "what", "were", "will", "your",
-            "pour", "dans", "avec", "les", "des", "une", "que", "qui", "est",
-            "sont", "cette", "vous", "nous", "mais", "comme", "plus",
+            "this", "that", "with", "from", "have", "they", "them", "then", "their", "there",
+            "would", "could", "should", "about", "which", "when", "what", "were", "will", "your",
+            "pour", "dans", "avec", "les", "des", "une", "que", "qui", "est", "sont", "cette",
+            "vous", "nous", "mais", "comme", "plus",
         ];
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut out: Vec<String> = Vec::new();
-        for token in content
-            .to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-        {
+        for token in content.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
             if token.len() < 4 || STOPWORDS.contains(&token) {
                 continue;
             }
@@ -194,10 +190,14 @@ impl Memory {
         // User-specific memories are protected from decay/consolidation by
         // storing them at high importance; other (generic step) memories keep
         // ICM's default (medium).
-        let high_importance = matches!(
-            key,
-            "correction" | "preference" | "demonstration" | "instruction"
-        );
+        // User-authored signal outranks the agent's own output: corrections and
+        // preferences must survive consolidation and decay; run summaries and
+        // self-reflections are the bulk that decay should thin out first.
+        let importance = match key {
+            "correction" | "preference" | "demonstration" | "instruction" => Some("high"),
+            "run-summary" | "reflection" => Some("low"),
+            _ => None,
+        };
         // Keyword set: the key first (generic step name), then salient terms
         // derived from the content so keyword recall can match content queries.
         let mut keywords = vec![key.to_string()];
@@ -216,23 +216,21 @@ impl Memory {
             .arg("--db")
             .arg(&self.icm_db_path)
             .arg("--no-embeddings");
-        if high_importance {
-            cmd.arg("--importance").arg("high");
+        if let Some(level) = importance {
+            cmd.arg("--importance").arg(level);
         }
         let icm = cmd.output().await;
         if let Err(e) = &icm {
             tracing::warn!(agent_id, error = %e, "icm store failed (db still persisted)");
         }
 
-        sqlx::query(
-            r#"INSERT INTO memories (id, agent_id, key, content) VALUES (?, ?, ?, ?)"#,
-        )
-        .bind(Uuid::new_v4().to_string())
-        .bind(agent_id)
-        .bind(key)
-        .bind(content)
-        .execute(&self.db)
-        .await?;
+        sqlx::query(r#"INSERT INTO memories (id, agent_id, key, content) VALUES (?, ?, ?, ?)"#)
+            .bind(Uuid::new_v4().to_string())
+            .bind(agent_id)
+            .bind(key)
+            .bind(content)
+            .execute(&self.db)
+            .await?;
         Ok(())
     }
 
@@ -348,7 +346,7 @@ impl Memory {
             .filter(|l| l.contains('/')) // topic rows contain the slug path
             .filter_map(|l| {
                 let count = l.split_whitespace().last()?.parse::<i64>().ok()?;
-                let topic = l.rsplitn(2, char::is_whitespace).nth(1)?.trim().to_string();
+                let topic = l.rsplit_once(char::is_whitespace)?.0.trim().to_string();
                 Some(serde_json::json!({ "topic": topic, "count": count }))
             })
             .collect()
@@ -410,10 +408,18 @@ impl Memory {
             .map(|arr| {
                 arr.iter()
                     .map(|m| IcmEntry {
-                        summary: m.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        summary: m
+                            .get("summary")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         weight: m.get("weight").and_then(|v| v.as_f64()).unwrap_or(1.0),
                         access_count: m.get("access_count").and_then(|v| v.as_i64()).unwrap_or(0),
-                        importance: m.get("importance").and_then(|v| v.as_str()).unwrap_or("medium").to_string(),
+                        importance: m
+                            .get("importance")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("medium")
+                            .to_string(),
                     })
                     .collect()
             })
@@ -453,7 +459,9 @@ impl Memory {
                 self.resync_mirror_from_icm(agent_id).await;
                 tracing::info!(agent_id, "consolidated agent memory");
             }
-            Ok(o) => tracing::warn!(agent_id, stderr = %String::from_utf8_lossy(&o.stderr), "icm consolidate failed"),
+            Ok(o) => {
+                tracing::warn!(agent_id, stderr = %String::from_utf8_lossy(&o.stderr), "icm consolidate failed")
+            }
             Err(e) => tracing::warn!(agent_id, error = %e, "icm consolidate spawn failed"),
         }
     }
@@ -465,7 +473,14 @@ impl Memory {
             .output()
             .await;
         let _ = Command::new("icm")
-            .args(["prune", "--threshold", "0.1", "--db", &self.icm_db_path, "--no-embeddings"])
+            .args([
+                "prune",
+                "--threshold",
+                "0.1",
+                "--db",
+                &self.icm_db_path,
+                "--no-embeddings",
+            ])
             .output()
             .await;
     }

@@ -11,39 +11,66 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
     pub output: String,
+    /// Model that produced the output when an LLM was involved (for pricing).
+    pub model: String,
     pub usage: TokenUsage,
 }
 
 /// Fetch public market data for a symbol (Yahoo Finance, no API key).
 /// `symbol` examples: AAPL, MSFT, ^IXIC (NASDAQ Composite), NVDA.
 pub async fn market_data(symbol: &str) -> Result<ToolOutput> {
-    let sym = if symbol.trim().is_empty() { "^IXIC" } else { symbol.trim() };
-    let url = format!("https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5d");
-    let resp = reqwest::Client::new()
+    let sym = if symbol.trim().is_empty() {
+        "^IXIC"
+    } else {
+        symbol.trim()
+    };
+    let url =
+        format!("https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5d");
+    let resp = crate::net::http_client()
         .get(&url)
+        .timeout(std::time::Duration::from_secs(20))
         .header("User-Agent", "takoia-core")
         .send()
         .await?;
     if !resp.status().is_success() {
-        return Err(anyhow!("market data request for {sym} failed: {}", resp.status()));
+        return Err(anyhow!(
+            "market data request for {sym} failed: {}",
+            resp.status()
+        ));
     }
     let v: serde_json::Value = resp.json().await?;
     let result = &v["chart"]["result"][0];
     let meta = &result["meta"];
     let price = meta["regularMarketPrice"].as_f64().unwrap_or(0.0);
-    let prev = meta["chartPreviousClose"].as_f64().or_else(|| meta["previousClose"].as_f64()).unwrap_or(price);
+    let prev = meta["chartPreviousClose"]
+        .as_f64()
+        .or_else(|| meta["previousClose"].as_f64())
+        .unwrap_or(price);
     let change = price - prev;
-    let pct = if prev != 0.0 { change / prev * 100.0 } else { 0.0 };
+    let pct = if prev != 0.0 {
+        change / prev * 100.0
+    } else {
+        0.0
+    };
     let cur = meta["currency"].as_str().unwrap_or("");
     let closes: Vec<String> = result["indicators"]["quote"][0]["close"]
         .as_array()
-        .map(|a| a.iter().filter_map(|x| x.as_f64()).map(|x| format!("{x:.2}")).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_f64())
+                .map(|x| format!("{x:.2}"))
+                .collect()
+        })
         .unwrap_or_default();
     let output = format!(
         "market_data {sym}: last {price:.2} {cur} ({change:+.2}, {pct:+.2}%), prev close {prev:.2}. Recent closes: {}.",
         closes.join(", ")
     );
-    Ok(ToolOutput { output, usage: TokenUsage::default() })
+    Ok(ToolOutput {
+        output,
+        model: String::new(),
+        usage: TokenUsage::default(),
+    })
 }
 
 /// Post a message to a Discord webhook (the agent's "alert" channel).
@@ -52,12 +79,15 @@ pub async fn send_discord(webhook_url: &str, content: &str) -> Result<()> {
         return Err(anyhow!("no discord webhook configured"));
     }
     // SSRF guard: the webhook URL is agent-controlled — block internal targets.
-    crate::net::validate_outbound_url(webhook_url).await?;
+    let addrs = crate::net::validate_outbound_url(webhook_url).await?;
     let body = serde_json::json!({ "content": content.chars().take(1900).collect::<String>() });
     // Discord's Cloudflare rejects requests with no User-Agent (error 1010).
-    let resp = crate::net::safe_client()
+    let resp = crate::net::pinned_client(webhook_url, &addrs)?
         .post(webhook_url)
-        .header("User-Agent", "TakoIA-bot/1.0 (+https://takoia.szymkowiak.fr)")
+        .header(
+            "User-Agent",
+            "TakoIA-bot/1.0 (+https://takoia.szymkowiak.fr)",
+        )
         .json(&body)
         .send()
         .await?;
@@ -77,6 +107,7 @@ pub async fn execute(
         "web_search" => web_search(provider, input).await,
         "write_report" => Ok(ToolOutput {
             output: input.to_string(),
+            model: String::new(),
             usage: TokenUsage::default(),
         }),
         other => Err(anyhow!("unknown tool: {other}")),
@@ -99,6 +130,7 @@ async fn web_search(provider: &Arc<dyn LlmProvider>, query: &str) -> Result<Tool
     let completion = provider.complete(req).await?;
     Ok(ToolOutput {
         output: completion.content,
+        model: completion.model,
         usage: completion.usage,
     })
 }

@@ -21,7 +21,6 @@ pub struct Config {
     pub master_key: [u8; 32],
     pub default_llm_provider: String,
     pub provider_seeds: Vec<ProviderSeed>,
-    pub discord_webhook_url: Option<String>,
     /// Path to the dedicated ICM SQLite database for agent memory.
     pub icm_db_path: String,
     /// Optional Claude plan token (`claude setup-token`) used to seed claude_max.
@@ -34,14 +33,19 @@ pub struct Config {
     /// Admin password, only set when `ADMIN_PASSWORD` is provided. When `None`,
     /// no admin is seeded and the first-run setup wizard creates it instead.
     pub admin_password: Option<String>,
-    /// Opaque session token returned on successful login.
-    pub session_token: String,
     /// How often the background memory maintenance pass runs (consolidate +
     /// decay + prune), in seconds. Lower it to see memory grow in near real time.
     pub memory_maintenance_interval_secs: u64,
     /// How often the inner-life pass runs (reflection, mood update, initiative,
     /// kept commitments), in seconds. Lower it to watch the agent come alive.
     pub inner_life_interval_secs: u64,
+    /// Demo mode (`DEMO_MODE=true`): when no LLM provider answers, steps fall
+    /// back to the offline canned provider so a run still completes. Off by
+    /// default: in production a provider failure fails the run instead of
+    /// delivering demo text as if it were real.
+    pub demo_mode: bool,
+    /// Per-model notional pricing (`LLM_PRICING`, `LLM_PRICING_DEFAULT`).
+    pub pricing: crate::pricing::Pricing,
 }
 
 impl Config {
@@ -56,7 +60,6 @@ impl Config {
         let default_llm_provider = env_or("DEFAULT_LLM_PROVIDER", "claude_max");
         let provider_seeds = load_provider_seeds();
 
-        let discord_webhook_url = non_empty(std::env::var("DISCORD_WEBHOOK_URL").ok());
         let icm_db_path = env_or("ICM_DB_PATH", "data/icm.db");
         let claude_max_token = non_empty(std::env::var("CLAUDE_MAX_TOKEN").ok());
         // Absolute path OUTSIDE the project git tree so the agent's claude -p
@@ -67,7 +70,6 @@ impl Config {
         let admin_password = std::env::var("ADMIN_PASSWORD")
             .ok()
             .filter(|p| !p.trim().is_empty());
-        let session_token = random_token(24);
 
         // Memory maintenance cadence. Default 300s (5 min) so consolidation is
         // visible without hammering the LLM; clamped to >= 30s.
@@ -85,6 +87,14 @@ impl Config {
             .filter(|n| *n >= 60)
             .unwrap_or(900);
 
+        let demo_mode = std::env::var("DEMO_MODE")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+        let pricing = crate::pricing::Pricing::from_env(
+            std::env::var("LLM_PRICING").ok().as_deref(),
+            std::env::var("LLM_PRICING_DEFAULT").ok().as_deref(),
+        )?;
+
         Ok(Self {
             bind_addr,
             frontend_dev_origin,
@@ -92,26 +102,17 @@ impl Config {
             master_key,
             default_llm_provider,
             provider_seeds,
-            discord_webhook_url,
             icm_db_path,
             claude_max_token,
             agent_workdir,
             admin_username,
             admin_password,
-            session_token,
             memory_maintenance_interval_secs,
             inner_life_interval_secs,
+            demo_mode,
+            pricing,
         })
     }
-}
-
-/// Generate a URL-safe random token of roughly `bytes * 4/3` characters.
-fn random_token(bytes: usize) -> String {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-    use rand::RngCore;
-    let mut buf = vec![0u8; bytes];
-    rand::thread_rng().fill_bytes(&mut buf);
-    URL_SAFE_NO_PAD.encode(buf)
 }
 
 fn env_or(key: &str, default: &str) -> String {

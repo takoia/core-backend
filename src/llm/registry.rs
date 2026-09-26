@@ -16,6 +16,9 @@ pub struct ProviderRegistry {
     providers: HashMap<String, Arc<dyn LlmProvider>>,
     canned: Arc<dyn LlmProvider>,
     default_name: String,
+    /// Demo mode: an unknown/missing provider resolves to the canned one
+    /// instead of being an error.
+    demo_mode: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -36,6 +39,7 @@ impl ProviderRegistry {
         config_default: &str,
         agent_workdir: &str,
         sandbox: &crate::sandbox::SandboxConfig,
+        demo_mode: bool,
     ) -> Result<Self> {
         let rows = sqlx::query_as::<_, LlmRow>(
             r#"SELECT name, base_url, model, encrypted_secret, is_default
@@ -65,7 +69,7 @@ impl ProviderRegistry {
                     row.name.clone(),
                     Some(row.model),
                     secret,
-                    Some(agent_workdir.to_string()),
+                    agent_workdir.to_string(),
                     sandbox.clone(),
                 ))
             } else {
@@ -84,28 +88,39 @@ impl ProviderRegistry {
         }
 
         let canned: Arc<dyn LlmProvider> = Arc::new(CannedProvider::new());
-        Ok(Self { providers, canned, default_name })
+        Ok(Self {
+            providers,
+            canned,
+            default_name,
+            demo_mode,
+        })
     }
 
     /// Resolve a provider by name, falling back to the default, then to canned.
-    pub fn resolve(&self, name: Option<&str>) -> Arc<dyn LlmProvider> {
+    pub fn resolve(&self, name: Option<&str>) -> Result<Arc<dyn LlmProvider>> {
         let wanted = name.unwrap_or(&self.default_name);
         if let Some(p) = self.providers.get(wanted) {
-            return p.clone();
+            return Ok(p.clone());
         }
         if let Some(p) = self.providers.get(&self.default_name) {
-            return p.clone();
+            return Ok(p.clone());
         }
-        self.canned.clone()
+        if self.demo_mode {
+            return Ok(self.canned.clone());
+        }
+        Err(anyhow::anyhow!(
+            "no LLM provider named '{wanted}' (nor a default '{}') is configured",
+            self.default_name
+        ))
+    }
+
+    /// Whether provider failures may fall back to the canned demo provider.
+    pub fn demo_mode(&self) -> bool {
+        self.demo_mode
     }
 
     /// The canned offline provider (used as a last-resort fallback on error).
     pub fn canned(&self) -> Arc<dyn LlmProvider> {
         self.canned.clone()
-    }
-
-    /// Names of all configured (non-canned) providers.
-    pub fn names(&self) -> Vec<String> {
-        self.providers.keys().cloned().collect()
     }
 }

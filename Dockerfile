@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
 # TakoIA core-backend — one-command container.
 # Builds the Svelte frontend + the Rust release binary into a slim runtime that
-# needs NO external services. Without `claude`/`icm` it runs in demo mode:
-# agent runs complete with offline canned content and SQLite-backed memory.
+# needs NO external services. With DEMO_MODE=true and no `claude`/`icm`, agent
+# runs complete with offline canned content (flagged, never billed).
 #
 #   docker build -t takoia .
-#   docker run -p 8080:8080 takoia      # open http://localhost:8080 (admin / takoia)
+#   docker run -p 8080:8080 -e DEMO_MODE=true takoia   # open http://localhost:8080
 
 # ---- Stage 1: build the Svelte frontend bundle ----
 FROM oven/bun:1 AS frontend
@@ -16,7 +16,15 @@ RUN bun install && bun run build
 # ---- Stage 2: build the Rust release binary ----
 FROM rust:1-bookworm AS backend
 WORKDIR /app
-COPY . .
+# Dependencies first, against a stub main, so they are cached until Cargo.toml
+# or Cargo.lock change; the sources are copied afterwards.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src && echo 'fn main() {}' > src/main.rs \
+ && cargo build --release \
+ && rm -rf src target/release/takoia target/release/deps/takoia-*
+COPY migrations ./migrations
+COPY assets ./assets
+COPY src ./src
 RUN cargo build --release
 
 # ---- Stage 3: minimal runtime ----
@@ -30,10 +38,11 @@ COPY --from=frontend /app/frontend/dist /app/frontend/dist
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh && mkdir -p /app/data
 # Sensible defaults so `docker run` works with zero configuration. Override any
-# of these with `-e`. MASTER_KEY is generated at startup if unset (see entrypoint).
+# of these with `-e`. No admin password is baked in: the first visit opens the
+# setup wizard, or pass ADMIN_PASSWORD. MASTER_KEY must be provided unless
+# DEMO_MODE=true (see entrypoint).
 ENV BIND_ADDR=0.0.0.0:8080 \
     ADMIN_USERNAME=admin \
-    ADMIN_PASSWORD=takoia \
     DATABASE_URL="sqlite:///app/data/takoia.db?mode=rwc" \
     ICM_DB_PATH=/app/data/icm.db \
     AGENT_WORKDIR=/tmp/takoia-agent-workspace \

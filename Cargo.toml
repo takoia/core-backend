@@ -1,6 +1,6 @@
 [package]
 name = "takoia-core"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2021"
 description = "TakoIA core-backend: autonomous agent orchestrator (4-step loop)"
 license = "BUSL-1.1"
@@ -15,7 +15,6 @@ tokio = { version = "1", features = ["full"] }
 # Web
 axum = { version = "0.7", features = ["macros"] }
 tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
-tower = "0.4"
 # DB
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
@@ -27,8 +26,9 @@ sqlx = { version = "0.8", default-features = false, features = [
     "chrono",
     "json",
 ] }
-# Hashing (API key digests)
+# Hashing (API key digests) + webhook signatures
 sha2 = "0.10"
+hmac = "0.12"
 # HTTP client (LLM providers + connectors)
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
@@ -60,21 +60,28 @@ chacha20poly1305 = "0.10"
 argon2 = "0.5"
 base64 = "0.22"
 rand = "0.8"
-# Native execution sandbox (Linux Landlock LSM, filesystem confinement)
-landlock = "0.4"
 # Scheduling
 cron = "0.12"
 # SSE / async streams
 futures = "0.3"
 async-stream = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
-# Embed frontend assets into the single binary (demo build)
-rust-embed = { version = "8", features = ["mime-guess"], optional = true }
-mime_guess = { version = "2", optional = true }
 
-[features]
-# Enable to embed frontend/dist into the binary for a single-file demo build.
-embed-frontend = ["dep:rust-embed", "dep:mime_guess"]
+# Native execution sandbox (Linux Landlock LSM, filesystem confinement). The
+# crate only builds on Linux, so it is target-gated: on other hosts the
+# `landlock` sandbox backend refuses to run (see `sandbox.rs`) instead of
+# breaking the whole build.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+# Router-level tests drive the axum Router with `ServiceExt::oneshot` (axum 0.7
+# itself depends on tower 0.5).
+tower = { version = "0.5", features = ["util"] }
+
+# The VM and the Docker image run this binary; optimise it like one.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

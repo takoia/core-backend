@@ -2,7 +2,6 @@
 //! full-auto agent loops and accumulates ICM memory over time. Supports a cron
 //! expression or a simple `interval_seconds` (for fast local learning tests).
 
-use crate::bootstrap::DEFAULT_ACCOUNT_ID;
 use crate::db::Db;
 use crate::state::AppState;
 use anyhow::Result;
@@ -112,13 +111,13 @@ async fn enqueue_run(db: &Db, s: &ScheduleRow) -> Result<()> {
     let mut tx = db.begin().await?;
     sqlx::query(
         r#"INSERT INTO objectives (id, account_id, agent_id, title, prompt)
-           VALUES (?, ?, ?, ?, ?)"#,
+           SELECT ?, account_id, ?, ?, ? FROM agents WHERE id = ?"#,
     )
     .bind(&objective_id)
-    .bind(DEFAULT_ACCOUNT_ID)
     .bind(&s.agent_id)
     .bind(&title)
     .bind(&s.prompt)
+    .bind(&s.agent_id)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -141,7 +140,11 @@ fn compute_next(s: &ScheduleRow, now: chrono::DateTime<Utc>) -> String {
     if let Some(secs) = s.interval_seconds.filter(|v| *v > 0) {
         // Circadian rhythm: the agent slows down during quiet hours (00–06 UTC),
         // like a person resting at night.
-        let circadian = if (0..6).contains(&now.hour()) { 2.0 } else { 1.0 };
+        let circadian = if (0..6).contains(&now.hour()) {
+            2.0
+        } else {
+            1.0
+        };
         // Jitter ±15% so the cadence feels organic instead of metronomic.
         let jitter = rand::thread_rng().gen_range(0.85..1.15);
         let effective = (((secs as f64) * circadian * jitter).round() as i64).max(1);

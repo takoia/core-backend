@@ -155,10 +155,7 @@ impl EventBus {
                     tracing::warn!("failed to roll back event_log batch: {e}");
                 }
             } else if let Err(e) = tx.commit().await {
-                tracing::warn!(
-                    "failed to commit {} event_log rows: {e}",
-                    batch.len()
-                );
+                tracing::warn!("failed to commit {} event_log rows: {e}", batch.len());
             }
         }
     }

@@ -15,7 +15,6 @@ pub struct OpenAiCompatProvider {
     base_url: String,
     api_key: Option<String>,
     default_model: String,
-    client: reqwest::Client,
 }
 
 impl OpenAiCompatProvider {
@@ -32,7 +31,6 @@ impl OpenAiCompatProvider {
             base_url,
             api_key,
             default_model: default_model.into(),
-            client: reqwest::Client::new(),
         }
     }
 }
@@ -62,7 +60,11 @@ impl LlmProvider for OpenAiCompatProvider {
         };
 
         let url = format!("{}/chat/completions", self.base_url);
-        let mut builder = self.client.post(&url).json(&body);
+        // Generous: a chat completion can legitimately take minutes.
+        let mut builder = crate::net::http_client()
+            .post(&url)
+            .timeout(std::time::Duration::from_secs(300))
+            .json(&body);
         if let Some(key) = &self.api_key {
             builder = builder.bearer_auth(key);
         }
@@ -128,7 +130,10 @@ impl<'a> From<&'a Message> for WireMessage<'a> {
             Role::User => "user",
             Role::Assistant => "assistant",
         };
-        WireMessage { role, content: &m.content }
+        WireMessage {
+            role,
+            content: &m.content,
+        }
     }
 }
 

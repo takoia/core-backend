@@ -3,6 +3,7 @@
 //! images, so a video is analyzed as an ordered sequence of sampled frames.
 
 use crate::error::{AppError, AppResult};
+use crate::llm::claude_cli::{self, ClaudeRun, ClaudeRuntime, ToolSet};
 use crate::state::AppState;
 use axum::extract::State;
 use axum::Json;
@@ -10,17 +11,14 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 use uuid::Uuid;
 
 /// Hard cap on frames per request to bound cost and context size.
 const MAX_FRAMES: usize = 40;
 
-/// Hard wall-clock limit for the `claude -p` video analysis invocation. A hung
-/// CLI must not pin the HTTP handler (and its checked-out DB connection); on
-/// timeout the child is dropped and `kill_on_drop(true)` terminates it.
-const VIDEO_TIMEOUT_SECS: u64 = 180;
+/// Hard wall-clock limit for the video analysis run (the child is killed on
+/// expiry, see `claude_cli::run`).
+const VIDEO_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Deserialize)]
 pub struct AnalyzeVideo {
@@ -39,15 +37,23 @@ pub struct AnalyzeVideo {
 /// `POST /api/video/analyze` — analyze sampled video frames with claude -p.
 pub async fn analyze(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Json(body): Json<AnalyzeVideo>,
 ) -> AppResult<Json<Value>> {
+    // Each call spends the operator's plan on up to MAX_FRAMES images: attach it
+    // to an agent the caller may edit, or be an admin.
+    match &body.agent_id {
+        Some(aid) => crate::http::users::require_agent_role(&state, aid, &me, "editor").await?,
+        None => crate::http::users::require_admin(&me)?,
+    }
     if body.frames.is_empty() {
         return Err(AppError::BadRequest("no frames provided".into()));
     }
     let frames: Vec<&String> = body.frames.iter().take(MAX_FRAMES).collect();
 
     // Write frames into an isolated per-request directory.
-    let dir = std::path::Path::new(&state.config.agent_workdir).join(format!("video-{}", Uuid::new_v4()));
+    let dir =
+        std::path::Path::new(&state.config.agent_workdir).join(format!("video-{}", Uuid::new_v4()));
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| AppError::Other(e.into()))?;
@@ -93,64 +99,33 @@ pub async fn analyze(
         paths.join("\n")
     );
 
-    let mut child = Command::new("claude")
-        .arg("-p")
-        .arg("--output-format")
-        .arg("json")
-        .arg("--strict-mcp-config")
-        .arg("--allowedTools")
-        .arg("Read")
-        .current_dir(&dir)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        // Guarantee the subprocess dies if we drop the child on timeout.
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to start AI analysis: {e}")))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(prompt.as_bytes()).await;
-        drop(stdin);
-    }
-    // Race the subprocess against a hard timeout. On elapse, the child is
-    // dropped here and `kill_on_drop(true)` terminates the hung process.
-    let output = match tokio::time::timeout(
-        Duration::from_secs(VIDEO_TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(res) => res.map_err(|e| AppError::Other(e.into()))?,
-        Err(_elapsed) => {
-            // Best-effort cleanup of the frame directory before returning.
-            let _ = tokio::fs::remove_dir_all(&dir).await;
-            return Err(AppError::Other(anyhow::anyhow!(
-                "AI analysis exceeded {VIDEO_TIMEOUT_SECS}s timeout"
-            )));
-        }
+    // The frames directory is the run's workdir: the only place the sandboxed
+    // child may read, and the tool set is Read only.
+    let rt = ClaudeRuntime {
+        binary: "claude".to_string(),
+        token: state.config.claude_max_token.clone(),
+        workdir: dir.to_string_lossy().to_string(),
+        sandbox: crate::sandbox::active(&state.db).await,
+        steering: false,
     };
-
-    // Best-effort cleanup of the frame directory.
+    let out = claude_cli::run(
+        &rt,
+        ClaudeRun {
+            system: None,
+            prompt: &prompt,
+            model: None,
+            tools: ToolSet::ReadOnly,
+            timeout: VIDEO_TIMEOUT,
+        },
+    )
+    .await;
     let _ = tokio::fs::remove_dir_all(&dir).await;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppError::Other(anyhow::anyhow!(
-            "AI analysis failed: {}",
-            stderr.chars().take(300).collect::<String>()
-        )));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: Value = serde_json::from_str(stdout.trim())
-        .map_err(|e| AppError::Other(anyhow::anyhow!("invalid AI analysis output: {e}")))?;
-    let analysis = parsed
-        .get("result")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let usage = parsed.get("usage").cloned().unwrap_or(json!({}));
+    let out = out.map_err(|e| AppError::Other(anyhow::anyhow!("AI analysis failed: {e}")))?;
+    let analysis = out.result;
+    let usage = json!({
+        "input_tokens": out.usage.prompt_tokens,
+        "output_tokens": out.usage.completion_tokens,
+    });
 
     // Try to parse the result as a JSON array of extracted items; fall back to a
     // single free-text item so the human always has something to confirm.
@@ -186,7 +161,11 @@ pub async fn analyze(
 /// Parse the model output into a list of `{info, detail}` items, tolerating
 /// surrounding prose or code fences.
 fn extract_items(text: &str) -> Vec<Value> {
-    let trimmed = text.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```");
+    let trimmed = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```");
     let slice = match (trimmed.find('['), trimmed.rfind(']')) {
         (Some(a), Some(b)) if b > a => &trimmed[a..=b],
         _ => trimmed,

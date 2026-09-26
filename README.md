@@ -169,7 +169,7 @@ documents every variable read by `src/config.rs`.
 |---|---|---|
 | `DATABASE_URL` | `sqlite://data/takoia.db?mode=rwc` | Main SQLite database (job queue, agents, marketplace). The file and its parent dir are created on demand. |
 | `ICM_DB_PATH` | `data/icm.db` | Dedicated SQLite database used by the `icm` CLI for agent long-term memory. |
-| `AGENT_WORKDIR` | `/tmp/takoia-agent-workspace` | Neutral working directory for the agent's `claude -p` subprocesses, deliberately **outside** the project git tree so the CLI does not pick up the host `CLAUDE.md` or trigger project-scoped ICM recall. |
+| `AGENT_WORKDIR` | `/tmp/takoia-agent-workspace` | Root of the per-agent working directories for `claude -p` subprocesses (one subdirectory per agent, each with its own `tmp/`), deliberately **outside** the project git tree so the CLI does not pick up the host `CLAUDE.md` or trigger project-scoped ICM recall. The child process gets a cleared environment (PATH, HOME, TMPDIR, LANG, the plan token) — never the server's. |
 
 ### Authentication (admin login)
 
@@ -206,11 +206,18 @@ boot, so the demo works without opening the UI. For each provider `<NAME>` in
 The four logical providers are `claude_max` (Claude plan proxy), `ollama`
 (local, offline-safe fallback), `gemini`, and `codex`.
 
+### Billing & demo
+
+| Variable | Default | Description |
+|---|---|---|
+| `DEMO_MODE` | *(unset = off)* | When `true`, a step whose LLM provider fails falls back to the offline **canned** provider so a run still completes (quick start, hackathon demo). Such runs are flagged (`demo: true` on the invoke API) and never billed. Off, a provider failure fails the run. |
+| `LLM_PRICING` | *(unset)* | JSON object keyed by model-name prefix, longest prefix wins: `{"claude-opus":{"input_per_m":15,"output_per_m":75},"claude":{"input_per_m":3,"output_per_m":15}}`. Values are USD per million tokens. |
+| `LLM_PRICING_DEFAULT` | `{"input_per_m":3,"output_per_m":15}` | Rate for models matching no prefix. The canned provider is always free. |
+
 ### Integrations & logging
 
 | Variable | Default | Description |
 |---|---|---|
-| `DISCORD_WEBHOOK_URL` | *(unset)* | Optional Discord webhook for the `send_discord` notification tool. |
 | `RUST_LOG` | `takoia=debug,tower_http=debug,info` | Tracing filter. |
 
 ### `.env.example`
@@ -261,7 +268,6 @@ CODEX_API_KEY=
 CODEX_MODEL=gpt-4o-mini
 
 # ── Integrations & logging ──────────────────────────────────────────────────
-DISCORD_WEBHOOK_URL=
 RUST_LOG=takoia=debug,tower_http=debug,info
 ```
 
@@ -311,11 +317,16 @@ recompiles and restarts the server.
 - **Dev:** browser → Vite (`:5173`) → proxy `/api` → Axum (`:8080`).
 - **Prod:** browser → Axum (`:8080`) serves both the static frontend and `/api`.
 
-### Tests
+### Tests & lint
 
 ```bash
-cargo test                   # or: make test
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings   # CI treats every warning as an error
+cargo test                                  # or: make test
 ```
+
+CI (`.github/workflows/ci.yml`) runs the three on Linux and macOS, builds the
+release binary as an artifact, and type-checks + builds the frontend.
 
 ---
 
@@ -345,7 +356,13 @@ it improves with every objective.
 ### 4. Run an objective
 
 Give the agent an objective (`POST /api/objectives`). It is enqueued as a job;
-follow the live timeline over SSE at `GET /api/jobs/:id/events`.
+follow the live timeline over SSE at `GET /api/jobs/:id/events`. A slow client
+that misses events receives a `lagged` event with the dropped count and should
+refetch `GET /api/jobs/:id`.
+
+Access is per agent: `owner` (manage, publish, delete, see credentials),
+`editor` (edit, run, approve, correct), `viewer` (read). Org admins have every
+role on every agent; lists only show the agents you have a role on.
 
 ### 5. Publish to the marketplace
 
@@ -367,21 +384,61 @@ curl -X POST http://localhost:8080/api/v1/agents/<AGENT_ID>/invoke \
   -d '{"input": "Summarize this week in Rust async."}'
 ```
 
-Earnings are visible at `GET /api/marketplace/earnings`; usage at
-`GET /api/usage`.
+The response carries `cost_usd`, `publisher_earned_usd`, and two flags:
+`demo` (the output came from the offline provider in `DEMO_MODE`, nothing is
+billed) and `self_invoke` (the consumer is the publisher's own account, nothing
+is billed). Earnings are visible at `GET /api/marketplace/earnings`; usage at
+`GET /api/usage` — both scoped to your account.
+
+### 7. Trigger an agent from a webhook (signed)
+
+An agent with a `[trigger] on = "<event>"` receives a job for every payload
+posted to `POST /api/webhooks/<event>`. The route needs no session, so every
+payload must be signed with the agent's secret (shown to owners in
+`GET /api/agents/:id` as `webhook_secret`, rotated with
+`POST /api/agents/:id/webhook-secret/rotate`):
+
+```bash
+BODY='{"invoice": 42}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | sed 's/^.* //')
+curl -X POST http://localhost:8080/api/webhooks/invoice \
+  -H "X-Takoia-Signature: sha256=$SIG" \
+  -H "Content-Type: application/json" \
+  -d "$BODY"
+```
+
+`X-Hub-Signature-256` is accepted as an alias. Unsigned or mis-signed payloads
+create no job and get a 401.
 
 ---
 
 ## Security note
 
-This is a **hackathon / demo** backend. Apart from the `/api/login` endpoint and
-the marketplace invoke endpoint (`/api/v1/agents/:id/invoke`, which requires a
-`Bearer sk_…` consumer key), **the `/api/*` surface is currently
-unauthenticated**. Do not expose it directly to the public internet — front it
-with proper authentication (a reverse proxy with auth, network isolation, etc.)
-before deploying anywhere real. Connector credentials are encrypted at rest with
-`MASTER_KEY`, so keep that key secret and back it up: losing it makes stored
-credentials unrecoverable.
+- **Authentication.** Every `/api/*` route requires a bearer session except
+  `/api/health`, the setup/login flow, the public marketplace catalog, the
+  key-authenticated `/api/v1/*` API and the HMAC-signed webhooks. Failed logins
+  auto-ban the client IP. Per-agent roles (owner / editor / viewer) and org
+  admins gate every route; connectors, integrations, MCP, skills, memory
+  administration and logs are admin-only.
+- **Agent subprocesses.** `claude -p` runs inside the sandbox chosen in Settings
+  (Landlock by default), with a **cleared environment** — the server's
+  `MASTER_KEY`, provider keys and database URL are never visible to it — and an
+  explicit tool set: web search / fetch / read for agent steps, **no tools at
+  all** for one-shot generations that embed untrusted text (persona evolution,
+  scaffolding, reflection, SOUL.md import). Landlock leaves `/tmp` writable by
+  default because the CLI may still use it; set the sandbox param
+  `share_tmp=false` to close it.
+- **Tool credentials.** Reference connectors instead of pasting secrets into
+  step configs: `tool_params.discord_connector` names a `discord` connector
+  whose secret is the webhook URL; `a2a_calls[].key_connector` names an `a2a`
+  connector holding the consumer key. Inline values still work but are masked
+  for non-owners and stripped from TOML exports.
+- **Outbound calls** (Discord, A2A, connector URLs) are validated against
+  internal address ranges and pinned to the validated DNS answer; every HTTP
+  client carries a timeout. Internal errors never reach the client as text.
+- **Keys.** Connector credentials are encrypted at rest with `MASTER_KEY`; keep
+  it secret and back it up — losing it makes stored credentials unrecoverable.
+  Consumer API keys are stored hashed.
 
 ### Secret storage backends
 

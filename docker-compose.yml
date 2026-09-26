@@ -13,6 +13,11 @@ services:
     ports:
       - "8080:8080"
     environment:
+      # Quick-start runs in demo mode: without a Claude token the agent steps
+      # complete with offline canned content (never billed, flagged as demo).
+      # Remove this line for a real deployment so a provider failure fails the
+      # run instead of producing demo text.
+      DEMO_MODE: "true"
       # Set MASTER_KEY to keep encrypted connectors across restarts; if omitted an
       # ephemeral one is generated at startup.
       # MASTER_KEY: "<openssl rand -base64 32>"

@@ -2,7 +2,6 @@
 //! an encrypted connector (`openai_tts` preferred, else `codex`) and streams the
 //! generated MP3 back to the browser.
 
-use crate::bootstrap::DEFAULT_ACCOUNT_ID;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::body::Body;
@@ -36,6 +35,7 @@ struct ProviderRow {
 /// `POST /api/tts` — synthesize speech, returns `audio/mpeg`.
 pub async fn synthesize(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     axum::Json(body): axum::Json<TtsInput>,
 ) -> AppResult<Response> {
     if body.text.trim().is_empty() {
@@ -50,26 +50,30 @@ pub async fn synthesize(
            ORDER BY CASE name WHEN 'openai_tts' THEN 0 ELSE 1 END
            LIMIT 1"#,
     )
-    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(&me.account_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| {
         AppError::BadRequest(
-            "no OpenAI key configured — set the 'codex' (or 'openai_tts') provider key in Settings".into(),
+            "no OpenAI key configured — set the 'codex' (or 'openai_tts') provider key in Settings"
+                .into(),
         )
     })?;
 
     let key = match row.encrypted_secret {
-        Some(blob) if !blob.is_empty() => crate::secrets::SecretManager::new(&state.cipher, &state.db)
-            .resolve_blob(&blob)
-            .await
-            .map_err(AppError::Other)?,
+        Some(blob) if !blob.is_empty() => {
+            crate::secrets::SecretManager::new(&state.cipher, &state.db)
+                .resolve_blob(&blob)
+                .await
+                .map_err(AppError::Other)?
+        }
         _ => return Err(AppError::BadRequest("OpenAI provider has no key".into())),
     };
     let base_url = row.base_url.trim_end_matches('/');
 
-    let resp = reqwest::Client::new()
+    let resp = crate::net::http_client()
         .post(format!("{base_url}/audio/speech"))
+        .timeout(std::time::Duration::from_secs(120))
         .bearer_auth(key)
         .json(&serde_json::json!({
             "model": body.model,

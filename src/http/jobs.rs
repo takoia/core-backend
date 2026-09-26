@@ -24,12 +24,22 @@ struct JobRow {
 }
 
 /// `GET /api/jobs` — list recent jobs with their objective title.
-pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
+pub async fn list(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+) -> AppResult<Json<Value>> {
     let rows = sqlx::query_as::<_, JobRow>(
         r#"SELECT j.id, j.agent_id, j.status, j.error, j.created_at, o.title
-           FROM jobs j LEFT JOIN objectives o ON o.id = j.objective_id
+           FROM jobs j
+           JOIN agents a ON a.id = j.agent_id
+           LEFT JOIN objectives o ON o.id = j.objective_id
+           WHERE a.account_id = ?3
+             AND (?1 = 1 OR j.agent_id IN (SELECT agent_id FROM agent_permissions WHERE user_id = ?2))
            ORDER BY j.created_at DESC LIMIT 100"#,
     )
+    .bind(me.is_admin != 0)
+    .bind(&me.id)
+    .bind(&me.account_id)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "jobs": rows })))
@@ -38,8 +48,10 @@ pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
 /// `GET /api/jobs/:id` — full detail: job, steps, pending approval, report.
 pub async fn get(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_job_role(&state, &id, &me, "viewer").await?;
     let job = sqlx::query_as::<_, JobRow>(
         r#"SELECT j.id, j.agent_id, j.status, j.error, j.created_at, o.title
            FROM jobs j LEFT JOIN objectives o ON o.id = j.objective_id
@@ -105,9 +117,11 @@ pub async fn get(
 /// improve. This is the "detect an error and improve the agent" loop.
 pub async fn feedback(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
     Json(body): Json<FeedbackInput>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_job_role(&state, &id, &me, "editor").await?;
     let row: Option<(String, String)> = sqlx::query_as(
         r#"SELECT j.agent_id, COALESCE(o.prompt, '')
            FROM jobs j LEFT JOIN objectives o ON o.id = j.objective_id
@@ -132,9 +146,10 @@ pub async fn feedback(
         .await
         .map_err(crate::error::AppError::Other)?;
 
-    state
-        .events
-        .publish(crate::agent::JobEvent::log(&id, "correction recorded — agent will improve"));
+    state.events.publish(crate::agent::JobEvent::log(
+        &id,
+        "correction recorded — agent will improve",
+    ));
     Ok(Json(json!({ "ok": true, "agent_id": agent_id })))
 }
 
@@ -149,8 +164,10 @@ pub struct FeedbackInput {
 /// `GET /api/jobs/:id/events` — Server-Sent Events stream of live progress.
 pub async fn events(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> AppResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
+    crate::http::users::require_job_role(&state, &id, &me, "viewer").await?;
     let rx = state.events.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(move |item| {
         let job_id = id.clone();
@@ -158,13 +175,21 @@ pub async fn events(
             Ok(ev) if ev.job_id == job_id => Some(Ok(Event::default()
                 .event("progress")
                 .data(serde_json::to_string(&ev).unwrap_or_default()))),
+            // The broadcast buffer overflowed for this slow client: tell it how
+            // many events it lost so it can refetch the job instead of showing
+            // a silently incomplete timeline.
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                Some(Ok(Event::default()
+                    .event("lagged")
+                    .data(json!({ "dropped": n }).to_string())))
+            }
             _ => None,
         }
     });
 
-    Sse::new(stream).keep_alive(
+    Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
-    )
+    ))
 }

@@ -4,7 +4,7 @@
 //! choice; switching to Postgres later means swapping the pool type here.
 
 use anyhow::{Context, Result};
-use sqlx::sqlite::{SqlitePoolOptions, SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
 use std::str::FromStr;
 use std::time::Duration;

@@ -11,7 +11,6 @@
 //!   take a small proactive action.
 //! - **Commitments**: promises to follow up are honoured on a later tick.
 
-use crate::bootstrap::DEFAULT_ACCOUNT_ID;
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -101,7 +100,10 @@ impl Emotions {
 }
 
 /// Per-agent toggles for the personalization features + the Big Five vector.
-#[derive(Clone, Debug)]
+/// `Default` is everything off with a neutral personality: every feature is
+/// opt-in per agent, since each one costs an LLM call per agent per tick
+/// (reflection), extra memory writes, or self-initiated runs.
+#[derive(Clone, Debug, Default)]
 pub struct Personalization {
     pub reflection: bool,
     pub emotions: bool,
@@ -111,19 +113,6 @@ pub struct Personalization {
     pub personality: bool,
     pub big_five: BigFive,
 }
-impl Default for Personalization {
-    fn default() -> Self {
-        Self {
-            reflection: true,
-            emotions: true,
-            initiative: true,
-            commitments: true,
-            persona_evolution: true,
-            personality: true,
-            big_five: BigFive::default(),
-        }
-    }
-}
 impl Personalization {
     /// Whether the inner-life loop has anything to do for this agent.
     fn any_inner_life(&self) -> bool {
@@ -131,9 +120,12 @@ impl Personalization {
     }
 }
 
-/// Read an agent's personalization toggles (defaults: everything on, neutral).
+/// Read an agent's personalization toggles (defaults: everything off, neutral).
 pub async fn personalization(db: &crate::db::Db, agent_id: &str) -> Personalization {
-    let row: Option<(i64, i64, i64, i64, i64, i64, Option<String>)> = sqlx::query_as(
+    // reflection, emotions, initiative, commitments, persona_evolution,
+    // personality, big_five (JSON).
+    type Row = (i64, i64, i64, i64, i64, i64, Option<String>);
+    let row: Option<Row> = sqlx::query_as(
         "SELECT reflection, emotions, initiative, commitments, persona_evolution, personality, big_five
          FROM agent_personalization WHERE agent_id = ?",
     )
@@ -150,7 +142,9 @@ pub async fn personalization(db: &crate::db::Db, agent_id: &str) -> Personalizat
             commitments: c != 0,
             persona_evolution: pe != 0,
             personality: p != 0,
-            big_five: bf.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+            big_five: bf
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default(),
         },
         None => Personalization::default(),
     }
@@ -191,7 +185,9 @@ pub async fn current(db: &crate::db::Db, agent_id: &str) -> InnerState {
             mood,
             energy,
             familiarity,
-            emotions: emotions.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+            emotions: emotions
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default(),
         },
         None => InnerState::default(),
     }
@@ -306,7 +302,7 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
     // Gather signals.
     let (completed, failed): (i64, i64) = sqlx::query_as(
         r#"SELECT
-             COALESCE(SUM(status = 'completed'), 0),
+             COALESCE(SUM(status = 'done'), 0),
              COALESCE(SUM(status = 'failed'), 0)
            FROM (SELECT status FROM jobs WHERE agent_id = ? ORDER BY created_at DESC LIMIT 20)"#,
     )
@@ -315,7 +311,10 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
     .await
     .unwrap_or((0, 0));
     let st = current(&state.db, agent_id).await;
-    let recent = state.memory.recall(agent_id, "recent work and how it went", 5).await;
+    let recent = state
+        .memory
+        .recall(agent_id, "recent work and how it went", 5)
+        .await;
 
     let prompt = format!(
         "You are an autonomous agent reflecting between tasks, like a person \
@@ -330,7 +329,11 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
          no code fences.",
         st.mood,
         st.energy * 100.0,
-        if recent.trim().is_empty() { "(none yet)" } else { &recent },
+        if recent.trim().is_empty() {
+            "(none yet)"
+        } else {
+            &recent
+        },
         if pers.emotions {
             ", emotions (an object with joy, trust, fear, surprise, sadness, \
              disgust, anger, anticipation — each a 0..1 number reflecting how the \
@@ -344,11 +347,22 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
         Some(v) => v,
         None => return,
     };
-    let s = |k: &str| fields.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let s = |k: &str| {
+        fields
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
     let reflection = s("reflection");
     let mood = {
         let m = s("mood");
-        if m.is_empty() { st.mood.clone() } else { m }
+        if m.is_empty() {
+            st.mood.clone()
+        } else {
+            m
+        }
     };
     let energy = fields
         .get("energy")
@@ -365,8 +379,11 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
         None
     };
     // Store the journalled thought only when reflection is enabled.
-    let reflection_to_store: Option<String> =
-        if pers.reflection && !reflection.is_empty() { Some(reflection.clone()) } else { None };
+    let reflection_to_store: Option<String> = if pers.reflection && !reflection.is_empty() {
+        Some(reflection.clone())
+    } else {
+        None
+    };
 
     // Persist the new affective state. reflection/emotions keep their previous
     // value when this run did not produce one (COALESCE on the NULL bind).
@@ -515,23 +532,28 @@ async fn enqueue_self_objective(state: &AppState, agent_id: &str, title: &str, p
         Ok(t) => t,
         Err(_) => return,
     };
-    if sqlx::query("INSERT INTO objectives (id, account_id, agent_id, title, prompt) VALUES (?, ?, ?, ?, ?)")
-        .bind(&objective_id)
-        .bind(DEFAULT_ACCOUNT_ID)
-        .bind(agent_id)
-        .bind(title)
-        .bind(prompt)
-        .execute(&mut *tx)
-        .await
-        .is_err()
+    if sqlx::query(
+        "INSERT INTO objectives (id, account_id, agent_id, title, prompt)
+         SELECT ?, account_id, ?, ?, ? FROM agents WHERE id = ?",
+    )
+    .bind(&objective_id)
+    .bind(agent_id)
+    .bind(title)
+    .bind(prompt)
+    .bind(agent_id)
+    .execute(&mut *tx)
+    .await
+    .is_err()
     {
         return;
     }
-    let _ = sqlx::query("INSERT INTO jobs (id, objective_id, agent_id, status) VALUES (?, ?, ?, 'queued')")
-        .bind(&job_id)
-        .bind(&objective_id)
-        .bind(agent_id)
-        .execute(&mut *tx)
-        .await;
+    let _ = sqlx::query(
+        "INSERT INTO jobs (id, objective_id, agent_id, status) VALUES (?, ?, ?, 'queued')",
+    )
+    .bind(&job_id)
+    .bind(&objective_id)
+    .bind(agent_id)
+    .execute(&mut *tx)
+    .await;
     let _ = tx.commit().await;
 }

@@ -13,7 +13,9 @@ pub struct CannedProvider {
 
 impl CannedProvider {
     pub fn new() -> Self {
-        Self { name: "canned".to_string() }
+        Self {
+            name: "canned".to_string(),
+        }
     }
 }
 
@@ -60,7 +62,11 @@ impl LlmProvider for CannedProvider {
             prompt_tokens: (haystack.len() / 4) as u32,
             completion_tokens: (content.len() / 4) as u32,
         };
-        Ok(Completion { content, model: "canned-demo".to_string(), usage })
+        Ok(Completion {
+            content,
+            model: "canned-demo".to_string(),
+            usage,
+        })
     }
 }
 

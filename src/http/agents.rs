@@ -1,7 +1,6 @@
 //! Agents CRUD, per-step configuration (the customization differentiator),
 //! marketplace publishing, and memory listing.
 
-use crate::bootstrap::DEFAULT_ACCOUNT_ID;
 use crate::domain::StepType;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -32,20 +31,33 @@ struct AgentRow {
 }
 
 /// `GET /api/agents` — list this account's agents.
-pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
+pub async fn list(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+) -> AppResult<Json<Value>> {
     let rows = sqlx::query_as::<_, AgentRow>(
         r#"SELECT id, name, description, autonomy_level, expertise_domain, visibility,
                   price_per_run_usd, runs_count, created_at, author, trigger_on, emit, icon, persona
-           FROM agents WHERE account_id = ? ORDER BY created_at DESC"#,
+           FROM agents
+           WHERE account_id = ?1
+             AND (?2 = 1 OR id IN (SELECT agent_id FROM agent_permissions WHERE user_id = ?3))
+           ORDER BY created_at DESC"#,
     )
-    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(&me.account_id)
+    .bind(me.is_admin != 0)
+    .bind(&me.id)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "agents": rows })))
 }
 
 /// `GET /api/agents/:id` — agent detail with its four step configs.
-pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Value>> {
+pub async fn get(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "viewer").await?;
     let agent = sqlx::query_as::<_, AgentRow>(
         r#"SELECT id, name, description, autonomy_level, expertise_domain, visibility,
                   price_per_run_usd, runs_count, created_at, author, trigger_on, emit, icon, persona
@@ -71,7 +83,61 @@ pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> AppRe
     .fetch_all(&state.db)
     .await?;
 
-    Ok(Json(json!({ "agent": agent, "steps": steps })))
+    // Owners see credentials: the webhook secret (it authorises inbound
+    // /api/webhooks/:event payloads) and any inline tool_params secrets.
+    // Editors and viewers get the step configs with those values masked.
+    let is_owner = crate::http::users::agent_role(&state, &id, &me)
+        .await
+        .as_deref()
+        == Some("owner");
+    let webhook_secret: Option<String> = if is_owner {
+        sqlx::query_scalar("SELECT webhook_secret FROM agents WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await?
+            .flatten()
+    } else {
+        None
+    };
+    let steps: Vec<StepConfig> = steps
+        .into_iter()
+        .map(|mut s| {
+            if !is_owner {
+                if let Ok(mut v) = serde_json::from_str::<Value>(&s.options) {
+                    crate::domain::redact_step_options(&mut v, false);
+                    s.options = v.to_string();
+                }
+            }
+            s
+        })
+        .collect();
+
+    Ok(Json(
+        json!({ "agent": agent, "steps": steps, "webhook_secret": webhook_secret }),
+    ))
+}
+
+/// `POST /api/agents/:id/webhook-secret/rotate` — mint a new HMAC secret for the
+/// agent's inbound webhooks (owner only). The previous secret stops working
+/// immediately; the new one is returned once.
+pub async fn rotate_webhook_secret(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "owner").await?;
+    let secret: Option<String> = sqlx::query_scalar(
+        "UPDATE agents SET webhook_secret = lower(hex(randomblob(24))),
+                           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE id = ? RETURNING webhook_secret",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await?;
+    match secret {
+        Some(s) => Ok(Json(json!({ "webhook_secret": s }))),
+        None => Err(AppError::NotFound("agent not found".into())),
+    }
 }
 
 #[derive(Deserialize)]
@@ -102,11 +168,11 @@ pub async fn create(
     let id = Uuid::new_v4().to_string();
     let mut tx = state.db.begin().await?;
     sqlx::query(
-        r#"INSERT INTO agents (id, account_id, name, description, autonomy_level, expertise_domain)
-           VALUES (?, ?, ?, ?, ?, ?)"#,
+        r#"INSERT INTO agents (id, account_id, name, description, autonomy_level, expertise_domain, webhook_secret)
+           VALUES (?, ?, ?, ?, ?, ?, lower(hex(randomblob(24))))"#,
     )
     .bind(&id)
-    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(&me.account_id)
     .bind(&body.name)
     .bind(&body.description)
     .bind(&autonomy)
@@ -167,9 +233,11 @@ pub async fn update(
     .bind(&body.name)
     .bind(&body.description)
     .bind(&body.expertise_domain)
-    .bind(body.autonomy_level.as_ref().filter(|a| {
-        a.as_str() == "full_auto" || a.as_str() == "confirm_before_action"
-    }))
+    .bind(
+        body.autonomy_level
+            .as_ref()
+            .filter(|a| a.as_str() == "full_auto" || a.as_str() == "confirm_before_action"),
+    )
     .bind(body.price_per_run_usd)
     .bind(&id)
     .execute(&state.db)
@@ -201,11 +269,26 @@ pub async fn update_steps(
     crate::http::users::require_agent_role(&state, &id, &me, "editor").await?;
     let mut tx = state.db.begin().await?;
     for step in &body.steps {
-        let options = if step.options.is_null() {
-            "{}".to_string()
+        // Non-owners receive masked credentials from GET; saving them back
+        // must not overwrite the real values with the mask.
+        let stored: Option<(String,)> = sqlx::query_as(
+            "SELECT options FROM agent_step_configs WHERE agent_id = ? AND step_type = ?",
+        )
+        .bind(&id)
+        .bind(&step.step_type)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let mut incoming = if step.options.is_null() {
+            json!({})
         } else {
-            step.options.to_string()
+            step.options.clone()
         };
+        if let Some((current,)) = stored {
+            if let Ok(current) = serde_json::from_str::<Value>(&current) {
+                crate::domain::restore_masked_secrets(&mut incoming, &current);
+            }
+        }
+        let options = incoming.to_string();
         sqlx::query(
             r#"UPDATE agent_step_configs
                SET system_prompt = ?, options = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -243,7 +326,11 @@ pub async fn publish(
     crate::http::users::require_agent_role(&state, &id, &me, "owner").await?;
     let visibility = match body.visibility.as_str() {
         "public" | "private" => body.visibility.as_str(),
-        _ => return Err(AppError::BadRequest("visibility must be public or private".into())),
+        _ => {
+            return Err(AppError::BadRequest(
+                "visibility must be public or private".into(),
+            ))
+        }
     };
     sqlx::query(
         r#"UPDATE agents SET
@@ -267,10 +354,26 @@ pub async fn publish(
 }
 
 /// `POST /api/agents/import` — import a declarative agent from a TOML body.
-pub async fn import_toml(State(state): State<AppState>, body: String) -> AppResult<Json<Value>> {
-    let id = crate::agentdef::import(&state.db, DEFAULT_ACCOUNT_ID, &body)
+pub async fn import_toml(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+    body: String,
+) -> AppResult<Json<Value>> {
+    // The TOML id is the primary key and import upserts: re-importing an
+    // existing agent is an edit, so it needs owner on that agent (and the
+    // agent must be in the caller's account — agent_role enforces both).
+    let def = crate::agentdef::parse(&body).map_err(AppError::Other)?;
+    let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM agents WHERE id = ?")
+        .bind(&def.agent.id)
+        .fetch_optional(&state.db)
+        .await?;
+    if existing.is_some() {
+        crate::http::users::require_agent_role(&state, &def.agent.id, &me, "owner").await?;
+    }
+    let id = crate::agentdef::import(&state.db, &me.account_id, &body)
         .await
         .map_err(AppError::Other)?;
+    crate::http::users::grant_owner(&state.db, &id, &me.id).await?;
     Ok(Json(json!({ "id": id })))
 }
 
@@ -342,11 +445,11 @@ pub async fn import_soul(
     let id = Uuid::new_v4().to_string();
     let mut tx = state.db.begin().await?;
     sqlx::query(
-        r#"INSERT INTO agents (id, account_id, name, description, autonomy_level, expertise_domain, persona)
-           VALUES (?, ?, ?, ?, 'full_auto', ?, ?)"#,
+        r#"INSERT INTO agents (id, account_id, name, description, autonomy_level, expertise_domain, persona, webhook_secret)
+           VALUES (?, ?, ?, ?, 'confirm_before_action', ?, ?, lower(hex(randomblob(24))))"#,
     )
     .bind(&id)
-    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(&me.account_id)
     .bind(&name)
     .bind(&description)
     .bind(&expertise)
@@ -391,21 +494,22 @@ pub async fn import_soul(
         .await?;
     }
 
-    Ok(Json(json!({ "id": id, "name": name, "published": body.publish })))
+    Ok(Json(
+        json!({ "id": id, "name": name, "published": body.publish }),
+    ))
 }
 
 /// `GET /api/agents/:id/export` — export the agent as a TOML definition.
 pub async fn export_toml(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
+    crate::http::users::require_agent_role(&state, &id, &me, "viewer").await?;
     let toml = crate::agentdef::export(&state.db, &id)
         .await
         .map_err(AppError::Other)?;
-    Ok((
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        toml,
-    ))
+    Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], toml))
 }
 
 /// `DELETE /api/agents/:id` — remove an agent and its configs (cascade).
@@ -417,7 +521,7 @@ pub async fn delete(
     crate::http::users::require_agent_role(&state, &id, &me, "owner").await?;
     sqlx::query("DELETE FROM agents WHERE id = ? AND account_id = ?")
         .bind(&id)
-        .bind(DEFAULT_ACCOUNT_ID)
+        .bind(&me.account_id)
         .execute(&state.db)
         .await?;
     Ok(Json(json!({ "ok": true })))
@@ -458,8 +562,10 @@ pub async fn add_memory(
 /// `GET /api/agents/:id/memories` — the agent's accumulated expertise.
 pub async fn memories(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "viewer").await?;
     let items = state.memory.list(&id).await.map_err(AppError::Other)?;
     Ok(Json(json!({ "memories": items })))
 }
@@ -519,7 +625,11 @@ pub async fn evolve_persona(
     // top-weight memories when the keyword query misses.
     let memories = state
         .memory
-        .recall(&id, "interactions tone style how the user treats me preferences", 16)
+        .recall(
+            &id,
+            "interactions tone style how the user treats me preferences",
+            16,
+        )
         .await;
     if memories.trim().is_empty() {
         return Err(AppError::BadRequest(
@@ -553,16 +663,22 @@ pub async fn evolve_persona(
         .execute(&state.db)
         .await?;
 
-    Ok(Json(json!({ "persona": new_persona, "previous": current_persona })))
+    Ok(Json(
+        json!({ "persona": new_persona, "previous": current_persona }),
+    ))
 }
 
 /// `GET /api/agents/:id/inner-state` — the agent's current "inner life": mood,
 /// energy, familiarity, latest reflection, and its open commitments.
 pub async fn inner_state(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
-    let st: Option<(String, f64, i64, Option<String>, Option<String>, String)> = sqlx::query_as(
+    crate::http::users::require_agent_role(&state, &id, &me, "viewer").await?;
+    // mood, energy, familiarity, reflection, emotions (JSON), updated_at.
+    type StateRow = (String, f64, i64, Option<String>, Option<String>, String);
+    let st: Option<StateRow> = sqlx::query_as(
         "SELECT mood, energy, familiarity, reflection, emotions, updated_at FROM agent_state WHERE agent_id = ?",
     )
     .bind(&id)
@@ -584,7 +700,8 @@ pub async fn inner_state(
     .await?;
 
     let emotions = |e: Option<String>| -> Value {
-        e.and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or(Value::Null)
+        e.and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .unwrap_or(Value::Null)
     };
     let state_json = match st {
         Some((mood, energy, familiarity, reflection, emo, updated_at)) => json!({
@@ -604,14 +721,18 @@ pub async fn inner_state(
             "updated_at": null,
         }),
     };
-    Ok(Json(json!({ "state": state_json, "commitments": commitments })))
+    Ok(Json(
+        json!({ "state": state_json, "commitments": commitments }),
+    ))
 }
 
 /// `GET /api/agents/:id/personalization` — the per-agent feature toggles + Big Five.
 pub async fn get_personalization(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "viewer").await?;
     let p = crate::agent::inner_life::personalization(&state.db, &id).await;
     Ok(Json(json!({
         "reflection": p.reflection,
@@ -692,8 +813,10 @@ pub async fn set_personalization(
 /// memory map can size/color entries by real importance relative to others.
 pub async fn icm_memories(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "viewer").await?;
     // Keyword query from the agent's name + domain so its memories surface.
     let row: Option<(String, String)> =
         sqlx::query_as("SELECT name, expertise_domain FROM agents WHERE id = ?")

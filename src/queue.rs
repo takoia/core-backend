@@ -44,6 +44,21 @@ pub async fn requeue_approved(db: &Db, job_id: &str) -> Result<()> {
     set_status(db, job_id, JobStatus::Queued).await
 }
 
+/// Mark a job done — unless something (the stale sweep, a rejection) already
+/// failed it, in which case the failure stands and the caller is told.
+pub async fn finish(db: &Db, job_id: &str) -> Result<bool> {
+    let res = sqlx::query(
+        r#"UPDATE jobs SET status = 'done',
+           finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+           WHERE id = ? AND status <> 'failed'"#,
+    )
+    .bind(job_id)
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected() > 0)
+}
+
 /// Update a job's status (and clear/set finished timestamp where relevant).
 pub async fn set_status(db: &Db, job_id: &str, status: JobStatus) -> Result<()> {
     let finished = matches!(status, JobStatus::Done | JobStatus::Failed);
@@ -93,6 +108,27 @@ pub async fn recover_orphans(db: &Db) -> Result<u64> {
            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
            WHERE status = 'running' AND synchronous = 0"#,
     )
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// Synchronous jobs (marketplace invokes, call_agent sub-runs) execute inside
+/// the HTTP handler or the parent run. They are excluded from
+/// `recover_orphans`, so one left `running` by a crashed handler or a server
+/// restart would stay there forever and keep its agent "busy" for the
+/// scheduler and the inner-life loop. Fail those older than `max_age_secs`.
+pub async fn fail_stale_synchronous(db: &Db, max_age_secs: i64) -> Result<u64> {
+    let res = sqlx::query(
+        r#"UPDATE jobs SET status = 'failed',
+           error = 'synchronous job abandoned (handler failed or server restarted)',
+           finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+           WHERE synchronous = 1
+             AND status IN ('running', 'awaiting_approval')
+             AND COALESCE(started_at, created_at) < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)"#,
+    )
+    .bind(format!("-{} seconds", max_age_secs.max(0)))
     .execute(db)
     .await?;
     Ok(res.rows_affected())

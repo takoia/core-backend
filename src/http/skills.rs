@@ -49,7 +49,10 @@ pub async fn catalog() -> AppResult<Json<Value>> {
 }
 
 /// `GET /api/skills/installed` — skill folders present under ~/.claude/skills.
-pub async fn installed() -> AppResult<Json<Value>> {
+pub async fn installed(
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+) -> AppResult<Json<Value>> {
+    crate::http::users::require_admin(&me)?;
     let dir = skills_dir();
     let mut names = Vec::new();
     if let Ok(mut rd) = tokio::fs::read_dir(&dir).await {
@@ -84,7 +87,11 @@ fn default_branch() -> String {
 
 /// `POST /api/skills/install` — fetch a skill's SKILL.md from GitHub and write it
 /// into ~/.claude/skills/<id>/.
-pub async fn install(Json(body): Json<InstallSkill>) -> AppResult<Json<Value>> {
+pub async fn install(
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+    Json(body): Json<InstallSkill>,
+) -> AppResult<Json<Value>> {
+    crate::http::users::require_admin(&me)?;
     // The id becomes a directory name under the skills dir; reject path traversal.
     if body.id.trim().is_empty()
         || !body
@@ -109,10 +116,11 @@ pub async fn install(Json(body): Json<InstallSkill>) -> AppResult<Json<Value>> {
         )
     };
 
-    let client = reqwest::Client::new();
+    let client = crate::net::http_client();
     let resp = client
         .get(&raw_url)
         .header("User-Agent", USER_AGENT)
+        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
         .map_err(|e| AppError::Other(e.into()))?;
@@ -132,7 +140,9 @@ pub async fn install(Json(body): Json<InstallSkill>) -> AppResult<Json<Value>> {
         .await
         .map_err(|e| AppError::Other(e.into()))?;
 
-    Ok(Json(json!({ "ok": true, "installed": body.id, "source": raw_url })))
+    Ok(Json(
+        json!({ "ok": true, "installed": body.id, "source": raw_url }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -145,13 +155,17 @@ pub struct GithubQuery {
 
 /// `GET /api/skills/github?repo=owner/name&path=...` — list candidate skill
 /// folders (directories containing a SKILL.md is assumed) in a GitHub repo.
-pub async fn github(Query(q): Query<GithubQuery>) -> AppResult<Json<Value>> {
+pub async fn github(
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+    Query(q): Query<GithubQuery>,
+) -> AppResult<Json<Value>> {
+    crate::http::users::require_admin(&me)?;
     let api_url = format!(
         "https://api.github.com/repos/{}/contents/{}",
         q.repo,
         q.path.trim_matches('/')
     );
-    let client = reqwest::Client::new();
+    let client = crate::net::http_client();
     let mut request = client
         .get(&api_url)
         .header("User-Agent", USER_AGENT)
@@ -159,7 +173,11 @@ pub async fn github(Query(q): Query<GithubQuery>) -> AppResult<Json<Value>> {
     if let Some(token) = github_token().await {
         request = request.bearer_auth(token);
     }
-    let resp = request.send().await.map_err(|e| AppError::Other(e.into()))?;
+    let resp = request
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| AppError::Other(e.into()))?;
     if !resp.status().is_success() {
         return Err(AppError::NotFound(format!(
             "GitHub repo/path not found ({})",

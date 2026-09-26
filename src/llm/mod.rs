@@ -3,9 +3,9 @@
 //! as an offline demo fallback so a run never breaks.
 
 mod canned;
-mod claude_cli;
-mod openai_compat;
+pub mod claude_cli;
 pub mod oneshot;
+mod openai_compat;
 mod registry;
 
 pub use canned::CannedProvider;
@@ -34,13 +34,16 @@ pub struct Message {
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: Role::System, content: content.into() }
+        Self {
+            role: Role::System,
+            content: content.into(),
+        }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into() }
-    }
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: content.into() }
+        Self {
+            role: Role::User,
+            content: content.into(),
+        }
     }
 }
 
@@ -94,6 +97,12 @@ pub struct Completion {
 pub trait LlmProvider: Send + Sync {
     /// Provider name (e.g. "claude_max", "ollama").
     fn name(&self) -> &str;
+
+    /// Whether `enable_web_search` performs a real live search with this
+    /// provider. Others would only imitate one, so callers must not ask.
+    fn supports_web_search(&self) -> bool {
+        false
+    }
 
     /// Run a chat completion.
     async fn complete(&self, req: CompletionRequest) -> anyhow::Result<Completion>;

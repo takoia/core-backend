@@ -37,7 +37,9 @@ pub fn hash_password(pw: &str) -> anyhow::Result<String> {
 
 pub fn verify_password(pw: &str, hash: &str) -> bool {
     match PasswordHash::new(hash) {
-        Ok(parsed) => Argon2::default().verify_password(pw.as_bytes(), &parsed).is_ok(),
+        Ok(parsed) => Argon2::default()
+            .verify_password(pw.as_bytes(), &parsed)
+            .is_ok(),
         Err(_) => false,
     }
 }
@@ -78,7 +80,9 @@ pub async fn ensure_admin_user(state: &AppState) -> anyhow::Result<()> {
     // leave the users table empty so the first-run setup wizard creates the
     // first admin — no shared default password, secure by design.
     let Some(password) = &state.config.admin_password else {
-        tracing::info!("no users and no ADMIN_PASSWORD set; first-run setup wizard will create the admin");
+        tracing::info!(
+            "no users and no ADMIN_PASSWORD set; first-run setup wizard will create the admin"
+        );
         return Ok(());
     };
     let hash = hash_password(password)?;
@@ -125,7 +129,9 @@ pub async fn setup(
         return Err(AppError::Forbidden("setup already completed".into()));
     }
     if body.email.trim().is_empty() || body.password.is_empty() {
-        return Err(AppError::BadRequest("email and password are required".into()));
+        return Err(AppError::BadRequest(
+            "email and password are required".into(),
+        ));
     }
     let uid = Uuid::new_v4().to_string();
     let name = if body.name.trim().is_empty() {
@@ -156,7 +162,9 @@ pub async fn setup(
             .fetch_one(&state.db)
             .await?;
     tracing::info!(email = %body.email.trim(), "first-run setup created the admin user");
-    Ok(Json(json!({ "token": token, "username": user.email, "user": user.to_json() })))
+    Ok(Json(
+        json!({ "token": token, "username": user.email, "user": user.to_json() }),
+    ))
 }
 
 /// Extractor: the authenticated user behind the request's bearer token.
@@ -166,7 +174,10 @@ pub struct CurrentUser(pub User);
 impl FromRequestParts<AppState> for CurrentUser {
     type Rejection = AppError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         let token = parts
             .headers
             .get("authorization")
@@ -190,13 +201,15 @@ impl FromRequestParts<AppState> for CurrentUser {
 }
 
 /// Routes that are reachable WITHOUT a user session: the login/setup flow, the
-/// health check, and the key-authenticated public API (`/v1/*` invoke/chat/models
-/// + the marketplace catalog + inbound webhooks, which authenticate by their own
-/// means). The path is matched with or without the `/api` nest prefix.
+/// health check, the key-authenticated public API (`/v1/*` invoke/chat/models),
+/// the marketplace catalog, and inbound webhooks (which authenticate with their
+/// own HMAC signature). The path is matched with or without the `/api` prefix.
 fn is_public_path(path: &str) -> bool {
     let p = path.strip_prefix("/api").unwrap_or(path);
-    matches!(p, "/health" | "/setup" | "/setup/status" | "/login" | "/marketplace")
-        || p.starts_with("/v1/")
+    matches!(
+        p,
+        "/health" | "/setup" | "/setup/status" | "/login" | "/marketplace"
+    ) || p.starts_with("/v1/")
         || p.starts_with("/webhooks/")
 }
 
@@ -285,11 +298,16 @@ pub async fn login(
             .bind(&uid)
             .fetch_one(&state.db)
             .await?;
-    Ok(Json(json!({ "token": token, "username": user.email, "user": user.to_json() })))
+    Ok(Json(
+        json!({ "token": token, "username": user.email, "user": user.to_json() }),
+    ))
 }
 
 /// `POST /api/logout` — revoke the current bearer token.
-pub async fn logout(State(state): State<AppState>, parts: axum::http::HeaderMap) -> AppResult<Json<Value>> {
+pub async fn logout(
+    State(state): State<AppState>,
+    parts: axum::http::HeaderMap,
+) -> AppResult<Json<Value>> {
     if let Some(token) = parts
         .get("authorization")
         .and_then(|h| h.to_str().ok())
@@ -341,16 +359,24 @@ pub async fn set_security(
     let cur = crate::security::settings(&state.db).await;
     let s = crate::security::SecuritySettings {
         auto_ban_enabled: body.auto_ban_enabled.unwrap_or(cur.auto_ban_enabled),
-        max_failed_attempts: body.max_failed_attempts.unwrap_or(cur.max_failed_attempts).max(1),
+        max_failed_attempts: body
+            .max_failed_attempts
+            .unwrap_or(cur.max_failed_attempts)
+            .max(1),
         window_secs: body.window_secs.unwrap_or(cur.window_secs).max(1),
         ban_secs: body.ban_secs.unwrap_or(cur.ban_secs).max(1),
     };
-    crate::security::set_settings(&state.db, &s).await.map_err(AppError::Other)?;
+    crate::security::set_settings(&state.db, &s)
+        .await
+        .map_err(AppError::Other)?;
     Ok(Json(json!({ "ok": true })))
 }
 
 /// `GET /api/users` — list users (org admin only).
-pub async fn list_users(State(state): State<AppState>, CurrentUser(me): CurrentUser) -> AppResult<Json<Value>> {
+pub async fn list_users(
+    State(state): State<AppState>,
+    CurrentUser(me): CurrentUser,
+) -> AppResult<Json<Value>> {
     require_admin(&me)?;
     let users: Vec<User> = sqlx::query_as(
         "SELECT id, account_id, email, name, is_admin FROM users WHERE account_id = ? ORDER BY created_at",
@@ -358,7 +384,9 @@ pub async fn list_users(State(state): State<AppState>, CurrentUser(me): CurrentU
     .bind(&me.account_id)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(json!({ "users": users.iter().map(User::to_json).collect::<Vec<_>>() })))
+    Ok(Json(
+        json!({ "users": users.iter().map(User::to_json).collect::<Vec<_>>() }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -379,7 +407,9 @@ pub async fn create_user(
 ) -> AppResult<Json<Value>> {
     require_admin(&me)?;
     if body.email.trim().is_empty() || body.password.is_empty() {
-        return Err(AppError::BadRequest("email and password are required".into()));
+        return Err(AppError::BadRequest(
+            "email and password are required".into(),
+        ));
     }
     let id = Uuid::new_v4().to_string();
     let hash = hash_password(&body.password).map_err(AppError::Other)?;
@@ -451,7 +481,9 @@ pub async fn delete_user(
 ) -> AppResult<Json<Value>> {
     require_admin(&me)?;
     if id == me.id {
-        return Err(AppError::BadRequest("you cannot delete your own account".into()));
+        return Err(AppError::BadRequest(
+            "you cannot delete your own account".into(),
+        ));
     }
     sqlx::query("DELETE FROM users WHERE id = ? AND account_id = ?")
         .bind(&id)
@@ -506,7 +538,9 @@ pub async fn set_agent_permission(
     Json(body): Json<SetPermission>,
 ) -> AppResult<Json<Value>> {
     if !ROLES.contains(&body.role.as_str()) {
-        return Err(AppError::BadRequest("role must be owner, editor or viewer".into()));
+        return Err(AppError::BadRequest(
+            "role must be owner, editor or viewer".into(),
+        ));
     }
     require_agent_role(&state, &id, &me, "owner").await?;
     sqlx::query(
@@ -538,7 +572,7 @@ pub async fn remove_agent_permission(
 
 // ── RBAC helpers ───────────────────────────────────────────────────────────
 
-fn require_admin(user: &User) -> AppResult<()> {
+pub fn require_admin(user: &User) -> AppResult<()> {
     if user.is_admin != 0 {
         Ok(())
     } else {
@@ -549,7 +583,16 @@ fn require_admin(user: &User) -> AppResult<()> {
 /// The user's effective role on an agent ("owner" for org admins), or None.
 pub async fn agent_role(state: &AppState, agent_id: &str, user: &User) -> Option<String> {
     if user.is_admin != 0 {
-        return Some("owner".to_string());
+        // Org admin: owner of every agent of THEIR account, nothing elsewhere.
+        let same_account: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM agents WHERE id = ? AND account_id = ?")
+                .bind(agent_id)
+                .bind(&user.account_id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
+        return same_account.map(|_| "owner".to_string());
     }
     sqlx::query_as::<_, (String,)>(
         "SELECT role FROM agent_permissions WHERE agent_id = ? AND user_id = ?",
@@ -572,6 +615,109 @@ pub async fn require_agent_role(
 ) -> AppResult<()> {
     match agent_role(state, agent_id, user).await {
         Some(role) if role_rank(&role) >= role_rank(min) => Ok(()),
-        _ => Err(AppError::Forbidden(format!("{min} role required on this agent"))),
+        _ => Err(AppError::Forbidden(format!(
+            "{min} role required on this agent"
+        ))),
+    }
+}
+
+/// Agent behind a job, or 404. Used to apply the agent's RBAC to job routes.
+pub async fn job_agent_id(state: &AppState, job_id: &str) -> AppResult<String> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT agent_id FROM jobs WHERE id = ?")
+        .bind(job_id)
+        .fetch_optional(&state.db)
+        .await?;
+    row.map(|r| r.0)
+        .ok_or_else(|| AppError::NotFound("job not found".into()))
+}
+
+/// Require at least `min` role on the agent that owns `job_id`; returns the
+/// agent id so the caller does not look it up twice.
+pub async fn require_job_role(
+    state: &AppState,
+    job_id: &str,
+    user: &User,
+    min: &str,
+) -> AppResult<String> {
+    let agent_id = job_agent_id(state, job_id).await?;
+    require_agent_role(state, &agent_id, user, min).await?;
+    Ok(agent_id)
+}
+
+/// Require at least `min` role on the agent that owns `schedule_id`.
+pub async fn require_schedule_role(
+    state: &AppState,
+    schedule_id: &str,
+    user: &User,
+    min: &str,
+) -> AppResult<String> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT agent_id FROM schedules WHERE id = ?")
+        .bind(schedule_id)
+        .fetch_optional(&state.db)
+        .await?;
+    let agent_id = row
+        .map(|r| r.0)
+        .ok_or_else(|| AppError::NotFound("schedule not found".into()))?;
+    require_agent_role(state, &agent_id, user, min).await?;
+    Ok(agent_id)
+}
+
+/// Grant `owner` on a freshly created or imported agent to the user who made it,
+/// so it is visible and editable to them (admins see everything regardless).
+pub async fn grant_owner(
+    db: &crate::db::Db,
+    agent_id: &str,
+    user_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO agent_permissions (agent_id, user_id, role) VALUES (?, ?, 'owner')
+         ON CONFLICT(agent_id, user_id) DO UPDATE SET role = 'owner'",
+    )
+    .bind(agent_id)
+    .bind(user_id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_allow_list_is_exact() {
+        for p in [
+            "/api/health",
+            "/health",
+            "/api/setup",
+            "/api/setup/status",
+            "/api/login",
+            "/api/marketplace",
+            "/api/v1/models",
+            "/api/v1/agents/x/invoke",
+            "/api/webhooks/invoice",
+        ] {
+            assert!(is_public_path(p), "{p} must be public");
+        }
+        for p in [
+            "/api/agents",
+            "/api/marketplace/earnings",
+            "/api/marketplace/usage",
+            "/api/users",
+            "/api/memory/purge",
+            "/api/connectors",
+            "/api/logs",
+            "/api/v1",
+            "/api/webhooks",
+        ] {
+            assert!(!is_public_path(p), "{p} must require a session");
+        }
+    }
+
+    #[test]
+    fn roles_are_ordered_owner_editor_viewer() {
+        assert!(role_rank("owner") > role_rank("editor"));
+        assert!(role_rank("editor") > role_rank("viewer"));
+        assert!(role_rank("viewer") > role_rank("nonsense"));
     }
 }

@@ -1,6 +1,5 @@
 //! Usage metering: token consumption per provider — the billing basis.
 
-use crate::bootstrap::DEFAULT_ACCOUNT_ID;
 use crate::error::AppResult;
 use crate::state::AppState;
 use axum::extract::State;
@@ -9,7 +8,10 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 /// `GET /api/usage` — totals per provider plus recent entries.
-pub async fn get(State(state): State<AppState>) -> AppResult<Json<Value>> {
+pub async fn get(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+) -> AppResult<Json<Value>> {
     #[derive(Serialize, sqlx::FromRow)]
     struct ProviderTotal {
         provider: String,
@@ -27,7 +29,7 @@ pub async fn get(State(state): State<AppState>) -> AppResult<Json<Value>> {
            FROM token_usage WHERE account_id = ?
            GROUP BY provider ORDER BY estimated_cost DESC"#,
     )
-    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(&me.account_id)
     .fetch_all(&state.db)
     .await?;
 
@@ -44,7 +46,7 @@ pub async fn get(State(state): State<AppState>) -> AppResult<Json<Value>> {
         r#"SELECT provider, model, prompt_tokens, completion_tokens, estimated_cost, created_at
            FROM token_usage WHERE account_id = ? ORDER BY created_at DESC LIMIT 50"#,
     )
-    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(&me.account_id)
     .fetch_all(&state.db)
     .await?;
 

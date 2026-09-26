@@ -3,9 +3,9 @@
 //! Autonomous full-auto agents can write and run code via their tools, so the
 //! subprocess is confined according to the backend chosen in Settings:
 //!
-//! - `none`        — host execution (default, no isolation).
+//! - `none`        — host execution (no isolation).
 //! - `landlock`    — native Linux Landlock LSM (filesystem confinement, no
-//!                   external binary, no KVM). Applied in `pre_exec`. Recommended.
+//!   external binary, no KVM). Applied in `pre_exec`. Default.
 //! - `bubblewrap`  — `bwrap` namespaces (filesystem + optional network).
 //! - `nsjail`      — `nsjail` namespaces.
 //! - `docker` / `podman` — one container per run (needs an image with `claude`).
@@ -45,7 +45,9 @@ impl Default for SandboxConfig {
     }
 }
 
-/// Read the active sandbox config (singleton row), defaulting to `none`.
+/// Read the active sandbox config (singleton row). Migration 0015 seeds the row
+/// with `landlock`, and the in-code default matches it, so a fresh install is
+/// confined without any configuration.
 pub async fn active(db: &Db) -> SandboxConfig {
     let row: Option<(String, Option<String>)> =
         sqlx::query_as("SELECT kind, params FROM sandbox_backend WHERE id = 1")
@@ -99,6 +101,14 @@ pub async fn probe(cfg: &SandboxConfig) -> Result<String> {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn probe_landlock() -> Result<String> {
+    Err(anyhow!(
+        "landlock is a Linux LSM and is unavailable on this host; pick another sandbox backend"
+    ))
+}
+
+#[cfg(target_os = "linux")]
 fn probe_landlock() -> Result<String> {
     use landlock::{Access, AccessFs, Ruleset, RulesetAttr, ABI};
     // create() opens the ruleset fd WITHOUT restrict_self, so the server process
@@ -124,26 +134,71 @@ async fn probe_bin(bin: &str, args: &[&str]) -> Result<String> {
 
 async fn probe_microvm(bin: &str) -> Result<String> {
     if !std::path::Path::new("/dev/kvm").exists() {
-        return Err(anyhow!("/dev/kvm missing — host has no (nested) virtualization"));
+        return Err(anyhow!(
+            "/dev/kvm missing — host has no (nested) virtualization"
+        ));
     }
     probe_bin(bin, &["--version"]).await
 }
 
 fn pbool(cfg: &SandboxConfig, key: &str, default: bool) -> bool {
-    cfg.params.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
+    cfg.params
+        .get(key)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(default)
 }
 fn pstr<'a>(cfg: &'a SandboxConfig, key: &str) -> &'a str {
     cfg.params.get(key).and_then(|v| v.as_str()).unwrap_or("")
 }
 fn pu64(cfg: &SandboxConfig, key: &str) -> Option<u64> {
-    cfg.params.get(key).and_then(|v| v.as_u64()).filter(|n| *n > 0)
+    cfg.params
+        .get(key)
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n > 0)
 }
 fn extra_args(cfg: &SandboxConfig) -> Vec<String> {
     cfg.params
         .get("extra_args")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default()
+}
+
+/// Environment for a sandboxed `claude` child: an explicit whitelist, never the
+/// server's environment, which holds MASTER_KEY, provider API keys and the
+/// database URL and is readable through /proc/self/environ by a confined child.
+/// `own_home` points HOME at the workdir so config/cache writes stay inside it.
+pub fn child_env(workdir: &str, token: Option<&str>, own_home: bool) -> Vec<(String, String)> {
+    // Created together with the workdir by claude_cli::prepare_workdir.
+    let tmp = format!("{workdir}/tmp");
+    let mut env: Vec<(String, String)> = vec![
+        (
+            "PATH".into(),
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into()),
+        ),
+        ("TMPDIR".into(), tmp),
+        ("LANG".into(), "C.UTF-8".into()),
+    ];
+    if own_home {
+        env.push(("HOME".into(), workdir.to_string()));
+    } else if let Ok(home) = std::env::var("HOME") {
+        env.push(("HOME".into(), home));
+    }
+    if let Some(t) = token {
+        env.push(("CLAUDE_CODE_OAUTH_TOKEN".into(), t.to_string()));
+    }
+    env
+}
+
+fn apply_child_env(cmd: &mut std::process::Command, env: &[(String, String)]) {
+    cmd.env_clear();
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
 }
 
 /// Build the `tokio` command that runs `program args...` with cwd `workdir`,
@@ -160,15 +215,9 @@ pub fn build_command(
         "landlock" => {
             // Native FS confinement, applied to the child via pre_exec.
             let mut std_cmd = std::process::Command::new(program);
-            std_cmd
-                .args(args)
-                .current_dir(workdir)
-                // Keep config/cache writes inside the writable workdir.
-                .env("HOME", workdir);
-            if let Some(t) = token {
-                std_cmd.env("CLAUDE_CODE_OAUTH_TOKEN", t);
-            }
-            attach_landlock(&mut std_cmd, workdir);
+            std_cmd.args(args).current_dir(workdir);
+            apply_child_env(&mut std_cmd, &child_env(workdir, token, true));
+            attach_landlock(&mut std_cmd, workdir, pbool(cfg, "share_tmp", true));
             Command::from(std_cmd)
         }
         "bubblewrap" => {
@@ -178,21 +227,39 @@ pub fn build_command(
                 "--unshare-ipc".into(),
                 "--unshare-uts".into(),
                 "--new-session".into(),
-                "--ro-bind".into(), "/usr".into(), "/usr".into(),
-                "--ro-bind".into(), "/etc".into(), "/etc".into(),
-                "--ro-bind-try".into(), "/bin".into(), "/bin".into(),
-                "--ro-bind-try".into(), "/sbin".into(), "/sbin".into(),
-                "--ro-bind-try".into(), "/lib".into(), "/lib".into(),
-                "--ro-bind-try".into(), "/lib64".into(), "/lib64".into(),
-                "--proc".into(), "/proc".into(),
-                "--dev".into(), "/dev".into(),
-                "--tmpfs".into(), "/tmp".into(),
-                "--bind".into(), workdir.into(), workdir.into(),
-                "--chdir".into(), workdir.into(),
-                "--setenv".into(), "HOME".into(), workdir.into(),
+                "--ro-bind".into(),
+                "/usr".into(),
+                "/usr".into(),
+                "--ro-bind".into(),
+                "/etc".into(),
+                "/etc".into(),
+                "--ro-bind-try".into(),
+                "/bin".into(),
+                "/bin".into(),
+                "--ro-bind-try".into(),
+                "/sbin".into(),
+                "/sbin".into(),
+                "--ro-bind-try".into(),
+                "/lib".into(),
+                "/lib".into(),
+                "--ro-bind-try".into(),
+                "/lib64".into(),
+                "/lib64".into(),
+                "--proc".into(),
+                "/proc".into(),
+                "--dev".into(),
+                "/dev".into(),
+                "--tmpfs".into(),
+                "/tmp".into(),
+                "--bind".into(),
+                workdir.into(),
+                workdir.into(),
+                "--chdir".into(),
+                workdir.into(),
+                "--clearenv".into(),
             ];
-            if let Some(t) = token {
-                a.extend(["--setenv".into(), "CLAUDE_CODE_OAUTH_TOKEN".into(), t.into()]);
+            for (k, v) in child_env(workdir, token, true) {
+                a.extend(["--setenv".into(), k, v]);
             }
             if !pbool(cfg, "allow_network", true) {
                 a.push("--unshare-net".into());
@@ -208,16 +275,21 @@ pub fn build_command(
         "nsjail" => {
             let mut a: Vec<String> = vec![
                 "-Mo".into(),
-                "--rlimit_as".into(), "max".into(),
-                "--chroot".into(), "/".into(),
-                "--cwd".into(), workdir.into(),
-                "--bindmount".into(), format!("{workdir}:{workdir}"),
+                "--rlimit_as".into(),
+                "max".into(),
+                "--chroot".into(),
+                "/".into(),
+                "--cwd".into(),
+                workdir.into(),
+                "--bindmount".into(),
+                format!("{workdir}:{workdir}"),
             ];
             if pbool(cfg, "allow_network", true) {
                 a.push("--disable_clone_newnet".into());
             }
-            if let Some(t) = token {
-                a.extend(["--env".into(), format!("CLAUDE_CODE_OAUTH_TOKEN={t}")]);
+            // nsjail starts from an empty environment; pass the whitelist only.
+            for (k, v) in child_env(workdir, token, true) {
+                a.extend(["--env".into(), format!("{k}={v}")]);
             }
             a.extend(extra_args(cfg));
             a.push("--".into());
@@ -231,12 +303,19 @@ pub fn build_command(
             let engine = cfg.kind.as_str();
             let image = {
                 let i = pstr(cfg, "image");
-                if i.is_empty() { "takoia/agent-runtime:latest" } else { i }
+                if i.is_empty() {
+                    "takoia/agent-runtime:latest"
+                } else {
+                    i
+                }
             };
             let mut a: Vec<String> = vec![
-                "run".into(), "--rm".into(),
-                "-v".into(), format!("{workdir}:{workdir}"),
-                "-w".into(), workdir.into(),
+                "run".into(),
+                "--rm".into(),
+                "-v".into(),
+                format!("{workdir}:{workdir}"),
+                "-w".into(),
+                workdir.into(),
                 "-i".into(),
             ];
             if !pbool(cfg, "allow_network", true) {
@@ -265,7 +344,11 @@ pub fn build_command(
             // workdir, the program and its args. Defaults to the named CLI.
             let launcher = {
                 let l = pstr(cfg, "launcher");
-                if l.is_empty() { cfg.kind.clone() } else { l.to_string() }
+                if l.is_empty() {
+                    cfg.kind.clone()
+                } else {
+                    l.to_string()
+                }
             };
             let mut a: Vec<String> = vec!["--workdir".into(), workdir.into()];
             if let Some(t) = token {
@@ -278,14 +361,14 @@ pub fn build_command(
             c.args(a);
             c
         }
-        // "none" and anything unknown: run directly on the host.
+        // "none" and anything unknown: run directly on the host, still with a
+        // cleared environment. Without a plan token the parent HOME is kept so a
+        // developer's own `claude` login keeps working.
         _ => {
-            let mut c = Command::new(program);
-            c.args(args).current_dir(workdir);
-            if let Some(t) = token {
-                c.env("CLAUDE_CODE_OAUTH_TOKEN", t);
-            }
-            c
+            let mut std_cmd = std::process::Command::new(program);
+            std_cmd.args(args).current_dir(workdir);
+            apply_child_env(&mut std_cmd, &child_env(workdir, token, token.is_some()));
+            Command::from(std_cmd)
         }
     }
 }
@@ -293,6 +376,15 @@ pub fn build_command(
 /// Self-test the Landlock filesystem confinement using the exact rules
 /// `build_command` applies. Restricts THIS process, then probes writes — run it
 /// as a throwaway `takoia sandbox-selftest <workdir>` process, never the server.
+#[cfg(not(target_os = "linux"))]
+pub fn selftest(_workdir: &str) -> String {
+    "landlock restrict_self: UNAVAILABLE (Linux-only LSM)\n".to_string()
+}
+
+/// Self-test the Landlock filesystem confinement using the exact rules
+/// `build_command` applies. Restricts THIS process, then probes writes — run it
+/// as a throwaway `takoia sandbox-selftest <workdir>` process, never the server.
+#[cfg(target_os = "linux")]
 pub fn selftest(workdir: &str) -> String {
     use landlock::{
         path_beneath_rules, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
@@ -321,25 +413,46 @@ pub fn selftest(workdir: &str) -> String {
     let inside = std::fs::write(format!("{workdir}/ll_ok.txt"), b"ok");
     out.push_str(&format!(
         "write {workdir}/ll_ok.txt   -> {}\n",
-        inside.map(|_| "OK (workdir allowed)".to_string()).unwrap_or_else(|e| format!("FAIL {e}"))
+        inside
+            .map(|_| "OK (workdir allowed)".to_string())
+            .unwrap_or_else(|e| format!("FAIL {e}"))
     ));
     let escape = std::fs::write("/home/takoia/ll_escape.txt", b"pwned");
     out.push_str(&format!(
         "write /home/takoia/ll_escape.txt -> {}\n",
-        escape.map(|_| "OK -- LEAK!".to_string()).unwrap_or_else(|e| format!("BLOCKED ({})", e.kind()))
+        escape
+            .map(|_| "OK -- LEAK!".to_string())
+            .unwrap_or_else(|e| format!("BLOCKED ({})", e.kind()))
     ));
     let read_etc = std::fs::read("/etc/hostname");
     out.push_str(&format!(
         "read  /etc/hostname        -> {}\n",
-        read_etc.map(|_| "OK (system readable)".to_string()).unwrap_or_else(|e| format!("FAIL {e}"))
+        read_etc
+            .map(|_| "OK (system readable)".to_string())
+            .unwrap_or_else(|e| format!("FAIL {e}"))
     ));
     out
+}
+
+/// Non-Linux hosts have no Landlock: keep the same fail-closed contract as the
+/// Linux path (refuse to spawn unconfined) so a misconfigured dev box never
+/// silently runs the agent on the bare host.
+#[cfg(not(target_os = "linux"))]
+fn attach_landlock(cmd: &mut std::process::Command, _workdir: &str, _share_tmp: bool) {
+    use std::os::unix::process::CommandExt;
+    let msg = "landlock sandbox unavailable on this OS, refusing to run unconfined \
+               (select another sandbox backend in Settings)";
+    tracing::error!("{msg}");
+    unsafe {
+        cmd.pre_exec(move || Err(std::io::Error::other(msg)));
+    }
 }
 
 /// Attach a Landlock filesystem restriction to a std command via `pre_exec`.
 /// The ruleset is built in the parent (allowed allocation); only the
 /// `restrict_self` syscall runs post-fork in the child.
-fn attach_landlock(cmd: &mut std::process::Command, workdir: &str) {
+#[cfg(target_os = "linux")]
+fn attach_landlock(cmd: &mut std::process::Command, workdir: &str, share_tmp: bool) {
     use landlock::{
         path_beneath_rules, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
     };
@@ -354,7 +467,14 @@ fn attach_landlock(cmd: &mut std::process::Command, workdir: &str) {
     let ro = [
         "/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64", "/dev", "/proc", "/run", "/sys",
     ];
-    let rw = [workdir.to_string(), "/tmp".to_string()];
+    // The workdir and its private tmp (TMPDIR) are always writable. `/tmp` stays
+    // writable by default because the CLI may still touch it directly, but it is
+    // shared by every agent on the host: set the sandbox param share_tmp=false
+    // to close it once TMPDIR is confirmed to be honoured on the target.
+    let mut rw = vec![workdir.to_string()];
+    if share_tmp {
+        rw.push("/tmp".to_string());
+    }
 
     let built = (|| {
         Ruleset::default()
@@ -371,10 +491,7 @@ fn attach_landlock(cmd: &mut std::process::Command, workdir: &str) {
                 cmd.pre_exec(move || {
                     if let Some(r) = cell.take() {
                         r.restrict_self().map_err(|e| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                format!("landlock restrict failed: {e}"),
-                            )
+                            std::io::Error::other(format!("landlock restrict failed: {e}"))
                         })?;
                     }
                     Ok(())
@@ -388,10 +505,107 @@ fn attach_landlock(cmd: &mut std::process::Command, workdir: &str) {
             let msg = format!("landlock sandbox unavailable, refusing to run unconfined: {e}");
             tracing::error!("{msg}");
             unsafe {
-                cmd.pre_exec(move || {
-                    Err(std::io::Error::new(std::io::ErrorKind::Other, msg.clone()))
-                });
+                cmd.pre_exec(move || Err(std::io::Error::other(msg.clone())));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(kind: &str, params: Value) -> SandboxConfig {
+        SandboxConfig {
+            kind: kind.into(),
+            params,
+        }
+    }
+
+    fn envs(cmd: &Command) -> Vec<(String, Option<String>)> {
+        cmd.as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn host_backend_never_inherits_the_server_environment() {
+        std::env::set_var("TAKOIA_TEST_SECRET", "leak-me");
+        let wd = std::env::temp_dir().join("takoia-env-test");
+        let cmd = build_command(
+            &cfg("none", json!({})),
+            wd.to_str().unwrap(),
+            "true",
+            &[],
+            Some("tok"),
+        );
+        assert!(
+            cmd.as_std().get_envs().len() > 0,
+            "env_clear must have been called (get_envs lists the explicit set)"
+        );
+        let set = envs(&cmd);
+        assert!(set.iter().all(|(k, _)| k != "TAKOIA_TEST_SECRET"));
+        assert!(set
+            .iter()
+            .any(|(k, v)| k == "CLAUDE_CODE_OAUTH_TOKEN" && v.as_deref() == Some("tok")));
+        assert!(set
+            .iter()
+            .any(|(k, v)| k == "HOME" && v.as_deref() == wd.to_str()));
+        assert!(set.iter().any(|(k, _)| k == "PATH"));
+        assert!(set.iter().any(|(k, _)| k == "TMPDIR"));
+    }
+
+    #[test]
+    fn host_backend_without_token_keeps_developer_home() {
+        let wd = std::env::temp_dir().join("takoia-env-test2");
+        let cmd = build_command(
+            &cfg("none", json!({})),
+            wd.to_str().unwrap(),
+            "true",
+            &[],
+            None,
+        );
+        let set = envs(&cmd);
+        let home = std::env::var("HOME").ok();
+        assert!(set.iter().any(|(k, v)| k == "HOME" && *v == home));
+        assert!(set.iter().all(|(k, _)| k != "CLAUDE_CODE_OAUTH_TOKEN"));
+    }
+
+    #[test]
+    fn bubblewrap_clears_env_before_setting_the_whitelist() {
+        let wd = std::env::temp_dir().join("takoia-env-test3");
+        let cmd = build_command(
+            &cfg("bubblewrap", json!({})),
+            wd.to_str().unwrap(),
+            "claude",
+            &["-p".into()],
+            Some("tok"),
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let clear = args
+            .iter()
+            .position(|a| a == "--clearenv")
+            .expect("--clearenv present");
+        let first_setenv = args
+            .iter()
+            .position(|a| a == "--setenv")
+            .expect("--setenv present");
+        assert!(
+            clear < first_setenv,
+            "--clearenv must precede every --setenv"
+        );
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--setenv" && w[1] == "CLAUDE_CODE_OAUTH_TOKEN"));
     }
 }

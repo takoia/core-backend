@@ -132,7 +132,11 @@ pub async fn record_failure(db: &Db, ip: &str, s: &SecuritySettings) -> bool {
         .bind(ip)
         .execute(db)
         .await;
-        tracing::warn!(ip, attempts = count.0, "ip auto-banned for repeated failed logins");
+        tracing::warn!(
+            ip,
+            attempts = count.0,
+            "ip auto-banned for repeated failed logins"
+        );
         return true;
     }
     false

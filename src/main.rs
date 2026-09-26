@@ -13,11 +13,12 @@ mod http;
 mod llm;
 mod memory;
 mod net;
+mod pricing;
 mod queue;
 mod sandbox;
 mod scheduler;
-mod security;
 mod secrets;
+mod security;
 mod state;
 mod tools;
 
@@ -32,7 +33,10 @@ async fn main() -> Result<()> {
     // dedicated thread (Landlock restrict_self is per-thread) and exits.
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("sandbox-selftest") {
-        let workdir = args.get(2).cloned().unwrap_or_else(|| "/tmp/ll-selftest".to_string());
+        let workdir = args
+            .get(2)
+            .cloned()
+            .unwrap_or_else(|| "/tmp/ll-selftest".to_string());
         let report = std::thread::spawn(move || sandbox::selftest(&workdir))
             .join()
             .unwrap_or_else(|_| "selftest thread panicked".to_string());
@@ -90,9 +94,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to bind {}", config.bind_addr))?;
     tracing::info!(addr = %config.bind_addr, "listening");
 
-    axum::serve(listener, app)
-        .await
-        .context("server error")?;
+    axum::serve(listener, app).await.context("server error")?;
     Ok(())
 }
 

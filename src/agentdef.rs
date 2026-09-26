@@ -120,8 +120,9 @@ pub async fn import(db: &Db, account_id: &str, toml_str: &str) -> Result<String>
     sqlx::query(
         r#"INSERT INTO agents
              (id, account_id, name, description, autonomy_level, expertise_domain,
-              author, version, trigger_on, emit, definition_toml, visibility, price_per_run_usd, icon, persona)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              author, version, trigger_on, emit, definition_toml, visibility, price_per_run_usd, icon, persona,
+              webhook_secret)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, lower(hex(randomblob(24))))
            ON CONFLICT(id) DO UPDATE SET
              name = excluded.name,
              description = excluded.description,
@@ -237,18 +238,28 @@ pub async fn export(db: &Db, agent_id: &str) -> Result<String> {
 
     let mut steps = HashMap::new();
     for r in step_rows {
-        let opts: serde_json::Value =
+        let mut opts: serde_json::Value =
             serde_json::from_str(&r.options).unwrap_or(serde_json::Value::Null);
+        // A definition file travels (marketplace, git, support tickets): inline
+        // credentials are stripped, connector references are kept.
+        crate::domain::redact_step_options(&mut opts, true);
         steps.insert(
             r.step_type,
             StepDef {
                 system_prompt: r.system_prompt,
-                provider: opts.get("provider").and_then(|v| v.as_str()).map(String::from),
+                provider: opts
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
                 model: opts.get("model").and_then(|v| v.as_str()).map(String::from),
                 allowed_tools: opts
                     .get("allowed_tools")
                     .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 tool_params: opts
                     .get("tool_params")

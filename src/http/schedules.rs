@@ -25,12 +25,21 @@ struct ScheduleRow {
 }
 
 /// `GET /api/schedules` — list schedules.
-pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
+pub async fn list(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+) -> AppResult<Json<Value>> {
     let rows = sqlx::query_as::<_, ScheduleRow>(
         r#"SELECT id, agent_id, title, prompt, cron_expr, interval_seconds, enabled,
                   run_count, last_run_at, next_run_at
-           FROM schedules ORDER BY created_at DESC"#,
+           FROM schedules
+           WHERE agent_id IN (SELECT id FROM agents WHERE account_id = ?3)
+             AND (?1 = 1 OR agent_id IN (SELECT agent_id FROM agent_permissions WHERE user_id = ?2))
+           ORDER BY created_at DESC"#,
     )
+    .bind(me.is_admin != 0)
+    .bind(&me.id)
+    .bind(&me.account_id)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "schedules": rows })))
@@ -63,6 +72,7 @@ fn default_true() -> bool {
 /// on the interval/cron).
 pub async fn create(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Json(body): Json<CreateSchedule>,
 ) -> AppResult<Json<Value>> {
     if body.prompt.trim().is_empty() {
@@ -75,6 +85,7 @@ pub async fn create(
     if exists.is_none() {
         return Err(AppError::NotFound("agent not found".into()));
     }
+    crate::http::users::require_agent_role(&state, &body.agent_id, &me, "editor").await?;
 
     // When no positive interval is given, the schedule runs on the cron
     // expression. Validate it up front (same parser as compute_next) so a
@@ -116,14 +127,15 @@ pub async fn create(
 /// `POST /api/schedules/:id/toggle` — enable/disable.
 pub async fn toggle(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
-    let res = sqlx::query(
-        "UPDATE schedules SET enabled = 1 - enabled WHERE id = ? RETURNING enabled",
-    )
-    .bind(&id)
-    .fetch_optional(&state.db)
-    .await?;
+    crate::http::users::require_schedule_role(&state, &id, &me, "editor").await?;
+    let res =
+        sqlx::query("UPDATE schedules SET enabled = 1 - enabled WHERE id = ? RETURNING enabled")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await?;
     if res.is_none() {
         return Err(AppError::NotFound("schedule not found".into()));
     }
@@ -133,8 +145,10 @@ pub async fn toggle(
 /// `DELETE /api/schedules/:id` — remove a schedule.
 pub async fn delete(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_schedule_role(&state, &id, &me, "editor").await?;
     sqlx::query("DELETE FROM schedules WHERE id = ?")
         .bind(&id)
         .execute(&state.db)

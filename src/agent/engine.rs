@@ -20,7 +20,12 @@ use uuid::Uuid;
 /// Outcome of a run attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOutcome {
-    Completed,
+    /// The run finished. `canned` is true when at least one step was served by
+    /// the offline demo provider (only possible in demo mode); such output
+    /// must never be billed or presented as real.
+    Completed {
+        canned: bool,
+    },
     AwaitingApproval,
 }
 
@@ -49,7 +54,11 @@ struct StepConfigRow {
 /// `read_only_memory` is set (marketplace consumer invokes), the agent recalls
 /// its memory but does NOT write to it, so the publisher's curated expertise is
 /// never polluted by consumer inputs.
-pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool) -> Result<RunOutcome> {
+pub async fn run_job(
+    state: &AppState,
+    job: &ClaimedJob,
+    read_only_memory: bool,
+) -> Result<RunOutcome> {
     let bus = &state.events;
     bus.publish(JobEvent::status(&job.id, "running", "job started"));
 
@@ -71,16 +80,24 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
     let autonomy = AutonomyLevel::from_db(&agent.autonomy_level);
 
     let configs = load_step_configs(state, &job.agent_id).await?;
-    let registry = state.load_registry(&objective.account_id, &job.agent_id).await?;
+    let registry = state
+        .load_registry(&objective.account_id, &job.agent_id)
+        .await?;
     let done = load_done_steps(state, &job.id).await?;
 
     // Permanent memory: recall accumulated expertise for prompt injection.
-    let memory_ctx = state.memory.recall(&job.agent_id, &objective.prompt, 6).await;
+    let memory_ctx = state
+        .memory
+        .recall(&job.agent_id, &objective.prompt, 6)
+        .await;
     if !memory_ctx.trim().is_empty() {
         bus.publish(JobEvent::log(&job.id, "recalled expertise from memory"));
     }
     // Past corrections (learn from detected errors).
-    let corrections = state.memory.recall_feedback(&job.agent_id, &objective.prompt, 5).await;
+    let corrections = state
+        .memory
+        .recall_feedback(&job.agent_id, &objective.prompt, 5)
+        .await;
     if !corrections.trim().is_empty() {
         bus.publish(JobEvent::log(&job.id, "applying past corrections"));
     }
@@ -104,24 +121,31 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
         mood_flavor,
         read_only: read_only_memory,
         last_step_canned: false,
+        any_step_canned: false,
     };
 
     // ── Analyse ────────────────────────────────────────────────────────────
+    // The recalled memory is injected once per step by `RunCtx::step` (system
+    // message); repeating it here doubled the Analyse prompt.
     let analyse_input = format!(
-        "Objective: {}\n\n{}\n\nRelevant memory:\n{}\n\nPast corrections to apply:\n{}",
+        "Objective: {}\n\n{}\n\nPast corrections to apply:\n{}",
         objective.title,
         objective.prompt,
-        if memory_ctx.trim().is_empty() { "(none)" } else { &memory_ctx },
-        if corrections.trim().is_empty() { "(none)" } else { &corrections }
+        if corrections.trim().is_empty() {
+            "(none)"
+        } else {
+            &corrections
+        }
     );
-    let analysis = ctx.step(StepType::Analyse, &analyse_input, &done, 0).await?;
+    let analysis = ctx
+        .step(StepType::Analyse, &analyse_input, &done, 0)
+        .await?;
 
     // ── Decision ───────────────────────────────────────────────────────────
-    let decision_input = format!(
-        "Objective: {}\n\nAnalysis:\n{}",
-        objective.prompt, analysis
-    );
-    let decision = ctx.step(StepType::Decision, &decision_input, &done, 1).await?;
+    let decision_input = format!("Objective: {}\n\nAnalysis:\n{}", objective.prompt, analysis);
+    let decision = ctx
+        .step(StepType::Decision, &decision_input, &done, 1)
+        .await?;
 
     // ── Approval gate (human-in-the-loop) ──────────────────────────────────
     if autonomy == AutonomyLevel::ConfirmBeforeAction {
@@ -133,7 +157,7 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
                 let msg = "action rejected by human";
                 queue::mark_failed(&state.db, &job.id, msg).await?;
                 bus.publish(JobEvent::status(&job.id, "failed", msg));
-                return Ok(RunOutcome::Completed);
+                return Ok(RunOutcome::Completed { canned: false });
             }
             Some(_) => return Ok(RunOutcome::AwaitingApproval), // still pending
             None => {
@@ -149,91 +173,52 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
         }
     }
 
-    // ── Action (tool execution via sandbox) ────────────────────────────────
-    // Run every tool the agent's Action step allows (market_data, web_search…),
-    // gathering their output. Extraction agents with no tools process the payload.
+    // ── Action (tool execution) ────────────────────────────────────────────
+    // Every tool the Action step allows runs through `action_tools::gather`;
+    // its digest is what the Action step synthesises. Skipped when the Action
+    // step was already completed on a prior attempt (the step result is reused
+    // below, so re-running the tools would only waste calls and re-bill).
     let allowed = ctx.allowed_tools(StepType::Action);
     let params = ctx.tool_params(StepType::Action);
     if !allowed.is_empty() {
         bus.publish(JobEvent::step_started(&job.id, "action"));
     }
-    let mut gathered = String::new();
-    // Skip tool gathering when the Action step was already completed on a prior
-    // attempt: the step result is reused below, so re-running the tools would
-    // only waste calls and re-bill tokens (e.g. web_search).
     let action_done = done.contains_key(StepType::Action.as_str());
-    if !action_done && allowed.iter().any(|t| t == "market_data") {
-        let symbol = params.get("symbol").and_then(|v| v.as_str()).unwrap_or("^IXIC");
-        bus.publish(JobEvent::log(&job.id, format!("running tool: market_data ({symbol})")));
-        match tools::market_data(symbol).await {
-            Ok(out) => gathered.push_str(&format!("\n{}", out.output)),
-            Err(e) => gathered.push_str(&format!("\nmarket_data error: {e}")),
-        }
-    }
-    if !action_done && allowed.iter().any(|t| t == "web_search") {
-        let provider = registry.resolve(ctx.provider_for(StepType::Action).as_deref());
-        // Restrict to a specific site when the web_search tool has a `site` param.
-        let site = params.get("site").and_then(|v| v.as_str()).unwrap_or("");
-        let query = if site.trim().is_empty() {
-            objective.prompt.clone()
-        } else {
-            format!("{} site:{}", objective.prompt, site.trim())
-        };
-        bus.publish(JobEvent::log(&job.id, format!("running tool: web_search{}", if site.is_empty() { String::new() } else { format!(" ({site})") })));
-        let search = match tools::execute(&provider, "web_search", &query).await {
-            Ok(out) => out,
-            Err(e) => {
-                tracing::warn!(error = %e, "web_search failed, using canned fallback");
-                tools::execute(&registry.canned(), "web_search", &query).await?
-            }
-        };
-        ctx.record_usage(&provider.name(), "web_search", search.usage).await;
-        gathered.push_str(&format!("\nweb_search:\n{}", search.output));
-    }
-    // call_agent: this agent orchestrates other agents (multi-agent composition,
-    // the substrate of the agent-to-agent flow). Each target runs synchronously,
-    // read-only, and its deliverable is gathered for this agent to synthesize.
-    if !action_done && allowed.iter().any(|t| t == "call_agent") {
-        let targets = call_agent_targets(&params);
-        let depth = job_chain_depth(state, &job.id).await;
-        if depth >= MAX_CALL_DEPTH {
-            gathered.push_str("\ncall_agent skipped: max orchestration depth reached.");
-        } else {
-            for target in &targets {
-                bus.publish(JobEvent::log(&job.id, format!("orchestrating: calling agent {target}")));
-                match run_subagent(state, target, &objective.prompt, depth + 1).await {
-                    Ok(result) => gathered.push_str(&format!("\nagent[{target}]:\n{result}")),
-                    Err(e) => gathered.push_str(&format!("\nagent[{target}] error: {e}")),
-                }
-            }
-        }
-    }
-    // External agent-to-agent calls: invoke a published agent on this or another
-    // TakoIA instance via its billed invoke API. The callee meters + bills the
-    // call — the monetized agent-to-agent primitive.
+    let mut gathered = String::new();
     if !action_done {
-        if let Some(arr) = params.get("a2a_calls").and_then(|v| v.as_array()) {
-            for c in arr {
-                let url = c.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                let key = c.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                if url.is_empty() {
-                    continue;
-                }
-                bus.publish(JobEvent::log(&job.id, format!("A2A call: {url}")));
-                match run_a2a(url, key, &objective.prompt).await {
-                    Ok(r) => gathered.push_str(&format!("\na2a:\n{r}")),
-                    Err(e) => gathered.push_str(&format!("\na2a error: {e}")),
-                }
-            }
+        let provider_name = ctx.provider_for(StepType::Action);
+        let out = super::action_tools::gather(super::action_tools::ToolRun {
+            state,
+            job,
+            objective_prompt: &objective.prompt,
+            account_id: &objective.account_id,
+            registry: &registry,
+            provider_name: provider_name.as_deref(),
+            allowed: &allowed,
+            params: &params,
+        })
+        .await?;
+        for (provider, model, usage) in out.usage {
+            ctx.record_usage(&provider, &model, usage).await;
         }
+        gathered = out.text;
     }
     let action_input = if gathered.trim().is_empty() {
-        format!("Plan:\n{}\n\nInput to process:\n{}", decision, objective.prompt)
+        format!(
+            "Plan:\n{}\n\nInput to process:\n{}",
+            decision, objective.prompt
+        )
     } else {
         format!("Plan:\n{}\n\nGathered data:{}", decision, gathered)
     };
     let action = ctx
-        .step_with_extra(StepType::Action, &action_input, &done, 2, TokenUsage::default())
+        .step_with_extra(
+            StepType::Action,
+            &action_input,
+            &done,
+            2,
+            TokenUsage::default(),
+        )
         .await?;
 
     // ── Restitution (final deliverable + memory write) ─────────────────────
@@ -241,11 +226,10 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
     // run (approval requeue or crash recovery) `run_job` re-executes top to
     // bottom, so the post-restitution side effects below must not double-fire.
     let restitution_was_done = done.contains_key(StepType::Restitution.as_str());
-    let restitution_input = format!(
-        "Objective: {}\n\nFindings:\n{}",
-        objective.prompt, action
-    );
-    let report = ctx.step(StepType::Restitution, &restitution_input, &done, 3).await?;
+    let restitution_input = format!("Objective: {}\n\nFindings:\n{}", objective.prompt, action);
+    let report = ctx
+        .step(StepType::Restitution, &restitution_input, &done, 3)
+        .await?;
 
     // Persist what was learned so the agent gets more expert over time.
     // Read-only (marketplace) runs never write to the publisher's memory.
@@ -277,18 +261,53 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
     let suppressed = ctx.last_step_canned || report.to_ascii_uppercase().contains("NO_ALERT");
     if !restitution_was_done && allowed.iter().any(|t| t == "send_discord") {
         if suppressed {
-            bus.publish(JobEvent::log(&job.id, "no alert (agent reported no actionable signal)"));
+            bus.publish(JobEvent::log(
+                &job.id,
+                "no alert (agent reported no actionable signal)",
+            ));
         } else {
-            let webhook = params.get("discord_webhook").and_then(|v| v.as_str()).unwrap_or("");
-            match tools::send_discord(webhook, &format!("**{}**\n{}", objective.title, report)).await {
+            // Preferred: `discord_connector` names a `discord` connector whose
+            // secret is the webhook URL. Inline `discord_webhook` still works.
+            let webhook = match params.get("discord_connector").and_then(|v| v.as_str()) {
+                Some(name) => super::action_tools::connector_secret(
+                    state,
+                    &objective.account_id,
+                    "discord",
+                    name,
+                )
+                .await
+                .unwrap_or_default(),
+                None => params
+                    .get("discord_webhook")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            };
+            match tools::send_discord(&webhook, &format!("**{}**\n{}", objective.title, report))
+                .await
+            {
                 Ok(_) => bus.publish(JobEvent::log(&job.id, "alert sent to Discord")),
-                Err(e) => bus.publish(JobEvent::log(&job.id, format!("discord notify failed: {e}"))),
+                Err(e) => bus.publish(JobEvent::log(
+                    &job.id,
+                    format!("discord notify failed: {e}"),
+                )),
             }
         }
     }
 
     bus.publish(JobEvent::report(&job.id, &report));
-    queue::set_status(&state.db, &job.id, JobStatus::Done).await?;
+    if !queue::finish(&state.db, &job.id).await? {
+        // Failed underneath us (stale sweep): report it, do not undo it.
+        bus.publish(JobEvent::status(
+            &job.id,
+            "failed",
+            "job was marked failed while running",
+        ));
+        return Err(anyhow::anyhow!(
+            "job {} was marked failed while running",
+            job.id
+        ));
+    }
     bus.publish(JobEvent::status(&job.id, "done", "job completed"));
     // Skipped on a resumed-after-completion run so the run is counted once.
     if !restitution_was_done {
@@ -298,12 +317,15 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, read_only_memory: bool)
     // Event choreography: emit this agent's events, triggering any wired agents.
     // Skipped on a resumed-after-completion run so downstream agents fire once.
     if !restitution_was_done {
-        if let Err(e) = super::choreography::dispatch(state, &job.id, &job.agent_id, &report).await {
+        if let Err(e) = super::choreography::dispatch(state, &job.id, &job.agent_id, &report).await
+        {
             tracing::warn!(error = %e, "choreography dispatch failed");
         }
     }
 
-    Ok(RunOutcome::Completed)
+    Ok(RunOutcome::Completed {
+        canned: ctx.any_step_canned,
+    })
 }
 
 /// Per-run context bundling everything the steps need.
@@ -329,6 +351,8 @@ struct RunCtx<'a> {
     /// Whether the most recent step fell back to the canned offline provider
     /// (its generic demo content must not be pushed as a real Discord alert).
     last_step_canned: bool,
+    /// Whether ANY step of this run used the canned provider (demo mode only).
+    any_step_canned: bool,
 }
 
 impl<'a> RunCtx<'a> {
@@ -345,6 +369,14 @@ impl<'a> RunCtx<'a> {
             .and_then(|c| serde_json::from_str::<StepOptions>(&c.options).ok())
             .map(|o| o.allowed_tools)
             .unwrap_or_default()
+    }
+
+    fn remember(&self, step: StepType) -> bool {
+        self.configs
+            .get(step.as_str())
+            .and_then(|c| serde_json::from_str::<StepOptions>(&c.options).ok())
+            .map(|o| o.remember)
+            .unwrap_or(false)
     }
 
     fn tool_params(&self, step: StepType) -> serde_json::Value {
@@ -406,13 +438,16 @@ impl<'a> RunCtx<'a> {
             ));
         }
 
-        let provider = self.registry.resolve(self.provider_for(step).as_deref());
+        let provider = self.registry.resolve(self.provider_for(step).as_deref())?;
         let mut messages = vec![Message::system(self.system_prompt(step))];
         // Per-agent persona (static identity/voice). The evolving half is the
         // ICM memory recalled just below — together they form the agent's
         // personalization that grows as memory consolidates.
         if !self.persona.trim().is_empty() {
-            messages.push(Message::system(format!("Your persona / identity:\n{}", self.persona)));
+            messages.push(Message::system(format!(
+                "Your persona / identity:\n{}",
+                self.persona
+            )));
         }
         // The agent's current inner state (mood / energy / familiarity).
         if !self.mood_flavor.trim().is_empty() {
@@ -447,21 +482,34 @@ impl<'a> RunCtx<'a> {
         messages.push(Message::user(input.to_string()));
         let req = CompletionRequest::new(messages);
 
+        // A provider failure fails the step (and the run). Only demo mode
+        // substitutes the offline canned provider, and the run is then flagged
+        // so its output is never billed or alerted on.
         let mut used_canned = false;
         let completion = match provider.complete(req.clone()).await {
             Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(step = step.as_str(), error = %e, "step failed, canned fallback");
+            Err(e) if self.registry.demo_mode() => {
+                tracing::warn!(step = step.as_str(), error = %e, "step failed, canned fallback (demo mode)");
                 bus.publish(JobEvent::log(
                     &self.job.id,
-                    format!("{} provider error, using offline fallback", label(step)),
+                    format!(
+                        "{} provider error, using offline demo fallback",
+                        label(step)
+                    ),
                 ));
                 used_canned = true;
                 self.registry.canned().complete(req).await?
             }
+            Err(e) => {
+                bus.publish(JobEvent::log(
+                    &self.job.id,
+                    format!("{} provider error: {e}", label(step)),
+                ));
+                return Err(e).with_context(|| format!("{} step failed", label(step)));
+            }
         };
 
-        self.record_usage(&provider.name(), step.as_str(), completion.usage)
+        self.record_usage(provider.name(), &completion.model, completion.usage)
             .await;
         persist_step(
             self.state,
@@ -473,12 +521,13 @@ impl<'a> RunCtx<'a> {
         )
         .await?;
 
-        // ── ICM store at the END of every step ─────────────────────────────
-        // Persist this step's result so later steps and future runs recall it.
-        // Skipped for read-only (marketplace) runs to protect the publisher, and
-        // when the canned offline fallback was used (its generic demo content
-        // would poison the agent's recalled memory).
-        if !self.read_only && !used_canned {
+        // ── ICM store (opt-in per step) ────────────────────────────────────
+        // Persist this step's result only when the step config asks for it
+        // (`remember: true`): by default only the run summary and the user's
+        // interaction are stored, at the end of the run. Skipped for read-only
+        // (marketplace) runs to protect the publisher, and when the canned demo
+        // fallback was used (its generic content would poison recall).
+        if !self.read_only && !used_canned && self.remember(step) {
             let trimmed: String = completion.content.chars().take(500).collect();
             if let Err(e) = self
                 .state
@@ -507,11 +556,12 @@ impl<'a> RunCtx<'a> {
             serde_json::json!({ "text": completion.content }),
         ));
         self.last_step_canned = used_canned;
+        self.any_step_canned |= used_canned;
         Ok(completion.content)
     }
 
     async fn record_usage(&self, provider: &str, model: &str, usage: TokenUsage) {
-        let cost = notional_cost(usage);
+        let cost = self.state.config.pricing.cost_usd(model, usage);
         let res = sqlx::query(
             r#"INSERT INTO token_usage
                (id, account_id, agent_id, job_id, provider, model,
@@ -540,12 +590,6 @@ impl<'a> RunCtx<'a> {
             ),
         ));
     }
-}
-
-/// Notional USD cost estimate (real cost is the flat plan). Indicative only,
-/// the basis for usage-based billing of marketplace consumers.
-fn notional_cost(usage: TokenUsage) -> f64 {
-    (usage.prompt_tokens as f64 * 3.0 + usage.completion_tokens as f64 * 15.0) / 1_000_000.0
 }
 
 async fn load_step_configs(
@@ -649,118 +693,4 @@ pub async fn fail(state: &AppState, job_id: &str, err: &anyhow::Error) {
     state
         .events
         .publish(JobEvent::status(job_id, "failed", msg));
-}
-
-// ── Multi-agent orchestration (call_agent) ──────────────────────────────────
-
-/// Maximum agent-to-agent orchestration depth (anti-recursion guard).
-const MAX_CALL_DEPTH: i64 = 3;
-
-/// Target agent ids for the `call_agent` tool, read from the Action step params:
-/// `{ "call_agents": ["id1","id2"] }` or `{ "call_agent_id": "id" }`.
-fn call_agent_targets(params: &serde_json::Value) -> Vec<String> {
-    if let Some(arr) = params.get("call_agents").and_then(|v| v.as_array()) {
-        return arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
-    }
-    params
-        .get("call_agent_id")
-        .and_then(|v| v.as_str())
-        .map(|s| vec![s.to_string()])
-        .unwrap_or_default()
-}
-
-async fn job_chain_depth(state: &AppState, job_id: &str) -> i64 {
-    sqlx::query_as::<_, (i64,)>("SELECT chain_depth FROM jobs WHERE id = ?")
-        .bind(job_id)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(|r| r.0)
-        .unwrap_or(0)
-}
-
-/// Run another agent synchronously and return its deliverable (restitution).
-/// Read-only so the callee's curated memory is never polluted by the caller's
-/// sub-task. `Box::pin` breaks the run_job -> call_agent -> run_job async cycle.
-async fn run_subagent(
-    state: &AppState,
-    target_agent_id: &str,
-    subtask: &str,
-    depth: i64,
-) -> Result<String> {
-    let account: Option<(String,)> = sqlx::query_as("SELECT account_id FROM agents WHERE id = ?")
-        .bind(target_agent_id)
-        .fetch_optional(&state.db)
-        .await?;
-    let Some((account_id,)) = account else {
-        return Err(anyhow::anyhow!("target agent not found"));
-    };
-
-    let objective_id = Uuid::new_v4().to_string();
-    let sub_job_id = Uuid::new_v4().to_string();
-    let mut tx = state.db.begin().await?;
-    sqlx::query(
-        "INSERT INTO objectives (id, account_id, agent_id, title, prompt) VALUES (?, ?, ?, 'sub-task', ?)",
-    )
-    .bind(&objective_id)
-    .bind(&account_id)
-    .bind(target_agent_id)
-    .bind(subtask)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "INSERT INTO jobs (id, objective_id, agent_id, status, synchronous, chain_depth) VALUES (?, ?, ?, 'running', 1, ?)",
-    )
-    .bind(&sub_job_id)
-    .bind(&objective_id)
-    .bind(target_agent_id)
-    .bind(depth)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-
-    let claimed = ClaimedJob {
-        id: sub_job_id.clone(),
-        objective_id,
-        agent_id: target_agent_id.to_string(),
-    };
-    Box::pin(run_job(state, &claimed, true)).await?;
-
-    let out: Option<(String,)> = sqlx::query_as(
-        "SELECT output FROM steps WHERE job_id = ? AND step_type = 'restitution' ORDER BY position DESC LIMIT 1",
-    )
-    .bind(&sub_job_id)
-    .fetch_optional(&state.db)
-    .await?;
-    let text = out
-        .map(|(o,)| {
-            serde_json::from_str::<serde_json::Value>(&o)
-                .ok()
-                .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
-                .unwrap_or(o)
-        })
-        .unwrap_or_default();
-    Ok(text)
-}
-
-/// Call a published agent on this or another TakoIA instance through its billed
-/// invoke API (Bearer consumer key). The callee meters tokens and bills the
-/// call — the monetized agent-to-agent primitive. Returns the deliverable.
-async fn run_a2a(url: &str, key: &str, input: &str) -> Result<String> {
-    // SSRF guard: never let an agent point an A2A call at an internal address.
-    crate::net::validate_outbound_url(url).await?;
-    let resp = crate::net::safe_client()
-        .post(url)
-        .header("Authorization", format!("Bearer {key}"))
-        .json(&serde_json::json!({ "input": input }))
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!("a2a call to {url} returned {}", resp.status()));
-    }
-    let v: serde_json::Value = resp.json().await?;
-    let out = v.get("output").and_then(|x| x.as_str()).unwrap_or_default();
-    let cost = v.get("cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
-    Ok(format!("{out}\n[billed via A2A: ${cost:.4}]"))
 }
