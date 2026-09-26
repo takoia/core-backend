@@ -5,7 +5,7 @@
 //!
 //! - `none`        — host execution (no isolation).
 //! - `landlock`    — native Linux Landlock LSM (filesystem confinement, no
-//!                   external binary, no KVM). Applied in `pre_exec`. Default.
+//!   external binary, no KVM). Applied in `pre_exec`. Default.
 //! - `bubblewrap`  — `bwrap` namespaces (filesystem + optional network).
 //! - `nsjail`      — `nsjail` namespaces.
 //! - `docker` / `podman` — one container per run (needs an image with `claude`).
@@ -444,7 +444,7 @@ fn attach_landlock(cmd: &mut std::process::Command, _workdir: &str, _share_tmp: 
                (select another sandbox backend in Settings)";
     tracing::error!("{msg}");
     unsafe {
-        cmd.pre_exec(move || Err(std::io::Error::new(std::io::ErrorKind::Other, msg)));
+        cmd.pre_exec(move || Err(std::io::Error::other(msg)));
     }
 }
 

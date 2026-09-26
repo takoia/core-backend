@@ -61,6 +61,9 @@ impl IntoResponse for AppError {
     }
 }
 
+/// Convenience result alias for HTTP handlers.
+pub type AppResult<T> = Result<T, AppError>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +93,3 @@ mod tests {
         assert!(body.contains("internal error"));
     }
 }
-
-/// Convenience result alias for HTTP handlers.
-pub type AppResult<T> = Result<T, AppError>;

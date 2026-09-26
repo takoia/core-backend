@@ -11,6 +11,8 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
     pub output: String,
+    /// Model that produced the output when an LLM was involved (for pricing).
+    pub model: String,
     pub usage: TokenUsage,
 }
 
@@ -65,6 +67,7 @@ pub async fn market_data(symbol: &str) -> Result<ToolOutput> {
     );
     Ok(ToolOutput {
         output,
+        model: String::new(),
         usage: TokenUsage::default(),
     })
 }
@@ -103,6 +106,7 @@ pub async fn execute(
         "web_search" => web_search(provider, input).await,
         "write_report" => Ok(ToolOutput {
             output: input.to_string(),
+            model: String::new(),
             usage: TokenUsage::default(),
         }),
         other => Err(anyhow!("unknown tool: {other}")),
@@ -125,6 +129,7 @@ async fn web_search(provider: &Arc<dyn LlmProvider>, query: &str) -> Result<Tool
     let completion = provider.complete(req).await?;
     Ok(ToolOutput {
         output: completion.content,
+        model: completion.model,
         usage: completion.usage,
     })
 }

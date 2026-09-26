@@ -100,7 +100,10 @@ impl Emotions {
 }
 
 /// Per-agent toggles for the personalization features + the Big Five vector.
-#[derive(Clone, Debug)]
+/// `Default` is everything off with a neutral personality: every feature is
+/// opt-in per agent, since each one costs an LLM call per agent per tick
+/// (reflection), extra memory writes, or self-initiated runs.
+#[derive(Clone, Debug, Default)]
 pub struct Personalization {
     pub reflection: bool,
     pub emotions: bool,
@@ -109,21 +112,6 @@ pub struct Personalization {
     pub persona_evolution: bool,
     pub personality: bool,
     pub big_five: BigFive,
-}
-impl Default for Personalization {
-    fn default() -> Self {
-        Self {
-            // Everything opt-in: each feature is an LLM call per agent per tick
-            // (reflection), extra memory writes, or self-initiated runs.
-            reflection: false,
-            emotions: false,
-            initiative: false,
-            commitments: false,
-            persona_evolution: false,
-            personality: false,
-            big_five: BigFive::default(),
-        }
-    }
 }
 impl Personalization {
     /// Whether the inner-life loop has anything to do for this agent.
@@ -134,7 +122,10 @@ impl Personalization {
 
 /// Read an agent's personalization toggles (defaults: everything off, neutral).
 pub async fn personalization(db: &crate::db::Db, agent_id: &str) -> Personalization {
-    let row: Option<(i64, i64, i64, i64, i64, i64, Option<String>)> = sqlx::query_as(
+    // reflection, emotions, initiative, commitments, persona_evolution,
+    // personality, big_five (JSON).
+    type Row = (i64, i64, i64, i64, i64, i64, Option<String>);
+    let row: Option<Row> = sqlx::query_as(
         "SELECT reflection, emotions, initiative, commitments, persona_evolution, personality, big_five
          FROM agent_personalization WHERE agent_id = ?",
     )

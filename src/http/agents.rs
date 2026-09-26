@@ -650,7 +650,9 @@ pub async fn inner_state(
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
     crate::http::users::require_agent_role(&state, &id, &me, "viewer").await?;
-    let st: Option<(String, f64, i64, Option<String>, Option<String>, String)> = sqlx::query_as(
+    // mood, energy, familiarity, reflection, emotions (JSON), updated_at.
+    type StateRow = (String, f64, i64, Option<String>, Option<String>, String);
+    let st: Option<StateRow> = sqlx::query_as(
         "SELECT mood, energy, familiarity, reflection, emotions, updated_at FROM agent_state WHERE agent_id = ?",
     )
     .bind(&id)

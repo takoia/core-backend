@@ -346,7 +346,7 @@ impl Memory {
             .filter(|l| l.contains('/')) // topic rows contain the slug path
             .filter_map(|l| {
                 let count = l.split_whitespace().last()?.parse::<i64>().ok()?;
-                let topic = l.rsplitn(2, char::is_whitespace).nth(1)?.trim().to_string();
+                let topic = l.rsplit_once(char::is_whitespace)?.0.trim().to_string();
                 Some(serde_json::json!({ "topic": topic, "count": count }))
             })
             .collect()

@@ -173,114 +173,35 @@ pub async fn run_job(
         }
     }
 
-    // ── Action (tool execution via sandbox) ────────────────────────────────
-    // Run every tool the agent's Action step allows (market_data, web_search…),
-    // gathering their output. Extraction agents with no tools process the payload.
+    // ── Action (tool execution) ────────────────────────────────────────────
+    // Every tool the Action step allows runs through `action_tools::gather`;
+    // its digest is what the Action step synthesises. Skipped when the Action
+    // step was already completed on a prior attempt (the step result is reused
+    // below, so re-running the tools would only waste calls and re-bill).
     let allowed = ctx.allowed_tools(StepType::Action);
     let params = ctx.tool_params(StepType::Action);
     if !allowed.is_empty() {
         bus.publish(JobEvent::step_started(&job.id, "action"));
     }
-    let mut gathered = String::new();
-    // Skip tool gathering when the Action step was already completed on a prior
-    // attempt: the step result is reused below, so re-running the tools would
-    // only waste calls and re-bill tokens (e.g. web_search).
     let action_done = done.contains_key(StepType::Action.as_str());
-    if !action_done && allowed.iter().any(|t| t == "market_data") {
-        let symbol = params
-            .get("symbol")
-            .and_then(|v| v.as_str())
-            .unwrap_or("^IXIC");
-        bus.publish(JobEvent::log(
-            &job.id,
-            format!("running tool: market_data ({symbol})"),
-        ));
-        match tools::market_data(symbol).await {
-            Ok(out) => gathered.push_str(&format!("\n{}", out.output)),
-            Err(e) => gathered.push_str(&format!("\nmarket_data error: {e}")),
-        }
-    }
-    if !action_done && allowed.iter().any(|t| t == "web_search") {
-        let provider = registry.resolve(ctx.provider_for(StepType::Action).as_deref())?;
-        // Restrict to a specific site when the web_search tool has a `site` param.
-        let site = params.get("site").and_then(|v| v.as_str()).unwrap_or("");
-        let query = if site.trim().is_empty() {
-            objective.prompt.clone()
-        } else {
-            format!("{} site:{}", objective.prompt, site.trim())
-        };
-        bus.publish(JobEvent::log(
-            &job.id,
-            format!(
-                "running tool: web_search{}",
-                if site.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({site})")
-                }
-            ),
-        ));
-        let search = match tools::execute(&provider, "web_search", &query).await {
-            Ok(out) => out,
-            Err(e) => {
-                tracing::warn!(error = %e, "web_search failed, using canned fallback");
-                tools::execute(&registry.canned(), "web_search", &query).await?
-            }
-        };
-        ctx.record_usage(&provider.name(), "web_search", search.usage)
-            .await;
-        gathered.push_str(&format!("\nweb_search:\n{}", search.output));
-    }
-    // call_agent: this agent orchestrates other agents (multi-agent composition,
-    // the substrate of the agent-to-agent flow). Each target runs synchronously,
-    // read-only, and its deliverable is gathered for this agent to synthesize.
-    if !action_done && allowed.iter().any(|t| t == "call_agent") {
-        let targets = call_agent_targets(&params);
-        let depth = job_chain_depth(state, &job.id).await;
-        if depth >= MAX_CALL_DEPTH {
-            gathered.push_str("\ncall_agent skipped: max orchestration depth reached.");
-        } else {
-            for target in &targets {
-                bus.publish(JobEvent::log(
-                    &job.id,
-                    format!("orchestrating: calling agent {target}"),
-                ));
-                match run_subagent(state, target, &objective.prompt, depth + 1).await {
-                    Ok(result) => gathered.push_str(&format!("\nagent[{target}]:\n{result}")),
-                    Err(e) => gathered.push_str(&format!("\nagent[{target}] error: {e}")),
-                }
-            }
-        }
-    }
-    // External agent-to-agent calls: invoke a published agent on this or another
-    // TakoIA instance via its billed invoke API. The callee meters + bills the
-    // call — the monetized agent-to-agent primitive.
+    let mut gathered = String::new();
     if !action_done {
-        if let Some(arr) = params.get("a2a_calls").and_then(|v| v.as_array()) {
-            for c in arr {
-                let url = c.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                if url.is_empty() {
-                    continue;
-                }
-                // Preferred: `key_connector` names an `a2a` connector holding the
-                // consumer key. Inline `key` is honoured for existing agents.
-                let key = match c.get("key_connector").and_then(|v| v.as_str()) {
-                    Some(name) => connector_secret(state, &objective.account_id, "a2a", name)
-                        .await
-                        .unwrap_or_default(),
-                    None => c
-                        .get("key")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                };
-                bus.publish(JobEvent::log(&job.id, format!("A2A call: {url}")));
-                match run_a2a(url, &key, &objective.prompt).await {
-                    Ok(r) => gathered.push_str(&format!("\na2a:\n{r}")),
-                    Err(e) => gathered.push_str(&format!("\na2a error: {e}")),
-                }
-            }
+        let provider_name = ctx.provider_for(StepType::Action);
+        let out = super::action_tools::gather(super::action_tools::ToolRun {
+            state,
+            job,
+            objective_prompt: &objective.prompt,
+            account_id: &objective.account_id,
+            registry: &registry,
+            provider_name: provider_name.as_deref(),
+            allowed: &allowed,
+            params: &params,
+        })
+        .await?;
+        for (provider, model, usage) in out.usage {
+            ctx.record_usage(&provider, &model, usage).await;
         }
+        gathered = out.text;
     }
     let action_input = if gathered.trim().is_empty() {
         format!(
@@ -348,9 +269,14 @@ pub async fn run_job(
             // Preferred: `discord_connector` names a `discord` connector whose
             // secret is the webhook URL. Inline `discord_webhook` still works.
             let webhook = match params.get("discord_connector").and_then(|v| v.as_str()) {
-                Some(name) => connector_secret(state, &objective.account_id, "discord", name)
-                    .await
-                    .unwrap_or_default(),
+                Some(name) => super::action_tools::connector_secret(
+                    state,
+                    &objective.account_id,
+                    "discord",
+                    name,
+                )
+                .await
+                .unwrap_or_default(),
                 None => params
                     .get("discord_webhook")
                     .and_then(|v| v.as_str())
@@ -572,7 +498,7 @@ impl<'a> RunCtx<'a> {
             }
         };
 
-        self.record_usage(&provider.name(), &completion.model, completion.usage)
+        self.record_usage(provider.name(), &completion.model, completion.usage)
             .await;
         persist_step(
             self.state,
@@ -756,178 +682,4 @@ pub async fn fail(state: &AppState, job_id: &str, err: &anyhow::Error) {
     state
         .events
         .publish(JobEvent::status(job_id, "failed", msg));
-}
-
-// ── Multi-agent orchestration (call_agent) ──────────────────────────────────
-
-/// Maximum agent-to-agent orchestration depth (anti-recursion guard).
-const MAX_CALL_DEPTH: i64 = 3;
-
-/// Target agent ids for the `call_agent` tool, read from the Action step params:
-/// `{ "call_agents": ["id1","id2"] }` or `{ "call_agent_id": "id" }`.
-fn call_agent_targets(params: &serde_json::Value) -> Vec<String> {
-    if let Some(arr) = params.get("call_agents").and_then(|v| v.as_array()) {
-        return arr
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
-    }
-    params
-        .get("call_agent_id")
-        .and_then(|v| v.as_str())
-        .map(|s| vec![s.to_string()])
-        .unwrap_or_default()
-}
-
-async fn job_chain_depth(state: &AppState, job_id: &str) -> i64 {
-    sqlx::query_as::<_, (i64,)>("SELECT chain_depth FROM jobs WHERE id = ?")
-        .bind(job_id)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(|r| r.0)
-        .unwrap_or(0)
-}
-
-/// Run another agent synchronously and return its deliverable (restitution).
-/// Read-only so the callee's curated memory is never polluted by the caller's
-/// sub-task. `Box::pin` breaks the run_job -> call_agent -> run_job async cycle.
-async fn run_subagent(
-    state: &AppState,
-    target_agent_id: &str,
-    subtask: &str,
-    depth: i64,
-) -> Result<String> {
-    let target: Option<(String, String)> =
-        sqlx::query_as("SELECT account_id, autonomy_level FROM agents WHERE id = ?")
-            .bind(target_agent_id)
-            .fetch_optional(&state.db)
-            .await?;
-    let Some((account_id, autonomy)) = target else {
-        return Err(anyhow::anyhow!("target agent not found"));
-    };
-    // A synchronous sub-run has nobody to approve an action: a
-    // confirm-before-action target would park a job in awaiting_approval for
-    // good. Refuse up front instead.
-    if AutonomyLevel::from_db(&autonomy) != AutonomyLevel::FullAuto {
-        return Err(anyhow::anyhow!(
-            "target agent {target_agent_id} is '{}'; call_agent requires a '{}' target",
-            autonomy,
-            AutonomyLevel::FullAuto.as_str()
-        ));
-    }
-
-    let objective_id = Uuid::new_v4().to_string();
-    let sub_job_id = Uuid::new_v4().to_string();
-    let mut tx = state.db.begin().await?;
-    sqlx::query(
-        "INSERT INTO objectives (id, account_id, agent_id, title, prompt) VALUES (?, ?, ?, 'sub-task', ?)",
-    )
-    .bind(&objective_id)
-    .bind(&account_id)
-    .bind(target_agent_id)
-    .bind(subtask)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "INSERT INTO jobs (id, objective_id, agent_id, status, synchronous, chain_depth) VALUES (?, ?, ?, 'running', 1, ?)",
-    )
-    .bind(&sub_job_id)
-    .bind(&objective_id)
-    .bind(target_agent_id)
-    .bind(depth)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-
-    let claimed = ClaimedJob {
-        id: sub_job_id.clone(),
-        objective_id,
-        agent_id: target_agent_id.to_string(),
-    };
-    match Box::pin(run_job(state, &claimed, true)).await {
-        Ok(RunOutcome::Completed { .. }) => {}
-        Ok(RunOutcome::AwaitingApproval) => {
-            let msg = "sub-agent paused for approval inside a synchronous call";
-            queue::mark_failed(&state.db, &sub_job_id, msg).await.ok();
-            return Err(anyhow::anyhow!(msg));
-        }
-        Err(e) => {
-            // Synchronous jobs are never requeued by crash recovery, so an
-            // unmarked failure would leave this row `running` forever.
-            queue::mark_failed(&state.db, &sub_job_id, &format!("{e:#}"))
-                .await
-                .ok();
-            return Err(e);
-        }
-    }
-
-    let out: Option<(String,)> = sqlx::query_as(
-        "SELECT output FROM steps WHERE job_id = ? AND step_type = 'restitution' ORDER BY position DESC LIMIT 1",
-    )
-    .bind(&sub_job_id)
-    .fetch_optional(&state.db)
-    .await?;
-    let text = out
-        .map(|(o,)| {
-            serde_json::from_str::<serde_json::Value>(&o)
-                .ok()
-                .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
-                .unwrap_or(o)
-        })
-        .unwrap_or_default();
-    Ok(text)
-}
-
-/// Decrypt a connector secret referenced from a step config; a missing
-/// connector is logged and yields `None` so the tool reports its own error.
-async fn connector_secret(
-    state: &AppState,
-    account_id: &str,
-    kind: &str,
-    name: &str,
-) -> Option<String> {
-    match crate::secrets::SecretManager::new(&state.cipher, &state.db)
-        .connector_secret(account_id, kind, name)
-        .await
-    {
-        Ok(Some(v)) => Some(v),
-        Ok(None) => {
-            tracing::warn!(
-                kind,
-                name,
-                "step config references a connector that has no secret"
-            );
-            None
-        }
-        Err(e) => {
-            tracing::warn!(kind, name, error = %e, "failed to resolve connector secret");
-            None
-        }
-    }
-}
-
-/// Call a published agent on this or another TakoIA instance through its billed
-/// invoke API (Bearer consumer key). The callee meters tokens and bills the
-/// call — the monetized agent-to-agent primitive. Returns the deliverable.
-async fn run_a2a(url: &str, key: &str, input: &str) -> Result<String> {
-    // SSRF guard: never let an agent point an A2A call at an internal address.
-    let addrs = crate::net::validate_outbound_url(url).await?;
-    let resp = crate::net::pinned_client(url, &addrs)?
-        .post(url)
-        .header("Authorization", format!("Bearer {key}"))
-        .json(&serde_json::json!({ "input": input }))
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "a2a call to {url} returned {}",
-            resp.status()
-        ));
-    }
-    let v: serde_json::Value = resp.json().await?;
-    let out = v.get("output").and_then(|x| x.as_str()).unwrap_or_default();
-    let cost = v.get("cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
-    Ok(format!("{out}\n[billed via A2A: ${cost:.4}]"))
 }

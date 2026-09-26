@@ -171,6 +171,14 @@ pub async fn events(
             Ok(ev) if ev.job_id == job_id => Some(Ok(Event::default()
                 .event("progress")
                 .data(serde_json::to_string(&ev).unwrap_or_default()))),
+            // The broadcast buffer overflowed for this slow client: tell it how
+            // many events it lost so it can refetch the job instead of showing
+            // a silently incomplete timeline.
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                Some(Ok(Event::default()
+                    .event("lagged")
+                    .data(json!({ "dropped": n }).to_string())))
+            }
             _ => None,
         }
     });

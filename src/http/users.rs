@@ -201,9 +201,9 @@ impl FromRequestParts<AppState> for CurrentUser {
 }
 
 /// Routes that are reachable WITHOUT a user session: the login/setup flow, the
-/// health check, and the key-authenticated public API (`/v1/*` invoke/chat/models
-/// + the marketplace catalog + inbound webhooks, which authenticate by their own
-/// means). The path is matched with or without the `/api` nest prefix.
+/// health check, the key-authenticated public API (`/v1/*` invoke/chat/models),
+/// the marketplace catalog, and inbound webhooks (which authenticate with their
+/// own HMAC signature). The path is matched with or without the `/api` prefix.
 fn is_public_path(path: &str) -> bool {
     let p = path.strip_prefix("/api").unwrap_or(path);
     matches!(
