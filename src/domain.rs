@@ -99,3 +99,87 @@ pub struct StepOptions {
     #[serde(default)]
     pub temperature: Option<f32>,
 }
+
+/// Tool parameter keys that hold credentials when set inline. The supported
+/// way is a connector reference (`discord_connector`, `a2a_calls[].key_connector`);
+/// inline values are still honoured for existing agents but never leave the
+/// server unmasked.
+const INLINE_SECRET_KEYS: [&str; 1] = ["discord_webhook"];
+
+/// Mask (or strip) inline credentials inside a step's `options` JSON so they can
+/// be shown to non-owners or exported. `strip` removes the keys; otherwise they
+/// are replaced by `"***"`. Non-object input is returned untouched.
+pub fn redact_step_options(options: &mut serde_json::Value, strip: bool) {
+    let Some(tp) = options
+        .get_mut("tool_params")
+        .and_then(|v| v.as_object_mut())
+    else {
+        return;
+    };
+    for key in INLINE_SECRET_KEYS {
+        if tp.contains_key(key) {
+            if strip {
+                tp.remove(key);
+            } else {
+                tp.insert(key.to_string(), serde_json::Value::String("***".into()));
+            }
+        }
+    }
+    if let Some(calls) = tp.get_mut("a2a_calls").and_then(|v| v.as_array_mut()) {
+        for call in calls.iter_mut().filter_map(|c| c.as_object_mut()) {
+            if call.contains_key("key") {
+                if strip {
+                    call.remove("key");
+                } else {
+                    call.insert("key".into(), serde_json::Value::String("***".into()));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn masks_inline_credentials_and_keeps_the_rest() {
+        let mut v = json!({
+            "allowed_tools": ["send_discord"],
+            "tool_params": {
+                "symbol": "^IXIC",
+                "discord_webhook": "https://discord.com/api/webhooks/1/abc",
+                "a2a_calls": [{ "url": "https://peer/api/v1/agents/x/invoke", "key": "sk_takoia_1" }]
+            }
+        });
+        redact_step_options(&mut v, false);
+        assert_eq!(v["tool_params"]["symbol"], "^IXIC");
+        assert_eq!(v["tool_params"]["discord_webhook"], "***");
+        assert_eq!(v["tool_params"]["a2a_calls"][0]["key"], "***");
+        assert_eq!(
+            v["tool_params"]["a2a_calls"][0]["url"],
+            "https://peer/api/v1/agents/x/invoke"
+        );
+    }
+
+    #[test]
+    fn strips_inline_credentials_for_export() {
+        let mut v = json!({ "tool_params": { "discord_webhook": "x", "a2a_calls": [{ "url": "u", "key": "k" }] } });
+        redact_step_options(&mut v, true);
+        assert!(v["tool_params"].get("discord_webhook").is_none());
+        assert!(v["tool_params"]["a2a_calls"][0].get("key").is_none());
+        assert_eq!(v["tool_params"]["a2a_calls"][0]["url"], "u");
+    }
+
+    #[test]
+    fn leaves_options_without_tool_params_alone() {
+        let mut v = json!({ "provider": "claude_max" });
+        let before = v.clone();
+        redact_step_options(&mut v, false);
+        assert_eq!(v, before);
+        let mut s = json!("not an object");
+        redact_step_options(&mut s, true);
+        assert_eq!(s, json!("not an object"));
+    }
+}

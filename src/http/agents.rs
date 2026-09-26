@@ -83,13 +83,14 @@ pub async fn get(
     .fetch_all(&state.db)
     .await?;
 
-    // Only owners see the webhook secret: it is what authorises inbound
-    // /api/webhooks/:event payloads for this agent.
-    let webhook_secret: Option<String> = if crate::http::users::agent_role(&state, &id, &me)
+    // Owners see credentials: the webhook secret (it authorises inbound
+    // /api/webhooks/:event payloads) and any inline tool_params secrets.
+    // Editors and viewers get the step configs with those values masked.
+    let is_owner = crate::http::users::agent_role(&state, &id, &me)
         .await
         .as_deref()
-        == Some("owner")
-    {
+        == Some("owner");
+    let webhook_secret: Option<String> = if is_owner {
         sqlx::query_scalar("SELECT webhook_secret FROM agents WHERE id = ?")
             .bind(&id)
             .fetch_optional(&state.db)
@@ -98,6 +99,18 @@ pub async fn get(
     } else {
         None
     };
+    let steps: Vec<StepConfig> = steps
+        .into_iter()
+        .map(|mut s| {
+            if !is_owner {
+                if let Ok(mut v) = serde_json::from_str::<Value>(&s.options) {
+                    crate::domain::redact_step_options(&mut v, false);
+                    s.options = v.to_string();
+                }
+            }
+            s
+        })
+        .collect();
 
     Ok(Json(
         json!({ "agent": agent, "steps": steps, "webhook_secret": webhook_secret }),

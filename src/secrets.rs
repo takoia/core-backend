@@ -433,3 +433,28 @@ fn non_empty<'a>(v: &'a str, default: &'a str) -> &'a str {
         v
     }
 }
+
+impl<'a> SecretManager<'a> {
+    /// Plaintext secret of the connector `(account, kind, name)`, or `None` when
+    /// no such connector exists or it holds no secret. Lets agent step configs
+    /// reference credentials by connector name instead of embedding them.
+    pub async fn connector_secret(
+        &self,
+        account_id: &str,
+        kind: &str,
+        name: &str,
+    ) -> Result<Option<String>> {
+        let row: Option<(Option<Vec<u8>>,)> = sqlx::query_as(
+            "SELECT encrypted_secret FROM connectors WHERE account_id = ? AND kind = ? AND name = ?",
+        )
+        .bind(account_id)
+        .bind(kind)
+        .bind(name)
+        .fetch_optional(self.db)
+        .await?;
+        match row {
+            Some((Some(blob),)) if !blob.is_empty() => Ok(Some(self.resolve_blob(&blob).await?)),
+            _ => Ok(None),
+        }
+    }
+}

@@ -238,8 +238,11 @@ pub async fn export(db: &Db, agent_id: &str) -> Result<String> {
 
     let mut steps = HashMap::new();
     for r in step_rows {
-        let opts: serde_json::Value =
+        let mut opts: serde_json::Value =
             serde_json::from_str(&r.options).unwrap_or(serde_json::Value::Null);
+        // A definition file travels (marketplace, git, support tickets): inline
+        // credentials are stripped, connector references are kept.
+        crate::domain::redact_step_options(&mut opts, true);
         steps.insert(
             r.step_type,
             StepDef {

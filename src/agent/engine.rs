@@ -256,12 +256,23 @@ pub async fn run_job(
         if let Some(arr) = params.get("a2a_calls").and_then(|v| v.as_array()) {
             for c in arr {
                 let url = c.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                let key = c.get("key").and_then(|v| v.as_str()).unwrap_or("");
                 if url.is_empty() {
                     continue;
                 }
+                // Preferred: `key_connector` names an `a2a` connector holding the
+                // consumer key. Inline `key` is honoured for existing agents.
+                let key = match c.get("key_connector").and_then(|v| v.as_str()) {
+                    Some(name) => connector_secret(state, &objective.account_id, "a2a", name)
+                        .await
+                        .unwrap_or_default(),
+                    None => c
+                        .get("key")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                };
                 bus.publish(JobEvent::log(&job.id, format!("A2A call: {url}")));
-                match run_a2a(url, key, &objective.prompt).await {
+                match run_a2a(url, &key, &objective.prompt).await {
                     Ok(r) => gathered.push_str(&format!("\na2a:\n{r}")),
                     Err(e) => gathered.push_str(&format!("\na2a error: {e}")),
                 }
@@ -331,11 +342,19 @@ pub async fn run_job(
                 "no alert (agent reported no actionable signal)",
             ));
         } else {
-            let webhook = params
-                .get("discord_webhook")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            match tools::send_discord(webhook, &format!("**{}**\n{}", objective.title, report))
+            // Preferred: `discord_connector` names a `discord` connector whose
+            // secret is the webhook URL. Inline `discord_webhook` still works.
+            let webhook = match params.get("discord_connector").and_then(|v| v.as_str()) {
+                Some(name) => connector_secret(state, &objective.account_id, "discord", name)
+                    .await
+                    .unwrap_or_default(),
+                None => params
+                    .get("discord_webhook")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            };
+            match tools::send_discord(&webhook, &format!("**{}**\n{}", objective.title, report))
                 .await
             {
                 Ok(_) => bus.publish(JobEvent::log(&job.id, "alert sent to Discord")),
@@ -809,6 +828,34 @@ async fn run_subagent(
         })
         .unwrap_or_default();
     Ok(text)
+}
+
+/// Decrypt a connector secret referenced from a step config; a missing
+/// connector is logged and yields `None` so the tool reports its own error.
+async fn connector_secret(
+    state: &AppState,
+    account_id: &str,
+    kind: &str,
+    name: &str,
+) -> Option<String> {
+    match crate::secrets::SecretManager::new(&state.cipher, &state.db)
+        .connector_secret(account_id, kind, name)
+        .await
+    {
+        Ok(Some(v)) => Some(v),
+        Ok(None) => {
+            tracing::warn!(
+                kind,
+                name,
+                "step config references a connector that has no secret"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(kind, name, error = %e, "failed to resolve connector secret");
+            None
+        }
+    }
 }
 
 /// Call a published agent on this or another TakoIA instance through its billed
