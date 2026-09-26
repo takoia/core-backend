@@ -43,7 +43,8 @@ What a first paying customer would hit in the first hour.
   basis or retention, and erasure is all-or-nothing per agent. Needed before
   selling an agent trained on personal context (AI Act lineage, GDPR erasure).
 - **Webhook rate limiting** on top of the signature (a valid sender can still
-  flood an agent).
+  flood an agent), and a per-user rate limit on the plan-spending one-shots
+  any member may call (`/api/agents/scaffold`, video analysis with an agent).
 
 ## Milestone 2 — credible
 

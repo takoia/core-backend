@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
     http::users::ensure_admin_user(&state).await?;
 
     // Background job worker (runs the agent engine).
+    agent::worker::recover(&state).await;
     agent::worker::spawn(state.clone());
 
     // Recurring scheduler (autonomous learning loops).

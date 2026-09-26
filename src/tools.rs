@@ -82,7 +82,7 @@ pub async fn send_discord(webhook_url: &str, content: &str) -> Result<()> {
     let addrs = crate::net::validate_outbound_url(webhook_url).await?;
     let body = serde_json::json!({ "content": content.chars().take(1900).collect::<String>() });
     // Discord's Cloudflare rejects requests with no User-Agent (error 1010).
-    let resp = crate::net::pinned_client(webhook_url, &addrs)?
+    let resp = crate::net::pinned_client(webhook_url, &addrs, std::time::Duration::from_secs(30))?
         .post(webhook_url)
         .header(
             "User-Agent",

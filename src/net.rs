@@ -42,8 +42,13 @@ pub async fn validate_outbound_url(url: &str) -> Result<Vec<SocketAddr>> {
 /// A client for one validated URL: the host name is pinned to the addresses
 /// [`validate_outbound_url`] just checked, redirects are not followed (an
 /// allow-listed host cannot 302 the request into an internal address), and
-/// the whole request is bounded by `timeout`.
-pub fn pinned_client(url: &str, addrs: &[SocketAddr]) -> Result<reqwest::Client> {
+/// the whole request is bounded by `timeout` — seconds for a webhook, minutes
+/// for a remote agent run, so the caller decides.
+pub fn pinned_client(
+    url: &str,
+    addrs: &[SocketAddr],
+    timeout: Duration,
+) -> Result<reqwest::Client> {
     let parsed = reqwest::Url::parse(url).map_err(|_| anyhow!("invalid URL"))?;
     let host = parsed
         .host_str()
@@ -52,7 +57,7 @@ pub fn pinned_client(url: &str, addrs: &[SocketAddr]) -> Result<reqwest::Client>
         .redirect(reqwest::redirect::Policy::none())
         .resolve_to_addrs(host, addrs)
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(Duration::from_secs(30))
+        .timeout(timeout)
         .build()
         .map_err(|e| anyhow!("failed to build HTTP client: {e}"))
 }
@@ -155,7 +160,8 @@ mod tests {
     #[test]
     fn pinned_client_needs_a_host() {
         let addrs = vec!["93.184.216.34:443".parse().unwrap()];
-        assert!(pinned_client("https://example.com/hook", &addrs).is_ok());
-        assert!(pinned_client("mailto:x@y", &addrs).is_err());
+        let t = Duration::from_secs(5);
+        assert!(pinned_client("https://example.com/hook", &addrs, t).is_ok());
+        assert!(pinned_client("mailto:x@y", &addrs, t).is_err());
     }
 }

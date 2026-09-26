@@ -43,7 +43,9 @@ impl AppState {
         // Per-agent workdir so agents are isolated from each other, and the
         // active execution sandbox confines the subprocess to it.
         let workdir = format!("{}/{}", self.config.agent_workdir, agent_id);
-        let sandbox = crate::sandbox::active(&self.db).await;
+        let sandbox = crate::sandbox::active(&self.db)
+            .await
+            .with_passthrough(&self.config.agent_env_passthrough);
         ProviderRegistry::load(
             &self.db,
             &self.cipher,

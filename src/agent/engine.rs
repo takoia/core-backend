@@ -201,6 +201,7 @@ pub async fn run_job(
         for (provider, model, usage) in out.usage {
             ctx.record_usage(&provider, &model, usage).await;
         }
+        ctx.any_step_canned |= out.canned;
         gathered = out.text;
     }
     let action_input = if gathered.trim().is_empty() {

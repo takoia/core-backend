@@ -141,6 +141,6 @@ pub async fn email_test(
             "ok": true,
             "message": format!("test email sent to {}", req.to),
         }))),
-        Err(e) => Err(AppError::Other(anyhow::anyhow!("SMTP send failed: {e}"))),
+        Err(e) => Err(AppError::BadRequest(format!("SMTP send failed: {e}"))),
     }
 }
