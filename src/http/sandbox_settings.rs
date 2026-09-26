@@ -70,6 +70,7 @@ pub async fn test_sandbox(
         } else {
             json!({})
         },
+        passthrough: Vec::new(),
     };
     match sandbox::probe(&cfg).await {
         Ok(message) => Ok(Json(json!({ "ok": true, "message": message }))),

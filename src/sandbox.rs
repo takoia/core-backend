@@ -34,6 +34,9 @@ pub const BACKENDS: [&str; 8] = [
 pub struct SandboxConfig {
     pub kind: String,
     pub params: Value,
+    /// Extra environment variable names passed through to the child (from
+    /// `AGENT_ENV_PASSTHROUGH`), attached by callers via `with_passthrough`.
+    pub passthrough: Vec<String>,
 }
 
 impl Default for SandboxConfig {
@@ -41,7 +44,15 @@ impl Default for SandboxConfig {
         Self {
             kind: "landlock".into(),
             params: json!({}),
+            passthrough: Vec::new(),
         }
+    }
+}
+
+impl SandboxConfig {
+    pub fn with_passthrough(mut self, names: &[String]) -> Self {
+        self.passthrough = names.to_vec();
+        self
     }
 }
 
@@ -61,6 +72,7 @@ pub async fn active(db: &Db) -> SandboxConfig {
             params: params
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_else(|| json!({})),
+            passthrough: Vec::new(),
         },
         None => SandboxConfig::default(),
     }
@@ -172,7 +184,31 @@ fn extra_args(cfg: &SandboxConfig) -> Vec<String> {
 /// server's environment, which holds MASTER_KEY, provider API keys and the
 /// database URL and is readable through /proc/self/environ by a confined child.
 /// `own_home` points HOME at the workdir so config/cache writes stay inside it.
-pub fn child_env(workdir: &str, token: Option<&str>, own_home: bool) -> Vec<(String, String)> {
+/// Server variables a `claude` child legitimately needs on many hosts: proxies,
+/// custom CA bundles, and an explicit Claude config directory. Passed through
+/// only when set. Operators add names with `AGENT_ENV_PASSTHROUGH`.
+const PASSTHROUGH_ENV: [&str; 10] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "CLAUDE_CONFIG_DIR",
+];
+
+/// `own_home` points HOME at the workdir so config/cache writes stay inside it;
+/// `extra` adds operator-configured variable names, but the server's own
+/// secrets can never be smuggled back in through it.
+pub fn child_env_with(
+    workdir: &str,
+    token: Option<&str>,
+    own_home: bool,
+    extra: &[String],
+) -> Vec<(String, String)> {
     // Created together with the workdir by claude_cli::prepare_workdir.
     let tmp = format!("{workdir}/tmp");
     let mut env: Vec<(String, String)> = vec![
@@ -190,6 +226,23 @@ pub fn child_env(workdir: &str, token: Option<&str>, own_home: bool) -> Vec<(Str
     }
     if let Some(t) = token {
         env.push(("CLAUDE_CODE_OAUTH_TOKEN".into(), t.to_string()));
+    }
+    for name in PASSTHROUGH_ENV
+        .iter()
+        .map(|n| n.to_string())
+        .chain(extra.iter().cloned())
+    {
+        let forbidden = name == "MASTER_KEY"
+            || name == "DATABASE_URL"
+            || name == "ADMIN_PASSWORD"
+            || name.ends_with("_API_KEY")
+            || name.ends_with("_TOKEN");
+        if forbidden || env.iter().any(|(k, _)| *k == name) {
+            continue;
+        }
+        if let Ok(v) = std::env::var(&name) {
+            env.push((name, v));
+        }
     }
     env
 }
@@ -216,7 +269,10 @@ pub fn build_command(
             // Native FS confinement, applied to the child via pre_exec.
             let mut std_cmd = std::process::Command::new(program);
             std_cmd.args(args).current_dir(workdir);
-            apply_child_env(&mut std_cmd, &child_env(workdir, token, true));
+            apply_child_env(
+                &mut std_cmd,
+                &child_env_with(workdir, token, true, &cfg.passthrough),
+            );
             attach_landlock(&mut std_cmd, workdir, pbool(cfg, "share_tmp", true));
             Command::from(std_cmd)
         }
@@ -258,7 +314,7 @@ pub fn build_command(
                 workdir.into(),
                 "--clearenv".into(),
             ];
-            for (k, v) in child_env(workdir, token, true) {
+            for (k, v) in child_env_with(workdir, token, true, &cfg.passthrough) {
                 a.extend(["--setenv".into(), k, v]);
             }
             if !pbool(cfg, "allow_network", true) {
@@ -288,7 +344,7 @@ pub fn build_command(
                 a.push("--disable_clone_newnet".into());
             }
             // nsjail starts from an empty environment; pass the whitelist only.
-            for (k, v) in child_env(workdir, token, true) {
+            for (k, v) in child_env_with(workdir, token, true, &cfg.passthrough) {
                 a.extend(["--env".into(), format!("{k}={v}")]);
             }
             a.extend(extra_args(cfg));
@@ -367,7 +423,10 @@ pub fn build_command(
         _ => {
             let mut std_cmd = std::process::Command::new(program);
             std_cmd.args(args).current_dir(workdir);
-            apply_child_env(&mut std_cmd, &child_env(workdir, token, token.is_some()));
+            apply_child_env(
+                &mut std_cmd,
+                &child_env_with(workdir, token, token.is_some(), &cfg.passthrough),
+            );
             Command::from(std_cmd)
         }
     }
@@ -519,6 +578,7 @@ mod tests {
         SandboxConfig {
             kind: kind.into(),
             params,
+            passthrough: Vec::new(),
         }
     }
 
@@ -607,5 +667,33 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|w| w[0] == "--setenv" && w[1] == "CLAUDE_CODE_OAUTH_TOKEN"));
+    }
+
+    #[test]
+    fn passthrough_forwards_proxy_vars_but_never_server_secrets() {
+        std::env::set_var("HTTPS_PROXY", "http://proxy.corp:3128");
+        std::env::set_var("TAKOIA_EXTRA_OK", "yes");
+        std::env::set_var("FOO_API_KEY", "nope");
+        std::env::set_var("MASTER_KEY", "nope");
+        let wd = std::env::temp_dir().join("takoia-env-test4");
+        let env = child_env_with(
+            wd.to_str().unwrap(),
+            Some("tok"),
+            true,
+            &[
+                "TAKOIA_EXTRA_OK".into(),
+                "FOO_API_KEY".into(),
+                "MASTER_KEY".into(),
+            ],
+        );
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(
+            get("HTTPS_PROXY").as_deref(),
+            Some("http://proxy.corp:3128")
+        );
+        assert_eq!(get("TAKOIA_EXTRA_OK").as_deref(), Some("yes"));
+        assert!(get("FOO_API_KEY").is_none(), "*_API_KEY never passes");
+        assert!(get("MASTER_KEY").is_none());
+        assert_eq!(get("CLAUDE_CODE_OAUTH_TOKEN").as_deref(), Some("tok"));
     }
 }

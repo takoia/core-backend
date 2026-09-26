@@ -46,6 +46,16 @@ pub struct Config {
     pub demo_mode: bool,
     /// Per-model notional pricing (`LLM_PRICING`, `LLM_PRICING_DEFAULT`).
     pub pricing: crate::pricing::Pricing,
+    /// A synchronous job (marketplace invoke, call_agent sub-run) still
+    /// `running` after this many seconds is considered abandoned and failed.
+    /// Generous by default (`SYNC_JOB_MAX_SECS`, 4h): nested sub-runs and web
+    /// searches legitimately take long, and a false positive fails a paying
+    /// call after its tokens were spent.
+    pub sync_job_max_secs: i64,
+    /// Extra environment variable names passed through to agent subprocesses
+    /// (`AGENT_ENV_PASSTHROUGH`, comma-separated), on top of the built-in
+    /// proxy and CA variables.
+    pub agent_env_passthrough: Vec<String>,
 }
 
 impl Config {
@@ -95,6 +105,21 @@ impl Config {
             std::env::var("LLM_PRICING_DEFAULT").ok().as_deref(),
         )?;
 
+        let sync_job_max_secs = std::env::var("SYNC_JOB_MAX_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .filter(|n| *n >= 60)
+            .unwrap_or(4 * 3600);
+        let agent_env_passthrough: Vec<String> = std::env::var("AGENT_ENV_PASSTHROUGH")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Ok(Self {
             bind_addr,
             frontend_dev_origin,
@@ -111,6 +136,8 @@ impl Config {
             inner_life_interval_secs,
             demo_mode,
             pricing,
+            sync_job_max_secs,
+            agent_env_passthrough,
         })
     }
 }

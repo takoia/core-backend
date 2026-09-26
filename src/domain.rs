@@ -144,52 +144,33 @@ pub fn redact_step_options(options: &mut serde_json::Value, strip: bool) {
     }
 }
 
-/// Inverse of [`redact_step_options`] for writes: wherever `incoming` carries the
-/// `"***"` mask, put back the value from `current` so a masked read-modify-write
-/// cycle never destroys a stored credential. `a2a_calls` entries are matched by
-/// position.
-pub fn restore_masked_secrets(incoming: &mut serde_json::Value, current: &serde_json::Value) {
-    const MASK: &str = "***";
-    let cur_tp = current.get("tool_params");
-    let Some(tp) = incoming
-        .get_mut("tool_params")
-        .and_then(|v| v.as_object_mut())
-    else {
+/// Tool parameter keys that carry, or route, credentials: the inline secrets,
+/// the connector references, and the A2A call list (its URLs decide where a
+/// stored key is sent). Only an owner may change them.
+const CREDENTIAL_PARAMS: [&str; 3] = ["discord_webhook", "discord_connector", "a2a_calls"];
+
+/// For a write by a non-owner: keep the stored credential-bearing parameters
+/// exactly as they are, whatever `incoming` says. Restoring a masked value by
+/// position was not enough — an editor could keep the `"***"` mask and change
+/// the URL next to it, sending the real key to a host of their choosing.
+pub fn preserve_credential_params(incoming: &mut serde_json::Value, current: &serde_json::Value) {
+    let cur_tp = current.get("tool_params").and_then(|v| v.as_object());
+    let Some(obj) = incoming.as_object_mut() else {
         return;
     };
-    for key in INLINE_SECRET_KEYS {
-        if tp.get(key).and_then(|v| v.as_str()) == Some(MASK) {
-            match cur_tp.and_then(|c| c.get(key)).cloned() {
-                Some(v) => {
-                    tp.insert(key.to_string(), v);
-                }
-                None => {
-                    tp.remove(key);
-                }
+    let tp = obj
+        .entry("tool_params")
+        .or_insert_with(|| serde_json::Value::Object(Default::default()));
+    let Some(tp) = tp.as_object_mut() else {
+        return;
+    };
+    for key in CREDENTIAL_PARAMS {
+        match cur_tp.and_then(|c| c.get(key)).cloned() {
+            Some(v) => {
+                tp.insert(key.to_string(), v);
             }
-        }
-    }
-    if let Some(calls) = tp.get_mut("a2a_calls").and_then(|v| v.as_array_mut()) {
-        let cur_calls = cur_tp
-            .and_then(|c| c.get("a2a_calls"))
-            .and_then(|v| v.as_array());
-        for (i, call) in calls.iter_mut().enumerate() {
-            let Some(obj) = call.as_object_mut() else {
-                continue;
-            };
-            if obj.get("key").and_then(|v| v.as_str()) == Some(MASK) {
-                match cur_calls
-                    .and_then(|c| c.get(i))
-                    .and_then(|c| c.get("key"))
-                    .cloned()
-                {
-                    Some(v) => {
-                        obj.insert("key".into(), v);
-                    }
-                    None => {
-                        obj.remove("key");
-                    }
-                }
+            None => {
+                tp.remove(key);
             }
         }
     }
@@ -201,18 +182,31 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn masked_write_restores_the_stored_secret() {
-        let current = json!({ "tool_params": { "discord_webhook": "https://real", "a2a_calls": [{ "url": "u", "key": "real-key" }] } });
-        let mut incoming = json!({ "tool_params": { "discord_webhook": "***", "symbol": "AAPL", "a2a_calls": [{ "url": "u", "key": "***" }] } });
-        restore_masked_secrets(&mut incoming, &current);
+    fn non_owner_writes_cannot_move_or_add_credentials() {
+        let current = json!({ "tool_params": { "discord_webhook": "https://real", "a2a_calls": [{ "url": "https://peer", "key": "real-key" }] } });
+        // Editor keeps the mask but redirects the URL: the stored call list wins.
+        let mut incoming = json!({ "tool_params": { "discord_webhook": "***", "symbol": "AAPL", "a2a_calls": [{ "url": "https://attacker", "key": "***" }] } });
+        preserve_credential_params(&mut incoming, &current);
         assert_eq!(incoming["tool_params"]["discord_webhook"], "https://real");
+        assert_eq!(
+            incoming["tool_params"]["a2a_calls"][0]["url"],
+            "https://peer"
+        );
         assert_eq!(incoming["tool_params"]["a2a_calls"][0]["key"], "real-key");
-        assert_eq!(incoming["tool_params"]["symbol"], "AAPL");
-        // A real new value passes through; a mask with nothing stored is dropped.
-        let mut fresh = json!({ "tool_params": { "discord_webhook": "***", "a2a_calls": [{ "url": "u", "key": "new" }] } });
-        restore_masked_secrets(&mut fresh, &json!({}));
-        assert!(fresh["tool_params"].get("discord_webhook").is_none());
-        assert_eq!(fresh["tool_params"]["a2a_calls"][0]["key"], "new");
+        assert_eq!(
+            incoming["tool_params"]["symbol"], "AAPL",
+            "non-credential params are theirs"
+        );
+        // Editor tries to add a connector reference or a call list: dropped.
+        let mut added = json!({ "tool_params": { "discord_connector": "alerts", "a2a_calls": [{ "url": "https://attacker", "key_connector": "prod" }] } });
+        preserve_credential_params(&mut added, &json!({}));
+        assert!(added["tool_params"].get("discord_connector").is_none());
+        assert!(added["tool_params"].get("a2a_calls").is_none());
+        // Options without tool_params get the stored credentials back, nothing else changes.
+        let mut bare = json!({ "provider": "x" });
+        preserve_credential_params(&mut bare, &current);
+        assert_eq!(bare["provider"], "x");
+        assert_eq!(bare["tool_params"]["discord_webhook"], "https://real");
     }
 
     #[test]

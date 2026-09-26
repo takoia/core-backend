@@ -57,7 +57,13 @@ pub async fn get(
     crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
-    crate::http::users::require_agent_role(&state, &id, &me, "viewer").await?;
+    let role = crate::http::users::agent_role(&state, &id, &me).await;
+    if role.is_none() {
+        return Err(AppError::Forbidden(
+            "viewer role required on this agent".into(),
+        ));
+    }
+    let is_owner = role.as_deref() == Some("owner");
     let agent = sqlx::query_as::<_, AgentRow>(
         r#"SELECT id, name, description, autonomy_level, expertise_domain, visibility,
                   price_per_run_usd, runs_count, created_at, author, trigger_on, emit, icon, persona
@@ -86,10 +92,6 @@ pub async fn get(
     // Owners see credentials: the webhook secret (it authorises inbound
     // /api/webhooks/:event payloads) and any inline tool_params secrets.
     // Editors and viewers get the step configs with those values masked.
-    let is_owner = crate::http::users::agent_role(&state, &id, &me)
-        .await
-        .as_deref()
-        == Some("owner");
     let webhook_secret: Option<String> = if is_owner {
         sqlx::query_scalar("SELECT webhook_secret FROM agents WHERE id = ?")
             .bind(&id)
@@ -266,27 +268,36 @@ pub async fn update_steps(
     Path(id): Path<String>,
     Json(body): Json<UpdateSteps>,
 ) -> AppResult<Json<Value>> {
-    crate::http::users::require_agent_role(&state, &id, &me, "editor").await?;
+    let role = crate::http::users::agent_role(&state, &id, &me).await;
+    if !matches!(role.as_deref(), Some("owner") | Some("editor")) {
+        return Err(AppError::Forbidden(
+            "editor role required on this agent".into(),
+        ));
+    }
+    let is_owner = role.as_deref() == Some("owner");
     let mut tx = state.db.begin().await?;
     for step in &body.steps {
-        // Non-owners receive masked credentials from GET; saving them back
-        // must not overwrite the real values with the mask.
-        let stored: Option<(String,)> = sqlx::query_as(
-            "SELECT options FROM agent_step_configs WHERE agent_id = ? AND step_type = ?",
-        )
-        .bind(&id)
-        .bind(&step.step_type)
-        .fetch_optional(&mut *tx)
-        .await?;
         let mut incoming = if step.options.is_null() {
             json!({})
         } else {
             step.options.clone()
         };
-        if let Some((current,)) = stored {
-            if let Ok(current) = serde_json::from_str::<Value>(&current) {
-                crate::domain::restore_masked_secrets(&mut incoming, &current);
-            }
+        // Editors see masked credentials and must not be able to move them:
+        // credential-bearing parameters (webhook, connector references, the A2A
+        // call list with its URLs) are kept exactly as stored. Owners, who see
+        // the real values, write what they send.
+        if !is_owner {
+            let stored: Option<(String,)> = sqlx::query_as(
+                "SELECT options FROM agent_step_configs WHERE agent_id = ? AND step_type = ?",
+            )
+            .bind(&id)
+            .bind(&step.step_type)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let current = stored
+                .and_then(|(c,)| serde_json::from_str::<Value>(&c).ok())
+                .unwrap_or_else(|| json!({}));
+            crate::domain::preserve_credential_params(&mut incoming, &current);
         }
         let options = incoming.to_string();
         sqlx::query(
@@ -362,7 +373,8 @@ pub async fn import_toml(
     // The TOML id is the primary key and import upserts: re-importing an
     // existing agent is an edit, so it needs owner on that agent (and the
     // agent must be in the caller's account — agent_role enforces both).
-    let def = crate::agentdef::parse(&body).map_err(AppError::Other)?;
+    let def = crate::agentdef::parse(&body)
+        .map_err(|e| AppError::BadRequest(format!("invalid agent definition: {e}")))?;
     let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM agents WHERE id = ?")
         .bind(&def.agent.id)
         .fetch_optional(&state.db)
@@ -373,6 +385,19 @@ pub async fn import_toml(
     let id = crate::agentdef::import(&state.db, &me.account_id, &body)
         .await
         .map_err(AppError::Other)?;
+    // The upsert only updates rows of the caller's account; if a concurrent
+    // import from another account won the insert, the row is not ours and the
+    // caller must not become its owner.
+    let owner_account: Option<(String,)> =
+        sqlx::query_as("SELECT account_id FROM agents WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await?;
+    if owner_account.map(|(a,)| a) != Some(me.account_id.clone()) {
+        return Err(AppError::Conflict(
+            "an agent with this id exists in another account".into(),
+        ));
+    }
     crate::http::users::grant_owner(&state.db, &id, &me.id).await?;
     Ok(Json(json!({ "id": id })))
 }
@@ -580,6 +605,9 @@ pub struct ScaffoldInput {
 /// `claude -p`. The builder fills the boxes with the result.
 pub async fn scaffold(
     State(state): State<AppState>,
+    // Any member may create agents, so any member may scaffold one; the
+    // one-shot runs with no tools. Per-user rate limiting is in ROADMAP.md.
+    crate::http::users::CurrentUser(_me): crate::http::users::CurrentUser,
     Json(body): Json<ScaffoldInput>,
 ) -> AppResult<Json<Value>> {
     if body.description.trim().is_empty() {

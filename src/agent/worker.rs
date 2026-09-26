@@ -16,48 +16,47 @@ use tokio::sync::Semaphore;
 /// Maximum number of jobs executing at the same time.
 const MAX_CONCURRENT_JOBS: usize = 4;
 
-/// Upper bound on a legitimate synchronous run: four steps plus a web search
-/// plus one call_agent sub-run of four steps, each bounded by `STEP_TIMEOUT`,
-/// with margin. Anything older and still `running` has lost its handler.
-const STALE_SYNC_JOB_SECS: i64 = 10 * crate::llm::claude_cli::STEP_TIMEOUT.as_secs() as i64;
-
 /// How often the stale synchronous-job sweep runs.
 const STALE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Spawn the worker loop. Returns immediately; the loop runs in the background.
-pub fn spawn(state: AppState) {
-    tokio::spawn(async move {
-        // Requeue jobs left running by a previous crashed process.
-        match queue::recover_orphans(&state.db).await {
-            Ok(n) if n > 0 => tracing::info!(recovered = n, "requeued orphaned jobs"),
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "orphan recovery failed"),
-        }
-        // No synchronous job can have survived the restart: its handler is gone.
-        match queue::fail_stale_synchronous(&state.db, 0).await {
-            Ok(n) if n > 0 => tracing::info!(
-                failed = n,
-                "failed synchronous jobs left over from the previous process"
-            ),
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "stale synchronous job sweep failed"),
-        }
-        {
-            let db = state.db.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(STALE_SWEEP_INTERVAL).await;
-                    match queue::fail_stale_synchronous(&db, STALE_SYNC_JOB_SECS).await {
-                        Ok(n) if n > 0 => {
-                            tracing::warn!(failed = n, "failed stale synchronous jobs")
-                        }
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!(error = %e, "stale synchronous job sweep failed"),
-                    }
-                }
-            });
-        }
+/// Crash recovery, run BEFORE the HTTP server accepts requests: requeue
+/// background jobs left `running`, and fail every synchronous job — none can
+/// have survived the restart, its handler died with the previous process.
+/// Doing this before serving means the age-0 sweep can never hit a job that a
+/// fresh request just created.
+pub async fn recover(state: &AppState) {
+    match queue::recover_orphans(&state.db).await {
+        Ok(n) if n > 0 => tracing::info!(recovered = n, "requeued orphaned jobs"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "orphan recovery failed"),
+    }
+    match queue::fail_stale_synchronous(&state.db, 0).await {
+        Ok(n) if n > 0 => tracing::info!(
+            failed = n,
+            "failed synchronous jobs left over from the previous process"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "stale synchronous job sweep failed"),
+    }
+}
 
+/// Spawn the worker loop and the periodic stale-job sweep. Returns immediately.
+pub fn spawn(state: AppState) {
+    {
+        let db = state.db.clone();
+        let max_age = state.config.sync_job_max_secs;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(STALE_SWEEP_INTERVAL).await;
+                match queue::fail_stale_synchronous(&db, max_age).await {
+                    Ok(n) if n > 0 => tracing::warn!(failed = n, "failed stale synchronous jobs"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "stale synchronous job sweep failed"),
+                }
+            }
+        });
+    }
+    tokio::spawn(async move {
         let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_JOBS));
         tracing::info!(max_concurrent = MAX_CONCURRENT_JOBS, "job worker started");
         loop {

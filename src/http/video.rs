@@ -105,7 +105,9 @@ pub async fn analyze(
         binary: "claude".to_string(),
         token: state.config.claude_max_token.clone(),
         workdir: dir.to_string_lossy().to_string(),
-        sandbox: crate::sandbox::active(&state.db).await,
+        sandbox: crate::sandbox::active(&state.db)
+            .await
+            .with_passthrough(&state.config.agent_env_passthrough),
         steering: false,
     };
     let out = claude_cli::run(

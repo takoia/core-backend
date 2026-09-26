@@ -17,7 +17,9 @@ pub async fn generate_text(state: &AppState, prompt: &str) -> Option<String> {
         binary: "claude".to_string(),
         token: state.config.claude_max_token.clone(),
         workdir: format!("{}/_internal", state.config.agent_workdir),
-        sandbox: crate::sandbox::active(&state.db).await,
+        sandbox: crate::sandbox::active(&state.db)
+            .await
+            .with_passthrough(&state.config.agent_env_passthrough),
         steering: false,
     };
     match claude_cli::run(

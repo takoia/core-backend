@@ -137,7 +137,8 @@ pub async fn import(db: &Db, account_id: &str, toml_str: &str) -> Result<String>
              price_per_run_usd = excluded.price_per_run_usd,
              icon = excluded.icon,
              persona = excluded.persona,
-             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')"#,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+           WHERE agents.account_id = excluded.account_id"#,
     )
     .bind(&id)
     .bind(account_id)

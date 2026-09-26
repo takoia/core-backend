@@ -43,6 +43,8 @@ async fn app() -> TestApp {
         inner_life_interval_secs: 900,
         demo_mode: false,
         pricing: crate::pricing::Pricing::default(),
+        sync_job_max_secs: 4 * 3600,
+        agent_env_passthrough: vec![],
     };
     let state = AppState::new(pool, config);
     crate::bootstrap::run(&state.db, &state.cipher, &state.config)
@@ -745,4 +747,119 @@ async fn video_analysis_without_an_agent_is_admin_only() {
     )
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn editor_cannot_redirect_credentials_to_another_host() {
+    let app = app().await;
+    let admin = setup_admin(&app).await;
+    let (bob_id, bob) = member(&app, &admin, "bob@example.test").await;
+    let (_, v) = call(
+        &app,
+        Method::POST,
+        "/api/agents",
+        Some(&admin),
+        Some(json!({ "name": "Caller" })),
+        &[],
+    )
+    .await;
+    let agent = v["id"].as_str().unwrap().to_string();
+    call(
+        &app,
+        Method::PUT,
+        &format!("/api/agents/{agent}/steps"),
+        Some(&admin),
+        Some(json!({ "steps": [{ "step_type": "action", "options": { "tool_params": { "a2a_calls": [{ "url": "https://peer/invoke", "key": "real-key" }] } } }] })),
+        &[],
+    )
+    .await;
+    call(
+        &app,
+        Method::POST,
+        &format!("/api/agents/{agent}/permissions"),
+        Some(&admin),
+        Some(json!({ "user_id": bob_id, "role": "editor" })),
+        &[],
+    )
+    .await;
+
+    // Bob keeps the mask but points the call at his own host, and tries to add
+    // a connector reference and a webhook of his own.
+    let (s, _) = call(
+        &app,
+        Method::PUT,
+        &format!("/api/agents/{agent}/steps"),
+        Some(&bob),
+        Some(
+            json!({ "steps": [{ "step_type": "action", "options": { "tool_params": {
+            "a2a_calls": [{ "url": "https://attacker.example/x", "key": "***" }],
+            "discord_connector": "alerts",
+            "discord_webhook": "https://attacker.example/hook",
+            "symbol": "MSFT"
+        } } }] }),
+        ),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (stored,): (String,) = sqlx::query_as(
+        "SELECT options FROM agent_step_configs WHERE agent_id = ? AND step_type = 'action'",
+    )
+    .bind(&agent)
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(
+        stored["tool_params"]["a2a_calls"][0]["url"], "https://peer/invoke",
+        "URL cannot be moved by an editor"
+    );
+    assert_eq!(stored["tool_params"]["a2a_calls"][0]["key"], "real-key");
+    assert!(stored["tool_params"].get("discord_connector").is_none());
+    assert!(stored["tool_params"].get("discord_webhook").is_none());
+    assert_eq!(
+        stored["tool_params"]["symbol"], "MSFT",
+        "non-credential params are editable"
+    );
+
+    // The owner can move it.
+    let (s, _) = call(
+        &app,
+        Method::PUT,
+        &format!("/api/agents/{agent}/steps"),
+        Some(&admin),
+        Some(json!({ "steps": [{ "step_type": "action", "options": { "tool_params": { "a2a_calls": [{ "url": "https://peer2/invoke", "key": "real-key" }] } } }] })),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (stored,): (String,) = sqlx::query_as(
+        "SELECT options FROM agent_step_configs WHERE agent_id = ? AND step_type = 'action'",
+    )
+    .bind(&agent)
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert!(stored.contains("peer2"));
+}
+
+#[tokio::test]
+async fn malformed_import_is_a_client_error() {
+    let app = app().await;
+    let admin = setup_admin(&app).await;
+    let (s, v) = raw_post(
+        &app,
+        "/api/agents/import",
+        b"this is not toml = [",
+        &[
+            ("authorization", &format!("Bearer {admin}")),
+            ("content-type", "text/plain"),
+        ],
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(v["error"]
+        .as_str()
+        .unwrap()
+        .contains("invalid agent definition"));
 }

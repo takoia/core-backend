@@ -13,6 +13,10 @@ use crate::tools;
 use anyhow::Result;
 use uuid::Uuid;
 
+/// Bound on one remote agent invocation: a four-step run plus margin.
+const A2A_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(4 * crate::llm::claude_cli::STEP_TIMEOUT.as_secs() + 60);
+
 /// Everything the Action step's tools need from the run.
 pub struct ToolRun<'a> {
     pub state: &'a AppState,
@@ -33,6 +37,9 @@ pub struct ToolRun<'a> {
 pub struct Gathered {
     pub text: String,
     pub usage: Vec<(String, String, TokenUsage)>,
+    /// A call_agent sub-run was served (at least partly) by the demo provider;
+    /// the parent's deliverable is then built on fabricated data.
+    pub canned: bool,
 }
 
 /// Run the allowed tools in a fixed order and gather their output. A tool that
@@ -133,7 +140,10 @@ pub async fn gather(run: ToolRun<'_>) -> Result<Gathered> {
                 )
                 .await
                 {
-                    Ok(result) => out.text.push_str(&format!("\nagent[{target}]:\n{result}")),
+                    Ok((result, canned)) => {
+                        out.canned |= canned;
+                        out.text.push_str(&format!("\nagent[{target}]:\n{result}"));
+                    }
                     Err(e) => out.text.push_str(&format!("\nagent[{target}] error: {e}")),
                 }
             }
@@ -241,7 +251,7 @@ async fn run_subagent(
     target_agent_id: &str,
     subtask: &str,
     depth: i64,
-) -> Result<String> {
+) -> Result<(String, bool)> {
     // Same account only: another tenant's agent would run on their providers,
     // recall their memory and bill their usage on behalf of the caller.
     let target: Option<(String, String)> = sqlx::query_as(
@@ -293,8 +303,8 @@ async fn run_subagent(
         objective_id,
         agent_id: target_agent_id.to_string(),
     };
-    match Box::pin(run_job(state, &claimed, true)).await {
-        Ok(RunOutcome::Completed { .. }) => {}
+    let canned = match Box::pin(run_job(state, &claimed, true)).await {
+        Ok(RunOutcome::Completed { canned }) => canned,
         Ok(RunOutcome::AwaitingApproval) => {
             let msg = "sub-agent paused for approval inside a synchronous call";
             queue::mark_failed(&state.db, &sub_job_id, msg).await.ok();
@@ -308,7 +318,7 @@ async fn run_subagent(
                 .ok();
             return Err(e);
         }
-    }
+    };
 
     let out: Option<(String,)> = sqlx::query_as(
         "SELECT output FROM steps WHERE job_id = ? AND step_type = 'restitution' ORDER BY position DESC LIMIT 1",
@@ -324,7 +334,7 @@ async fn run_subagent(
                 .unwrap_or(o)
         })
         .unwrap_or_default();
-    Ok(text)
+    Ok((text, canned))
 }
 
 /// Call a published agent on this or another TakoIA instance through its billed
@@ -333,7 +343,9 @@ async fn run_subagent(
 async fn run_a2a(url: &str, key: &str, input: &str) -> Result<String> {
     // SSRF guard: never let an agent point an A2A call at an internal address.
     let addrs = crate::net::validate_outbound_url(url).await?;
-    let resp = crate::net::pinned_client(url, &addrs)?
+    // The peer runs a full synchronous agent (four steps, each bounded by its
+    // own STEP_TIMEOUT), so the bound is minutes, not seconds.
+    let resp = crate::net::pinned_client(url, &addrs, A2A_TIMEOUT)?
         .post(url)
         .header("Authorization", format!("Bearer {key}"))
         .json(&serde_json::json!({ "input": input }))
