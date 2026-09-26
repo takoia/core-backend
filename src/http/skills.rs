@@ -116,7 +116,7 @@ pub async fn install(
         )
     };
 
-    let client = reqwest::Client::new();
+    let client = crate::net::http_client(std::time::Duration::from_secs(30));
     let resp = client
         .get(&raw_url)
         .header("User-Agent", USER_AGENT)
@@ -164,7 +164,7 @@ pub async fn github(
         q.repo,
         q.path.trim_matches('/')
     );
-    let client = reqwest::Client::new();
+    let client = crate::net::http_client(std::time::Duration::from_secs(30));
     let mut request = client
         .get(&api_url)
         .header("User-Agent", USER_AGENT)

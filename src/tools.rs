@@ -24,7 +24,7 @@ pub async fn market_data(symbol: &str) -> Result<ToolOutput> {
     };
     let url =
         format!("https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5d");
-    let resp = reqwest::Client::new()
+    let resp = crate::net::http_client(std::time::Duration::from_secs(20))
         .get(&url)
         .header("User-Agent", "takoia-core")
         .send()
@@ -75,10 +75,10 @@ pub async fn send_discord(webhook_url: &str, content: &str) -> Result<()> {
         return Err(anyhow!("no discord webhook configured"));
     }
     // SSRF guard: the webhook URL is agent-controlled — block internal targets.
-    crate::net::validate_outbound_url(webhook_url).await?;
+    let addrs = crate::net::validate_outbound_url(webhook_url).await?;
     let body = serde_json::json!({ "content": content.chars().take(1900).collect::<String>() });
     // Discord's Cloudflare rejects requests with no User-Agent (error 1010).
-    let resp = crate::net::safe_client()
+    let resp = crate::net::pinned_client(webhook_url, &addrs)?
         .post(webhook_url)
         .header(
             "User-Agent",

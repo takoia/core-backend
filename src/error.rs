@@ -47,11 +47,47 @@ impl AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status();
-        if status == StatusCode::INTERNAL_SERVER_ERROR {
+        // 4xx messages are written for the caller. 5xx messages are anyhow chains
+        // (provider stderr, file paths, SQL) — they go to the log, never to the
+        // client.
+        let message = if status == StatusCode::INTERNAL_SERVER_ERROR {
             tracing::error!(error = %self, "request failed");
-        }
-        let body = Json(json!({ "error": self.to_string() }));
+            "internal error".to_string()
+        } else {
+            self.to_string()
+        };
+        let body = Json(json!({ "error": message }));
         (status, body).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    async fn body_of(err: AppError) -> (StatusCode, String) {
+        let resp = err.into_response();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn client_errors_keep_their_message() {
+        let (status, body) = body_of(AppError::BadRequest("name is required".into())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("name is required"));
+    }
+
+    #[tokio::test]
+    async fn internal_errors_never_leak_their_cause() {
+        let cause = anyhow::anyhow!("claude -p exited with 1: /home/takoia/.env not found");
+        let (status, body) = body_of(AppError::Other(cause)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!body.contains("claude"), "body was: {body}");
+        assert!(!body.contains("/home"), "body was: {body}");
+        assert!(body.contains("internal error"));
     }
 }
 

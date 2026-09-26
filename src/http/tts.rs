@@ -71,7 +71,7 @@ pub async fn synthesize(
     };
     let base_url = row.base_url.trim_end_matches('/');
 
-    let resp = reqwest::Client::new()
+    let resp = crate::net::http_client(std::time::Duration::from_secs(120))
         .post(format!("{base_url}/audio/speech"))
         .bearer_auth(key)
         .json(&serde_json::json!({

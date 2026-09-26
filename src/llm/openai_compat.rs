@@ -32,7 +32,8 @@ impl OpenAiCompatProvider {
             base_url,
             api_key,
             default_model: default_model.into(),
-            client: reqwest::Client::new(),
+            // Generous: a chat completion can legitimately take minutes.
+            client: crate::net::http_client(std::time::Duration::from_secs(300)),
         }
     }
 }
