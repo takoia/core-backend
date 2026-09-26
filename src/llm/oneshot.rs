@@ -1,70 +1,76 @@
-//! One-shot `claude -p` helpers for internal generation (scaffolding, persona
-//! evolution, inner-life reflection). These run the SAME execution sandbox as
-//! agent runs (default Landlock), so an internal call can never write outside
-//! its confined workdir either. Centralised here to avoid duplicating the spawn.
+//! One-shot text/JSON generations (persona evolution, scaffolding, reflection,
+//! external agent import). They embed untrusted text — memories, uploaded
+//! definitions, user descriptions — so they run with NO tools at all.
 
+use super::claude_cli::{self, ClaudeRun, ClaudeRuntime, ToolSet};
 use crate::state::AppState;
 use serde_json::Value;
 use std::time::Duration;
 
-const TIMEOUT_SECS: u64 = 180;
+const TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Run a one-shot `claude -p` and return the raw result text, confined by the
-/// active sandbox. Returns `None` on spawn/timeout/non-zero exit.
+/// Run a tool-less `claude -p` and return the raw result text, confined by the
+/// active sandbox. Returns `None` on any failure (spawn, timeout, non-zero
+/// exit, bad JSON); the failure is logged so it is not silent.
 pub async fn generate_text(state: &AppState, prompt: &str) -> Option<String> {
-    let argv: Vec<String> = vec![
-        "-p".into(),
-        "--output-format".into(),
-        "json".into(),
-        "--permission-mode".into(),
-        "bypassPermissions".into(),
-    ];
-    // Dedicated confined workdir for internal generations.
-    let workdir = format!("{}/_internal", state.config.agent_workdir);
-    let _ = std::fs::create_dir_all(&workdir);
-    let cfg = crate::sandbox::active(&state.db).await;
-    let mut cmd = crate::sandbox::build_command(
-        &cfg,
-        &workdir,
-        "claude",
-        &argv,
-        state.config.claude_max_token.as_deref(),
-    );
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = cmd.spawn().ok()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(prompt.as_bytes()).await;
-        drop(stdin);
-    }
-    let output = tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), child.wait_with_output())
-        .await
-        .ok()?
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let parsed: Value =
-        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).ok()?;
-    Some(
-        parsed
-            .get("result")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
+    let rt = ClaudeRuntime {
+        binary: "claude".to_string(),
+        token: state.config.claude_max_token.clone(),
+        workdir: format!("{}/_internal", state.config.agent_workdir),
+        sandbox: crate::sandbox::active(&state.db).await,
+        steering: false,
+    };
+    match claude_cli::run(
+        &rt,
+        ClaudeRun {
+            system: None,
+            prompt,
+            model: None,
+            tools: ToolSet::None,
+            timeout: TIMEOUT,
+        },
     )
+    .await
+    {
+        Ok(out) => Some(out.result),
+        Err(e) => {
+            tracing::warn!(error = %e, "one-shot claude generation failed");
+            None
+        }
+    }
 }
 
-/// Run a one-shot `claude -p` and parse a JSON object out of the result
-/// (tolerating surrounding prose / code fences), confined by the active sandbox.
+/// Run a one-shot generation and parse a JSON object out of the result
+/// (tolerating surrounding prose / code fences).
 pub async fn generate_json(state: &AppState, prompt: &str) -> Option<Value> {
     let text = generate_text(state, prompt).await?;
+    extract_json_object(&text)
+}
+
+/// Pull the outermost `{...}` out of free text and parse it.
+fn extract_json_object(text: &str) -> Option<Value> {
     let slice = match (text.find('{'), text.rfind('}')) {
         (Some(a), Some(b)) if b > a => &text[a..=b],
-        _ => &text,
+        _ => text,
     };
     serde_json::from_str(slice).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_object_from_fenced_prose() {
+        let v =
+            extract_json_object("Sure!\n```json\n{\"a\": 1, \"b\": \"x\"}\n```\nDone.").unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], "x");
+    }
+
+    #[test]
+    fn rejects_text_without_object() {
+        assert!(extract_json_object("no json here").is_none());
+        assert!(extract_json_object("} {").is_none());
+    }
 }

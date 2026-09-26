@@ -3,7 +3,7 @@
 //! as an offline demo fallback so a run never breaks.
 
 mod canned;
-mod claude_cli;
+pub mod claude_cli;
 pub mod oneshot;
 mod openai_compat;
 mod registry;
@@ -97,6 +97,12 @@ pub struct Completion {
 pub trait LlmProvider: Send + Sync {
     /// Provider name (e.g. "claude_max", "ollama").
     fn name(&self) -> &str;
+
+    /// Whether `enable_web_search` performs a real live search with this
+    /// provider. Others would only imitate one, so callers must not ask.
+    fn supports_web_search(&self) -> bool {
+        false
+    }
 
     /// Run a chat completion.
     async fn complete(&self, req: CompletionRequest) -> anyhow::Result<Completion>;

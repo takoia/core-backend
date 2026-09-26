@@ -65,7 +65,7 @@ impl ProviderRegistry {
                     row.name.clone(),
                     Some(row.model),
                     secret,
-                    Some(agent_workdir.to_string()),
+                    agent_workdir.to_string(),
                     sandbox.clone(),
                 ))
             } else {

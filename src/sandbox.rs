@@ -168,6 +168,39 @@ fn extra_args(cfg: &SandboxConfig) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Environment for a sandboxed `claude` child: an explicit whitelist, never the
+/// server's environment, which holds MASTER_KEY, provider API keys and the
+/// database URL and is readable through /proc/self/environ by a confined child.
+/// `own_home` points HOME at the workdir so config/cache writes stay inside it.
+pub fn child_env(workdir: &str, token: Option<&str>, own_home: bool) -> Vec<(String, String)> {
+    let tmp = format!("{workdir}/tmp");
+    let _ = std::fs::create_dir_all(&tmp);
+    let mut env: Vec<(String, String)> = vec![
+        (
+            "PATH".into(),
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into()),
+        ),
+        ("TMPDIR".into(), tmp),
+        ("LANG".into(), "C.UTF-8".into()),
+    ];
+    if own_home {
+        env.push(("HOME".into(), workdir.to_string()));
+    } else if let Ok(home) = std::env::var("HOME") {
+        env.push(("HOME".into(), home));
+    }
+    if let Some(t) = token {
+        env.push(("CLAUDE_CODE_OAUTH_TOKEN".into(), t.to_string()));
+    }
+    env
+}
+
+fn apply_child_env(cmd: &mut std::process::Command, env: &[(String, String)]) {
+    cmd.env_clear();
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+}
+
 /// Build the `tokio` command that runs `program args...` with cwd `workdir`,
 /// confined according to the active sandbox backend. `token` is injected into
 /// the sandboxed environment when present.
@@ -182,15 +215,9 @@ pub fn build_command(
         "landlock" => {
             // Native FS confinement, applied to the child via pre_exec.
             let mut std_cmd = std::process::Command::new(program);
-            std_cmd
-                .args(args)
-                .current_dir(workdir)
-                // Keep config/cache writes inside the writable workdir.
-                .env("HOME", workdir);
-            if let Some(t) = token {
-                std_cmd.env("CLAUDE_CODE_OAUTH_TOKEN", t);
-            }
-            attach_landlock(&mut std_cmd, workdir);
+            std_cmd.args(args).current_dir(workdir);
+            apply_child_env(&mut std_cmd, &child_env(workdir, token, true));
+            attach_landlock(&mut std_cmd, workdir, pbool(cfg, "share_tmp", true));
             Command::from(std_cmd)
         }
         "bubblewrap" => {
@@ -229,16 +256,10 @@ pub fn build_command(
                 workdir.into(),
                 "--chdir".into(),
                 workdir.into(),
-                "--setenv".into(),
-                "HOME".into(),
-                workdir.into(),
+                "--clearenv".into(),
             ];
-            if let Some(t) = token {
-                a.extend([
-                    "--setenv".into(),
-                    "CLAUDE_CODE_OAUTH_TOKEN".into(),
-                    t.into(),
-                ]);
+            for (k, v) in child_env(workdir, token, true) {
+                a.extend(["--setenv".into(), k, v]);
             }
             if !pbool(cfg, "allow_network", true) {
                 a.push("--unshare-net".into());
@@ -266,8 +287,9 @@ pub fn build_command(
             if pbool(cfg, "allow_network", true) {
                 a.push("--disable_clone_newnet".into());
             }
-            if let Some(t) = token {
-                a.extend(["--env".into(), format!("CLAUDE_CODE_OAUTH_TOKEN={t}")]);
+            // nsjail starts from an empty environment; pass the whitelist only.
+            for (k, v) in child_env(workdir, token, true) {
+                a.extend(["--env".into(), format!("{k}={v}")]);
             }
             a.extend(extra_args(cfg));
             a.push("--".into());
@@ -339,14 +361,14 @@ pub fn build_command(
             c.args(a);
             c
         }
-        // "none" and anything unknown: run directly on the host.
+        // "none" and anything unknown: run directly on the host, still with a
+        // cleared environment. Without a plan token the parent HOME is kept so a
+        // developer's own `claude` login keeps working.
         _ => {
-            let mut c = Command::new(program);
-            c.args(args).current_dir(workdir);
-            if let Some(t) = token {
-                c.env("CLAUDE_CODE_OAUTH_TOKEN", t);
-            }
-            c
+            let mut std_cmd = std::process::Command::new(program);
+            std_cmd.args(args).current_dir(workdir);
+            apply_child_env(&mut std_cmd, &child_env(workdir, token, token.is_some()));
+            Command::from(std_cmd)
         }
     }
 }
@@ -416,7 +438,7 @@ pub fn selftest(workdir: &str) -> String {
 /// Linux path (refuse to spawn unconfined) so a misconfigured dev box never
 /// silently runs the agent on the bare host.
 #[cfg(not(target_os = "linux"))]
-fn attach_landlock(cmd: &mut std::process::Command, _workdir: &str) {
+fn attach_landlock(cmd: &mut std::process::Command, _workdir: &str, _share_tmp: bool) {
     use std::os::unix::process::CommandExt;
     let msg = "landlock sandbox unavailable on this OS, refusing to run unconfined \
                (select another sandbox backend in Settings)";
@@ -430,7 +452,7 @@ fn attach_landlock(cmd: &mut std::process::Command, _workdir: &str) {
 /// The ruleset is built in the parent (allowed allocation); only the
 /// `restrict_self` syscall runs post-fork in the child.
 #[cfg(target_os = "linux")]
-fn attach_landlock(cmd: &mut std::process::Command, workdir: &str) {
+fn attach_landlock(cmd: &mut std::process::Command, workdir: &str, share_tmp: bool) {
     use landlock::{
         path_beneath_rules, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
     };
@@ -445,7 +467,14 @@ fn attach_landlock(cmd: &mut std::process::Command, workdir: &str) {
     let ro = [
         "/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64", "/dev", "/proc", "/run", "/sys",
     ];
-    let rw = [workdir.to_string(), "/tmp".to_string()];
+    // The workdir and its private tmp (TMPDIR) are always writable. `/tmp` stays
+    // writable by default because the CLI may still touch it directly, but it is
+    // shared by every agent on the host: set the sandbox param share_tmp=false
+    // to close it once TMPDIR is confirmed to be honoured on the target.
+    let mut rw = vec![workdir.to_string(), format!("{workdir}/tmp")];
+    if share_tmp {
+        rw.push("/tmp".to_string());
+    }
 
     let built = (|| {
         Ruleset::default()
@@ -484,5 +513,104 @@ fn attach_landlock(cmd: &mut std::process::Command, workdir: &str) {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(kind: &str, params: Value) -> SandboxConfig {
+        SandboxConfig {
+            kind: kind.into(),
+            params,
+        }
+    }
+
+    fn envs(cmd: &Command) -> Vec<(String, Option<String>)> {
+        cmd.as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn host_backend_never_inherits_the_server_environment() {
+        std::env::set_var("TAKOIA_TEST_SECRET", "leak-me");
+        let wd = std::env::temp_dir().join("takoia-env-test");
+        let cmd = build_command(
+            &cfg("none", json!({})),
+            wd.to_str().unwrap(),
+            "true",
+            &[],
+            Some("tok"),
+        );
+        assert!(
+            cmd.as_std().get_envs().len() > 0,
+            "env_clear must have been called (get_envs lists the explicit set)"
+        );
+        let set = envs(&cmd);
+        assert!(set.iter().all(|(k, _)| k != "TAKOIA_TEST_SECRET"));
+        assert!(set
+            .iter()
+            .any(|(k, v)| k == "CLAUDE_CODE_OAUTH_TOKEN" && v.as_deref() == Some("tok")));
+        assert!(set
+            .iter()
+            .any(|(k, v)| k == "HOME" && v.as_deref() == wd.to_str()));
+        assert!(set.iter().any(|(k, _)| k == "PATH"));
+        assert!(set.iter().any(|(k, _)| k == "TMPDIR"));
+    }
+
+    #[test]
+    fn host_backend_without_token_keeps_developer_home() {
+        let wd = std::env::temp_dir().join("takoia-env-test2");
+        let cmd = build_command(
+            &cfg("none", json!({})),
+            wd.to_str().unwrap(),
+            "true",
+            &[],
+            None,
+        );
+        let set = envs(&cmd);
+        let home = std::env::var("HOME").ok();
+        assert!(set.iter().any(|(k, v)| k == "HOME" && *v == home));
+        assert!(set.iter().all(|(k, _)| k != "CLAUDE_CODE_OAUTH_TOKEN"));
+    }
+
+    #[test]
+    fn bubblewrap_clears_env_before_setting_the_whitelist() {
+        let wd = std::env::temp_dir().join("takoia-env-test3");
+        let cmd = build_command(
+            &cfg("bubblewrap", json!({})),
+            wd.to_str().unwrap(),
+            "claude",
+            &["-p".into()],
+            Some("tok"),
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let clear = args
+            .iter()
+            .position(|a| a == "--clearenv")
+            .expect("--clearenv present");
+        let first_setenv = args
+            .iter()
+            .position(|a| a == "--setenv")
+            .expect("--setenv present");
+        assert!(
+            clear < first_setenv,
+            "--clearenv must precede every --setenv"
+        );
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--setenv" && w[1] == "CLAUDE_CODE_OAUTH_TOKEN"));
     }
 }
