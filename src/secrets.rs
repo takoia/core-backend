@@ -136,7 +136,13 @@ fn secret_name(scope: &str) -> String {
     // Vault / Azure / GCP / AWS all accept [A-Za-z0-9-]; uuids already match.
     let safe: String = scope
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     format!("takoia-{safe}")
 }
@@ -158,9 +164,9 @@ fn vault_env(c: &mut Command, cfg: &BackendConfig) {
 
 /// Write a secret to a fresh 0600 temp file so it never appears on a command line.
 fn write_temp_secret(value: &str) -> Result<std::path::PathBuf> {
+    use rand::RngCore;
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    use rand::RngCore;
     let mut rnd = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut rnd);
     let mut path = std::env::temp_dir();
@@ -199,27 +205,58 @@ async fn backend_set(cfg: &BackendConfig, name: &str, value: &str) -> Result<()>
             let mount = non_empty(param(cfg, "mount"), "secret");
             let mut c = Command::new("vault");
             vault_env(&mut c, cfg);
-            c.args(["kv", "put", &format!("-mount={mount}"), name, &format!("value=@{p}")]);
+            c.args([
+                "kv",
+                "put",
+                &format!("-mount={mount}"),
+                name,
+                &format!("value=@{p}"),
+            ]);
             run(&mut c).await.map(|_| ())
         }
         "azure" => {
             let mut c = Command::new("az");
             c.args([
-                "keyvault", "secret", "set",
-                "--vault-name", param(cfg, "vault_name"),
-                "--name", name,
-                "--file", &p,
-                "--output", "none",
+                "keyvault",
+                "secret",
+                "set",
+                "--vault-name",
+                param(cfg, "vault_name"),
+                "--name",
+                name,
+                "--file",
+                &p,
+                "--output",
+                "none",
             ]);
             run(&mut c).await.map(|_| ())
         }
         "gcp" => {
             let project = param(cfg, "project");
             let mut add = Command::new("gcloud");
-            add.args(["secrets", "versions", "add", name, "--data-file", &p, "--project", project, "--quiet"]);
+            add.args([
+                "secrets",
+                "versions",
+                "add",
+                name,
+                "--data-file",
+                &p,
+                "--project",
+                project,
+                "--quiet",
+            ]);
             if run(&mut add).await.is_err() {
                 let mut create = Command::new("gcloud");
-                create.args(["secrets", "create", name, "--data-file", &p, "--project", project, "--quiet"]);
+                create.args([
+                    "secrets",
+                    "create",
+                    name,
+                    "--data-file",
+                    &p,
+                    "--project",
+                    project,
+                    "--quiet",
+                ]);
                 run(&mut create).await.map(|_| ())
             } else {
                 Ok(())
@@ -229,10 +266,32 @@ async fn backend_set(cfg: &BackendConfig, name: &str, value: &str) -> Result<()>
             let region = param(cfg, "region");
             let secret_arg = format!("file://{p}");
             let mut put = Command::new("aws");
-            put.args(["secretsmanager", "put-secret-value", "--secret-id", name, "--secret-string", &secret_arg, "--region", region, "--output", "text"]);
+            put.args([
+                "secretsmanager",
+                "put-secret-value",
+                "--secret-id",
+                name,
+                "--secret-string",
+                &secret_arg,
+                "--region",
+                region,
+                "--output",
+                "text",
+            ]);
             if run(&mut put).await.is_err() {
                 let mut create = Command::new("aws");
-                create.args(["secretsmanager", "create-secret", "--name", name, "--secret-string", &secret_arg, "--region", region, "--output", "text"]);
+                create.args([
+                    "secretsmanager",
+                    "create-secret",
+                    "--name",
+                    name,
+                    "--secret-string",
+                    &secret_arg,
+                    "--region",
+                    region,
+                    "--output",
+                    "text",
+                ]);
                 run(&mut create).await.map(|_| ())
             } else {
                 Ok(())
@@ -250,28 +309,61 @@ async fn backend_get(cfg: &BackendConfig, name: &str) -> Result<String> {
             let mount = non_empty(param(cfg, "mount"), "secret");
             let mut c = Command::new("vault");
             vault_env(&mut c, cfg);
-            c.args(["kv", "get", &format!("-mount={mount}"), "-field=value", name]);
+            c.args([
+                "kv",
+                "get",
+                &format!("-mount={mount}"),
+                "-field=value",
+                name,
+            ]);
             run(&mut c).await
         }
         "azure" => {
             let mut c = Command::new("az");
             c.args([
-                "keyvault", "secret", "show",
-                "--vault-name", param(cfg, "vault_name"),
-                "--name", name,
-                "--query", "value",
-                "--output", "tsv",
+                "keyvault",
+                "secret",
+                "show",
+                "--vault-name",
+                param(cfg, "vault_name"),
+                "--name",
+                name,
+                "--query",
+                "value",
+                "--output",
+                "tsv",
             ]);
             run(&mut c).await
         }
         "gcp" => {
             let mut c = Command::new("gcloud");
-            c.args(["secrets", "versions", "access", "latest", "--secret", name, "--project", param(cfg, "project"), "--quiet"]);
+            c.args([
+                "secrets",
+                "versions",
+                "access",
+                "latest",
+                "--secret",
+                name,
+                "--project",
+                param(cfg, "project"),
+                "--quiet",
+            ]);
             run(&mut c).await
         }
         "aws" => {
             let mut c = Command::new("aws");
-            c.args(["secretsmanager", "get-secret-value", "--secret-id", name, "--query", "SecretString", "--output", "text", "--region", param(cfg, "region")]);
+            c.args([
+                "secretsmanager",
+                "get-secret-value",
+                "--secret-id",
+                name,
+                "--query",
+                "SecretString",
+                "--output",
+                "text",
+                "--region",
+                param(cfg, "region"),
+            ]);
             run(&mut c).await
         }
         other => Err(anyhow!("unsupported backend: {other}")),
@@ -290,20 +382,45 @@ async fn backend_test(cfg: &BackendConfig) -> Result<String> {
         "azure" => {
             let v = param(cfg, "vault_name");
             let mut c = Command::new("az");
-            c.args(["keyvault", "secret", "list", "--vault-name", v, "--maxresults", "1", "--output", "none"]);
-            run(&mut c).await.map(|_| format!("azure key vault '{v}' reachable"))
+            c.args([
+                "keyvault",
+                "secret",
+                "list",
+                "--vault-name",
+                v,
+                "--maxresults",
+                "1",
+                "--output",
+                "none",
+            ]);
+            run(&mut c)
+                .await
+                .map(|_| format!("azure key vault '{v}' reachable"))
         }
         "gcp" => {
             let p = param(cfg, "project");
             let mut c = Command::new("gcloud");
             c.args(["secrets", "list", "--project", p, "--limit", "1", "--quiet"]);
-            run(&mut c).await.map(|_| format!("gcp project '{p}' reachable"))
+            run(&mut c)
+                .await
+                .map(|_| format!("gcp project '{p}' reachable"))
         }
         "aws" => {
             let r = param(cfg, "region");
             let mut c = Command::new("aws");
-            c.args(["secretsmanager", "list-secrets", "--max-results", "1", "--region", r, "--output", "text"]);
-            run(&mut c).await.map(|_| format!("aws region '{r}' reachable"))
+            c.args([
+                "secretsmanager",
+                "list-secrets",
+                "--max-results",
+                "1",
+                "--region",
+                r,
+                "--output",
+                "text",
+            ]);
+            run(&mut c)
+                .await
+                .map(|_| format!("aws region '{r}' reachable"))
         }
         other => Err(anyhow!("unknown backend: {other}")),
     }

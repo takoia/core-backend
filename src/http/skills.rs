@@ -132,7 +132,9 @@ pub async fn install(Json(body): Json<InstallSkill>) -> AppResult<Json<Value>> {
         .await
         .map_err(|e| AppError::Other(e.into()))?;
 
-    Ok(Json(json!({ "ok": true, "installed": body.id, "source": raw_url })))
+    Ok(Json(
+        json!({ "ok": true, "installed": body.id, "source": raw_url }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -159,7 +161,10 @@ pub async fn github(Query(q): Query<GithubQuery>) -> AppResult<Json<Value>> {
     if let Some(token) = github_token().await {
         request = request.bearer_auth(token);
     }
-    let resp = request.send().await.map_err(|e| AppError::Other(e.into()))?;
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| AppError::Other(e.into()))?;
     if !resp.status().is_success() {
         return Err(AppError::NotFound(format!(
             "GitHub repo/path not found ({})",

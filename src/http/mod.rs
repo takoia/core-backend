@@ -9,15 +9,15 @@ mod integrations;
 mod jobs;
 mod logs;
 mod marketplace;
-mod memory;
 mod mcp;
+mod memory;
 mod objectives;
+mod sandbox_settings;
 mod schedules;
 mod skills;
-pub mod users;
 mod tts;
-mod sandbox_settings;
 mod usage;
+pub mod users;
 mod vaults;
 mod video;
 mod webhooks;
@@ -48,13 +48,19 @@ pub fn router(state: AppState) -> Router {
         .route("/me", get(users::me))
         // Multi-user management (org admin)
         .route("/users", get(users::list_users).post(users::create_user))
-        .route("/users/:id", put(users::update_user).delete(users::delete_user))
+        .route(
+            "/users/:id",
+            put(users::update_user).delete(users::delete_user),
+        )
         // Agents + per-step customization + marketplace publishing
         .route("/agents", get(agents::list).post(agents::create))
         .route("/agents/import", post(agents::import_toml))
         .route("/agents/import-soul", post(agents::import_soul))
         .route("/agents/scaffold", post(agents::scaffold))
-        .route("/agents/:id", get(agents::get).put(agents::update).delete(agents::delete))
+        .route(
+            "/agents/:id",
+            get(agents::get).put(agents::update).delete(agents::delete),
+        )
         .route("/agents/:id/steps", put(agents::update_steps))
         .route("/agents/:id/publish", post(agents::publish))
         .route("/agents/:id/export", get(agents::export_toml))
@@ -68,10 +74,19 @@ pub fn router(state: AppState) -> Router {
             get(agents::get_personalization).put(agents::set_personalization),
         )
         // Per-agent RBAC (owner / editor / viewer)
-        .route("/agents/:id/permissions", get(users::list_agent_permissions).post(users::set_agent_permission))
-        .route("/agents/:id/permissions/:user_id", delete(users::remove_agent_permission))
+        .route(
+            "/agents/:id/permissions",
+            get(users::list_agent_permissions).post(users::set_agent_permission),
+        )
+        .route(
+            "/agents/:id/permissions/:user_id",
+            delete(users::remove_agent_permission),
+        )
         // Objectives -> jobs
-        .route("/objectives", get(objectives::list).post(objectives::create))
+        .route(
+            "/objectives",
+            get(objectives::list).post(objectives::create),
+        )
         // Jobs + live SSE
         .route("/jobs", get(jobs::list))
         .route("/jobs/:id", get(jobs::get))
@@ -86,7 +101,10 @@ pub fn router(state: AppState) -> Router {
         .route("/schedules/:id", delete(schedules::delete))
         .route("/schedules/:id/toggle", post(schedules::toggle))
         // Settings / connectors (encrypted)
-        .route("/connectors", get(connectors::list).post(connectors::upsert))
+        .route(
+            "/connectors",
+            get(connectors::list).post(connectors::upsert),
+        )
         .route("/connectors/:id", delete(connectors::delete))
         // Pluggable secret storage backend (local / vault / azure / gcp / aws)
         .route(
@@ -99,7 +117,10 @@ pub fn router(state: AppState) -> Router {
             "/settings/sandbox",
             get(sandbox_settings::get_sandbox).put(sandbox_settings::set_sandbox),
         )
-        .route("/settings/sandbox/test", post(sandbox_settings::test_sandbox))
+        .route(
+            "/settings/sandbox/test",
+            post(sandbox_settings::test_sandbox),
+        )
         // Brute-force auto-ban configuration
         .route(
             "/settings/security",
@@ -131,7 +152,10 @@ pub fn router(state: AppState) -> Router {
         .route("/marketplace/earnings", get(marketplace::earnings))
         .route("/marketplace/usage", get(marketplace::usage))
         // Consumer API keys + public hosted-agent API (token-billed).
-        .route("/keys", get(marketplace::list_keys).post(marketplace::create_key))
+        .route(
+            "/keys",
+            get(marketplace::list_keys).post(marketplace::create_key),
+        )
         .route("/keys/:id", delete(marketplace::revoke_key))
         .route("/v1/agents/:id/invoke", post(marketplace::invoke))
         // OpenAI-compatible API: point any OpenAI SDK base_url at `<host>/api/v1`.

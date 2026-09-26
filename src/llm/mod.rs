@@ -4,8 +4,8 @@
 
 mod canned;
 mod claude_cli;
-mod openai_compat;
 pub mod oneshot;
+mod openai_compat;
 mod registry;
 
 pub use canned::CannedProvider;
@@ -34,13 +34,16 @@ pub struct Message {
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: Role::System, content: content.into() }
+        Self {
+            role: Role::System,
+            content: content.into(),
+        }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into() }
-    }
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: content.into() }
+        Self {
+            role: Role::User,
+            content: content.into(),
+        }
     }
 }
 

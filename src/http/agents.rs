@@ -167,9 +167,11 @@ pub async fn update(
     .bind(&body.name)
     .bind(&body.description)
     .bind(&body.expertise_domain)
-    .bind(body.autonomy_level.as_ref().filter(|a| {
-        a.as_str() == "full_auto" || a.as_str() == "confirm_before_action"
-    }))
+    .bind(
+        body.autonomy_level
+            .as_ref()
+            .filter(|a| a.as_str() == "full_auto" || a.as_str() == "confirm_before_action"),
+    )
     .bind(body.price_per_run_usd)
     .bind(&id)
     .execute(&state.db)
@@ -243,7 +245,11 @@ pub async fn publish(
     crate::http::users::require_agent_role(&state, &id, &me, "owner").await?;
     let visibility = match body.visibility.as_str() {
         "public" | "private" => body.visibility.as_str(),
-        _ => return Err(AppError::BadRequest("visibility must be public or private".into())),
+        _ => {
+            return Err(AppError::BadRequest(
+                "visibility must be public or private".into(),
+            ))
+        }
     };
     sqlx::query(
         r#"UPDATE agents SET
@@ -391,7 +397,9 @@ pub async fn import_soul(
         .await?;
     }
 
-    Ok(Json(json!({ "id": id, "name": name, "published": body.publish })))
+    Ok(Json(
+        json!({ "id": id, "name": name, "published": body.publish }),
+    ))
 }
 
 /// `GET /api/agents/:id/export` — export the agent as a TOML definition.
@@ -402,10 +410,7 @@ pub async fn export_toml(
     let toml = crate::agentdef::export(&state.db, &id)
         .await
         .map_err(AppError::Other)?;
-    Ok((
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        toml,
-    ))
+    Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], toml))
 }
 
 /// `DELETE /api/agents/:id` — remove an agent and its configs (cascade).
@@ -519,7 +524,11 @@ pub async fn evolve_persona(
     // top-weight memories when the keyword query misses.
     let memories = state
         .memory
-        .recall(&id, "interactions tone style how the user treats me preferences", 16)
+        .recall(
+            &id,
+            "interactions tone style how the user treats me preferences",
+            16,
+        )
         .await;
     if memories.trim().is_empty() {
         return Err(AppError::BadRequest(
@@ -553,7 +562,9 @@ pub async fn evolve_persona(
         .execute(&state.db)
         .await?;
 
-    Ok(Json(json!({ "persona": new_persona, "previous": current_persona })))
+    Ok(Json(
+        json!({ "persona": new_persona, "previous": current_persona }),
+    ))
 }
 
 /// `GET /api/agents/:id/inner-state` — the agent's current "inner life": mood,
@@ -584,7 +595,8 @@ pub async fn inner_state(
     .await?;
 
     let emotions = |e: Option<String>| -> Value {
-        e.and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or(Value::Null)
+        e.and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .unwrap_or(Value::Null)
     };
     let state_json = match st {
         Some((mood, energy, familiarity, reflection, emo, updated_at)) => json!({
@@ -604,7 +616,9 @@ pub async fn inner_state(
             "updated_at": null,
         }),
     };
-    Ok(Json(json!({ "state": state_json, "commitments": commitments })))
+    Ok(Json(
+        json!({ "state": state_json, "commitments": commitments }),
+    ))
 }
 
 /// `GET /api/agents/:id/personalization` — the per-agent feature toggles + Big Five.

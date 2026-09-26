@@ -60,21 +60,19 @@ chacha20poly1305 = "0.10"
 argon2 = "0.5"
 base64 = "0.22"
 rand = "0.8"
-# Native execution sandbox (Linux Landlock LSM, filesystem confinement)
-landlock = "0.4"
 # Scheduling
 cron = "0.12"
 # SSE / async streams
 futures = "0.3"
 async-stream = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
-# Embed frontend assets into the single binary (demo build)
-rust-embed = { version = "8", features = ["mime-guess"], optional = true }
-mime_guess = { version = "2", optional = true }
 
-[features]
-# Enable to embed frontend/dist into the binary for a single-file demo build.
-embed-frontend = ["dep:rust-embed", "dep:mime_guess"]
+# Native execution sandbox (Linux Landlock LSM, filesystem confinement). The
+# crate only builds on Linux, so it is target-gated: on other hosts the
+# `landlock` sandbox backend refuses to run (see `sandbox.rs`) instead of
+# breaking the whole build.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

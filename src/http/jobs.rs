@@ -36,10 +36,7 @@ pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
 }
 
 /// `GET /api/jobs/:id` — full detail: job, steps, pending approval, report.
-pub async fn get(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> AppResult<Json<Value>> {
+pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Value>> {
     let job = sqlx::query_as::<_, JobRow>(
         r#"SELECT j.id, j.agent_id, j.status, j.error, j.created_at, o.title
            FROM jobs j LEFT JOIN objectives o ON o.id = j.objective_id
@@ -132,9 +129,10 @@ pub async fn feedback(
         .await
         .map_err(crate::error::AppError::Other)?;
 
-    state
-        .events
-        .publish(crate::agent::JobEvent::log(&id, "correction recorded — agent will improve"));
+    state.events.publish(crate::agent::JobEvent::log(
+        &id,
+        "correction recorded — agent will improve",
+    ));
     Ok(Json(json!({ "ok": true, "agent_id": agent_id })))
 }
 

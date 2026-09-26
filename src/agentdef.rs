@@ -243,12 +243,19 @@ pub async fn export(db: &Db, agent_id: &str) -> Result<String> {
             r.step_type,
             StepDef {
                 system_prompt: r.system_prompt,
-                provider: opts.get("provider").and_then(|v| v.as_str()).map(String::from),
+                provider: opts
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
                 model: opts.get("model").and_then(|v| v.as_str()).map(String::from),
                 allowed_tools: opts
                     .get("allowed_tools")
                     .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 tool_params: opts
                     .get("tool_params")

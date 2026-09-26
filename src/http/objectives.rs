@@ -70,11 +70,16 @@ pub async fn create(
     .await?;
     tx.commit().await?;
 
-    state
-        .events
-        .publish(crate::agent::JobEvent::status(&job_id, "queued", "job queued"));
+    state.events.publish(crate::agent::JobEvent::status(
+        &job_id,
+        "queued",
+        "job queued",
+    ));
 
-    Ok(Json(CreatedJob { objective_id, job_id }))
+    Ok(Json(CreatedJob {
+        objective_id,
+        job_id,
+    }))
 }
 
 /// `GET /api/objectives` — list recent objectives (for the demo prefill).

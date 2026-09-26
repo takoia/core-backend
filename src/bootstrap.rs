@@ -69,12 +69,10 @@ async fn seed_showcase_agent(db: &Db) -> Result<()> {
 }
 
 async fn ensure_account(db: &Db) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO accounts (id, name) VALUES (?, 'Demo') ON CONFLICT(id) DO NOTHING",
-    )
-    .bind(DEFAULT_ACCOUNT_ID)
-    .execute(db)
-    .await?;
+    sqlx::query("INSERT INTO accounts (id, name) VALUES (?, 'Demo') ON CONFLICT(id) DO NOTHING")
+        .bind(DEFAULT_ACCOUNT_ID)
+        .execute(db)
+        .await?;
     Ok(())
 }
 
@@ -109,7 +107,11 @@ async fn seed_providers(db: &Db, cipher: &Cipher, config: &Config) -> Result<()>
         if seed.name == "claude_max" {
             continue;
         }
-        let secret = seed.api_key.as_ref().map(|k| cipher.encrypt(k)).transpose()?;
+        let secret = seed
+            .api_key
+            .as_ref()
+            .map(|k| cipher.encrypt(k))
+            .transpose()?;
         insert_connector(db, &seed.name, &seed.base_url, &seed.model, secret, false).await?;
     }
 

@@ -23,7 +23,11 @@ pub async fn decide(
     let new_status = match body.decision.as_str() {
         "approve" => "approved",
         "reject" => "rejected",
-        _ => return Err(AppError::BadRequest("decision must be approve or reject".into())),
+        _ => {
+            return Err(AppError::BadRequest(
+                "decision must be approve or reject".into(),
+            ))
+        }
     };
 
     let row: Option<(String, String)> =

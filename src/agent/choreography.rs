@@ -45,21 +45,19 @@ pub async fn dispatch(
 
     for event in &events {
         // Find agents listening for this event (excluding the emitter itself).
-        let listeners: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, name FROM agents WHERE trigger_on = ? AND id != ?",
-        )
-        .bind(event)
-        .bind(emitting_agent_id)
-        .fetch_all(&state.db)
-        .await?;
+        let listeners: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, name FROM agents WHERE trigger_on = ? AND id != ?")
+                .bind(event)
+                .bind(emitting_agent_id)
+                .fetch_all(&state.db)
+                .await?;
 
         for (agent_id, agent_name) in listeners {
             let objective_id = Uuid::new_v4().to_string();
             let new_job_id = Uuid::new_v4().to_string();
             let title = format!("Triggered by '{event}' from {emitter_name}");
-            let prompt = format!(
-                "You were triggered by the event '{event}'. Upstream result:\n\n{report}"
-            );
+            let prompt =
+                format!("You were triggered by the event '{event}'. Upstream result:\n\n{report}");
 
             let mut tx = state.db.begin().await?;
             sqlx::query(

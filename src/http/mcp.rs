@@ -67,8 +67,14 @@ pub async fn connect(
         .find(|s| s.get("id").and_then(|v| v.as_str()) == Some(body.id.as_str()))
         .ok_or_else(|| AppError::NotFound("unknown MCP server".into()))?;
 
-    let transport = entry.get("transport").and_then(|v| v.as_str()).unwrap_or("stdio");
-    let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or(&body.id);
+    let transport = entry
+        .get("transport")
+        .and_then(|v| v.as_str())
+        .unwrap_or("stdio");
+    let name = entry
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&body.id);
 
     // Build `claude mcp add` arguments.
     let mut cmd = Command::new("claude");
@@ -94,7 +100,10 @@ pub async fn connect(
     let cli_ok = matches!(&result, Ok(o) if o.status.success());
     let cli_msg = match &result {
         Ok(o) if o.status.success() => "registered with Claude Code".to_string(),
-        Ok(o) => String::from_utf8_lossy(&o.stderr).chars().take(300).collect(),
+        Ok(o) => String::from_utf8_lossy(&o.stderr)
+            .chars()
+            .take(300)
+            .collect(),
         Err(e) => format!("claude CLI unavailable: {e}"),
     };
 
@@ -114,5 +123,7 @@ pub async fn connect(
     .execute(&state.db)
     .await?;
 
-    Ok(Json(json!({ "ok": true, "cli_registered": cli_ok, "message": cli_msg })))
+    Ok(Json(
+        json!({ "ok": true, "cli_registered": cli_ok, "message": cli_msg }),
+    ))
 }

@@ -52,15 +52,14 @@ pub async fn list(
 
     let like = q.as_ref().map(|s| format!("%{s}%"));
 
-    let total: i64 = sqlx::query_as::<_, (i64,)>(&format!(
-        "SELECT COUNT(*) FROM event_log {where_clause}"
-    ))
-    .bind(&job_id)
-    .bind(&kind)
-    .bind(&like)
-    .fetch_one(&state.db)
-    .await?
-    .0;
+    let total: i64 =
+        sqlx::query_as::<_, (i64,)>(&format!("SELECT COUNT(*) FROM event_log {where_clause}"))
+            .bind(&job_id)
+            .bind(&kind)
+            .bind(&like)
+            .fetch_one(&state.db)
+            .await?
+            .0;
 
     let logs = sqlx::query_as::<_, LogRow>(&format!(
         r#"SELECT id, job_id, kind, step_type, status, message, data, created_at

@@ -128,7 +128,10 @@ impl<'a> From<&'a Message> for WireMessage<'a> {
             Role::User => "user",
             Role::Assistant => "assistant",
         };
-        WireMessage { role, content: &m.content }
+        WireMessage {
+            role,
+            content: &m.content,
+        }
     }
 }
 

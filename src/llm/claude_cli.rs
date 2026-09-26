@@ -174,8 +174,8 @@ impl LlmProvider for ClaudeCliProvider {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let parsed: CliResult = serde_json::from_str(stdout.trim())
-            .context("failed to parse claude -p JSON output")?;
+        let parsed: CliResult =
+            serde_json::from_str(stdout.trim()).context("failed to parse claude -p JSON output")?;
 
         if parsed.is_error {
             return Err(anyhow!("claude -p reported an error: {}", parsed.result));

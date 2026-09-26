@@ -164,18 +164,14 @@ impl Memory {
         // A small English + French stopword set: high-frequency, low-signal
         // tokens (>= 4 chars) that would otherwise dilute keyword recall.
         const STOPWORDS: &[&str] = &[
-            "this", "that", "with", "from", "have", "they", "them", "then",
-            "their", "there", "would", "could", "should", "about", "which",
-            "when", "what", "were", "will", "your",
-            "pour", "dans", "avec", "les", "des", "une", "que", "qui", "est",
-            "sont", "cette", "vous", "nous", "mais", "comme", "plus",
+            "this", "that", "with", "from", "have", "they", "them", "then", "their", "there",
+            "would", "could", "should", "about", "which", "when", "what", "were", "will", "your",
+            "pour", "dans", "avec", "les", "des", "une", "que", "qui", "est", "sont", "cette",
+            "vous", "nous", "mais", "comme", "plus",
         ];
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut out: Vec<String> = Vec::new();
-        for token in content
-            .to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-        {
+        for token in content.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
             if token.len() < 4 || STOPWORDS.contains(&token) {
                 continue;
             }
@@ -224,15 +220,13 @@ impl Memory {
             tracing::warn!(agent_id, error = %e, "icm store failed (db still persisted)");
         }
 
-        sqlx::query(
-            r#"INSERT INTO memories (id, agent_id, key, content) VALUES (?, ?, ?, ?)"#,
-        )
-        .bind(Uuid::new_v4().to_string())
-        .bind(agent_id)
-        .bind(key)
-        .bind(content)
-        .execute(&self.db)
-        .await?;
+        sqlx::query(r#"INSERT INTO memories (id, agent_id, key, content) VALUES (?, ?, ?, ?)"#)
+            .bind(Uuid::new_v4().to_string())
+            .bind(agent_id)
+            .bind(key)
+            .bind(content)
+            .execute(&self.db)
+            .await?;
         Ok(())
     }
 
@@ -410,10 +404,18 @@ impl Memory {
             .map(|arr| {
                 arr.iter()
                     .map(|m| IcmEntry {
-                        summary: m.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        summary: m
+                            .get("summary")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         weight: m.get("weight").and_then(|v| v.as_f64()).unwrap_or(1.0),
                         access_count: m.get("access_count").and_then(|v| v.as_i64()).unwrap_or(0),
-                        importance: m.get("importance").and_then(|v| v.as_str()).unwrap_or("medium").to_string(),
+                        importance: m
+                            .get("importance")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("medium")
+                            .to_string(),
                     })
                     .collect()
             })
@@ -453,7 +455,9 @@ impl Memory {
                 self.resync_mirror_from_icm(agent_id).await;
                 tracing::info!(agent_id, "consolidated agent memory");
             }
-            Ok(o) => tracing::warn!(agent_id, stderr = %String::from_utf8_lossy(&o.stderr), "icm consolidate failed"),
+            Ok(o) => {
+                tracing::warn!(agent_id, stderr = %String::from_utf8_lossy(&o.stderr), "icm consolidate failed")
+            }
             Err(e) => tracing::warn!(agent_id, error = %e, "icm consolidate spawn failed"),
         }
     }
@@ -465,7 +469,14 @@ impl Memory {
             .output()
             .await;
         let _ = Command::new("icm")
-            .args(["prune", "--threshold", "0.1", "--db", &self.icm_db_path, "--no-embeddings"])
+            .args([
+                "prune",
+                "--threshold",
+                "0.1",
+                "--db",
+                &self.icm_db_path,
+                "--no-embeddings",
+            ])
             .output()
             .await;
     }

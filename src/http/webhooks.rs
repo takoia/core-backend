@@ -57,9 +57,11 @@ pub async fn receive(
         .await?;
         tx.commit().await?;
 
-        state
-            .events
-            .publish(crate::agent::JobEvent::status(&job_id, "queued", "webhook trigger"));
+        state.events.publish(crate::agent::JobEvent::status(
+            &job_id,
+            "queued",
+            "webhook trigger",
+        ));
         jobs.push(json!({ "job_id": job_id, "agent": agent_name }));
     }
 

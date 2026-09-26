@@ -46,7 +46,11 @@ pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
     let views: Vec<ConnectorView> = rows
         .into_iter()
         .map(|r| {
-            let has_secret = r.encrypted_secret.as_ref().map(|b| !b.is_empty()).unwrap_or(false);
+            let has_secret = r
+                .encrypted_secret
+                .as_ref()
+                .map(|b| !b.is_empty())
+                .unwrap_or(false);
             ConnectorView {
                 id: r.id,
                 kind: r.kind,
@@ -54,7 +58,11 @@ pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
                 base_url: r.base_url,
                 model: r.model,
                 has_secret,
-                secret_hint: if has_secret { "••••••••".into() } else { String::new() },
+                secret_hint: if has_secret {
+                    "••••••••".into()
+                } else {
+                    String::new()
+                },
                 is_default: r.is_default != 0,
             }
         })
@@ -104,7 +112,11 @@ pub async fn upsert(
         Some(secret) => {
             let scope = format!("{}-{}", body.kind, body.name.trim());
             let sm = crate::secrets::SecretManager::new(&state.cipher, &state.db);
-            Some(sm.store_secret(&scope, secret).await.map_err(AppError::Other)?)
+            Some(
+                sm.store_secret(&scope, secret)
+                    .await
+                    .map_err(AppError::Other)?,
+            )
         }
         None => None,
     };

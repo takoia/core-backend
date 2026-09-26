@@ -210,7 +210,6 @@ The four logical providers are `claude_max` (Claude plan proxy), `ollama`
 
 | Variable | Default | Description |
 |---|---|---|
-| `DISCORD_WEBHOOK_URL` | *(unset)* | Optional Discord webhook for the `send_discord` notification tool. |
 | `RUST_LOG` | `takoia=debug,tower_http=debug,info` | Tracing filter. |
 
 ### `.env.example`
@@ -261,7 +260,6 @@ CODEX_API_KEY=
 CODEX_MODEL=gpt-4o-mini
 
 # ── Integrations & logging ──────────────────────────────────────────────────
-DISCORD_WEBHOOK_URL=
 RUST_LOG=takoia=debug,tower_http=debug,info
 ```
 

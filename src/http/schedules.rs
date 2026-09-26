@@ -118,12 +118,11 @@ pub async fn toggle(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
-    let res = sqlx::query(
-        "UPDATE schedules SET enabled = 1 - enabled WHERE id = ? RETURNING enabled",
-    )
-    .bind(&id)
-    .fetch_optional(&state.db)
-    .await?;
+    let res =
+        sqlx::query("UPDATE schedules SET enabled = 1 - enabled WHERE id = ? RETURNING enabled")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await?;
     if res.is_none() {
         return Err(AppError::NotFound("schedule not found".into()));
     }

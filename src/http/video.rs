@@ -47,7 +47,8 @@ pub async fn analyze(
     let frames: Vec<&String> = body.frames.iter().take(MAX_FRAMES).collect();
 
     // Write frames into an isolated per-request directory.
-    let dir = std::path::Path::new(&state.config.agent_workdir).join(format!("video-{}", Uuid::new_v4()));
+    let dir =
+        std::path::Path::new(&state.config.agent_workdir).join(format!("video-{}", Uuid::new_v4()));
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| AppError::Other(e.into()))?;
@@ -186,7 +187,11 @@ pub async fn analyze(
 /// Parse the model output into a list of `{info, detail}` items, tolerating
 /// surrounding prose or code fences.
 fn extract_items(text: &str) -> Vec<Value> {
-    let trimmed = text.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```");
+    let trimmed = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```");
     let slice = match (trimmed.find('['), trimmed.rfind(']')) {
         (Some(a), Some(b)) if b > a => &trimmed[a..=b],
         _ => trimmed,

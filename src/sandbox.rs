@@ -3,9 +3,9 @@
 //! Autonomous full-auto agents can write and run code via their tools, so the
 //! subprocess is confined according to the backend chosen in Settings:
 //!
-//! - `none`        — host execution (default, no isolation).
+//! - `none`        — host execution (no isolation).
 //! - `landlock`    — native Linux Landlock LSM (filesystem confinement, no
-//!                   external binary, no KVM). Applied in `pre_exec`. Recommended.
+//!                   external binary, no KVM). Applied in `pre_exec`. Default.
 //! - `bubblewrap`  — `bwrap` namespaces (filesystem + optional network).
 //! - `nsjail`      — `nsjail` namespaces.
 //! - `docker` / `podman` — one container per run (needs an image with `claude`).
@@ -45,7 +45,9 @@ impl Default for SandboxConfig {
     }
 }
 
-/// Read the active sandbox config (singleton row), defaulting to `none`.
+/// Read the active sandbox config (singleton row). Migration 0015 seeds the row
+/// with `landlock`, and the in-code default matches it, so a fresh install is
+/// confined without any configuration.
 pub async fn active(db: &Db) -> SandboxConfig {
     let row: Option<(String, Option<String>)> =
         sqlx::query_as("SELECT kind, params FROM sandbox_backend WHERE id = 1")
@@ -99,6 +101,14 @@ pub async fn probe(cfg: &SandboxConfig) -> Result<String> {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn probe_landlock() -> Result<String> {
+    Err(anyhow!(
+        "landlock is a Linux LSM and is unavailable on this host; pick another sandbox backend"
+    ))
+}
+
+#[cfg(target_os = "linux")]
 fn probe_landlock() -> Result<String> {
     use landlock::{Access, AccessFs, Ruleset, RulesetAttr, ABI};
     // create() opens the ruleset fd WITHOUT restrict_self, so the server process
@@ -124,25 +134,37 @@ async fn probe_bin(bin: &str, args: &[&str]) -> Result<String> {
 
 async fn probe_microvm(bin: &str) -> Result<String> {
     if !std::path::Path::new("/dev/kvm").exists() {
-        return Err(anyhow!("/dev/kvm missing — host has no (nested) virtualization"));
+        return Err(anyhow!(
+            "/dev/kvm missing — host has no (nested) virtualization"
+        ));
     }
     probe_bin(bin, &["--version"]).await
 }
 
 fn pbool(cfg: &SandboxConfig, key: &str, default: bool) -> bool {
-    cfg.params.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
+    cfg.params
+        .get(key)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(default)
 }
 fn pstr<'a>(cfg: &'a SandboxConfig, key: &str) -> &'a str {
     cfg.params.get(key).and_then(|v| v.as_str()).unwrap_or("")
 }
 fn pu64(cfg: &SandboxConfig, key: &str) -> Option<u64> {
-    cfg.params.get(key).and_then(|v| v.as_u64()).filter(|n| *n > 0)
+    cfg.params
+        .get(key)
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n > 0)
 }
 fn extra_args(cfg: &SandboxConfig) -> Vec<String> {
     cfg.params
         .get("extra_args")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -178,21 +200,45 @@ pub fn build_command(
                 "--unshare-ipc".into(),
                 "--unshare-uts".into(),
                 "--new-session".into(),
-                "--ro-bind".into(), "/usr".into(), "/usr".into(),
-                "--ro-bind".into(), "/etc".into(), "/etc".into(),
-                "--ro-bind-try".into(), "/bin".into(), "/bin".into(),
-                "--ro-bind-try".into(), "/sbin".into(), "/sbin".into(),
-                "--ro-bind-try".into(), "/lib".into(), "/lib".into(),
-                "--ro-bind-try".into(), "/lib64".into(), "/lib64".into(),
-                "--proc".into(), "/proc".into(),
-                "--dev".into(), "/dev".into(),
-                "--tmpfs".into(), "/tmp".into(),
-                "--bind".into(), workdir.into(), workdir.into(),
-                "--chdir".into(), workdir.into(),
-                "--setenv".into(), "HOME".into(), workdir.into(),
+                "--ro-bind".into(),
+                "/usr".into(),
+                "/usr".into(),
+                "--ro-bind".into(),
+                "/etc".into(),
+                "/etc".into(),
+                "--ro-bind-try".into(),
+                "/bin".into(),
+                "/bin".into(),
+                "--ro-bind-try".into(),
+                "/sbin".into(),
+                "/sbin".into(),
+                "--ro-bind-try".into(),
+                "/lib".into(),
+                "/lib".into(),
+                "--ro-bind-try".into(),
+                "/lib64".into(),
+                "/lib64".into(),
+                "--proc".into(),
+                "/proc".into(),
+                "--dev".into(),
+                "/dev".into(),
+                "--tmpfs".into(),
+                "/tmp".into(),
+                "--bind".into(),
+                workdir.into(),
+                workdir.into(),
+                "--chdir".into(),
+                workdir.into(),
+                "--setenv".into(),
+                "HOME".into(),
+                workdir.into(),
             ];
             if let Some(t) = token {
-                a.extend(["--setenv".into(), "CLAUDE_CODE_OAUTH_TOKEN".into(), t.into()]);
+                a.extend([
+                    "--setenv".into(),
+                    "CLAUDE_CODE_OAUTH_TOKEN".into(),
+                    t.into(),
+                ]);
             }
             if !pbool(cfg, "allow_network", true) {
                 a.push("--unshare-net".into());
@@ -208,10 +254,14 @@ pub fn build_command(
         "nsjail" => {
             let mut a: Vec<String> = vec![
                 "-Mo".into(),
-                "--rlimit_as".into(), "max".into(),
-                "--chroot".into(), "/".into(),
-                "--cwd".into(), workdir.into(),
-                "--bindmount".into(), format!("{workdir}:{workdir}"),
+                "--rlimit_as".into(),
+                "max".into(),
+                "--chroot".into(),
+                "/".into(),
+                "--cwd".into(),
+                workdir.into(),
+                "--bindmount".into(),
+                format!("{workdir}:{workdir}"),
             ];
             if pbool(cfg, "allow_network", true) {
                 a.push("--disable_clone_newnet".into());
@@ -231,12 +281,19 @@ pub fn build_command(
             let engine = cfg.kind.as_str();
             let image = {
                 let i = pstr(cfg, "image");
-                if i.is_empty() { "takoia/agent-runtime:latest" } else { i }
+                if i.is_empty() {
+                    "takoia/agent-runtime:latest"
+                } else {
+                    i
+                }
             };
             let mut a: Vec<String> = vec![
-                "run".into(), "--rm".into(),
-                "-v".into(), format!("{workdir}:{workdir}"),
-                "-w".into(), workdir.into(),
+                "run".into(),
+                "--rm".into(),
+                "-v".into(),
+                format!("{workdir}:{workdir}"),
+                "-w".into(),
+                workdir.into(),
                 "-i".into(),
             ];
             if !pbool(cfg, "allow_network", true) {
@@ -265,7 +322,11 @@ pub fn build_command(
             // workdir, the program and its args. Defaults to the named CLI.
             let launcher = {
                 let l = pstr(cfg, "launcher");
-                if l.is_empty() { cfg.kind.clone() } else { l.to_string() }
+                if l.is_empty() {
+                    cfg.kind.clone()
+                } else {
+                    l.to_string()
+                }
             };
             let mut a: Vec<String> = vec!["--workdir".into(), workdir.into()];
             if let Some(t) = token {
@@ -293,6 +354,15 @@ pub fn build_command(
 /// Self-test the Landlock filesystem confinement using the exact rules
 /// `build_command` applies. Restricts THIS process, then probes writes — run it
 /// as a throwaway `takoia sandbox-selftest <workdir>` process, never the server.
+#[cfg(not(target_os = "linux"))]
+pub fn selftest(_workdir: &str) -> String {
+    "landlock restrict_self: UNAVAILABLE (Linux-only LSM)\n".to_string()
+}
+
+/// Self-test the Landlock filesystem confinement using the exact rules
+/// `build_command` applies. Restricts THIS process, then probes writes — run it
+/// as a throwaway `takoia sandbox-selftest <workdir>` process, never the server.
+#[cfg(target_os = "linux")]
 pub fn selftest(workdir: &str) -> String {
     use landlock::{
         path_beneath_rules, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
@@ -321,24 +391,45 @@ pub fn selftest(workdir: &str) -> String {
     let inside = std::fs::write(format!("{workdir}/ll_ok.txt"), b"ok");
     out.push_str(&format!(
         "write {workdir}/ll_ok.txt   -> {}\n",
-        inside.map(|_| "OK (workdir allowed)".to_string()).unwrap_or_else(|e| format!("FAIL {e}"))
+        inside
+            .map(|_| "OK (workdir allowed)".to_string())
+            .unwrap_or_else(|e| format!("FAIL {e}"))
     ));
     let escape = std::fs::write("/home/takoia/ll_escape.txt", b"pwned");
     out.push_str(&format!(
         "write /home/takoia/ll_escape.txt -> {}\n",
-        escape.map(|_| "OK -- LEAK!".to_string()).unwrap_or_else(|e| format!("BLOCKED ({})", e.kind()))
+        escape
+            .map(|_| "OK -- LEAK!".to_string())
+            .unwrap_or_else(|e| format!("BLOCKED ({})", e.kind()))
     ));
     let read_etc = std::fs::read("/etc/hostname");
     out.push_str(&format!(
         "read  /etc/hostname        -> {}\n",
-        read_etc.map(|_| "OK (system readable)".to_string()).unwrap_or_else(|e| format!("FAIL {e}"))
+        read_etc
+            .map(|_| "OK (system readable)".to_string())
+            .unwrap_or_else(|e| format!("FAIL {e}"))
     ));
     out
+}
+
+/// Non-Linux hosts have no Landlock: keep the same fail-closed contract as the
+/// Linux path (refuse to spawn unconfined) so a misconfigured dev box never
+/// silently runs the agent on the bare host.
+#[cfg(not(target_os = "linux"))]
+fn attach_landlock(cmd: &mut std::process::Command, _workdir: &str) {
+    use std::os::unix::process::CommandExt;
+    let msg = "landlock sandbox unavailable on this OS, refusing to run unconfined \
+               (select another sandbox backend in Settings)";
+    tracing::error!("{msg}");
+    unsafe {
+        cmd.pre_exec(move || Err(std::io::Error::new(std::io::ErrorKind::Other, msg)));
+    }
 }
 
 /// Attach a Landlock filesystem restriction to a std command via `pre_exec`.
 /// The ruleset is built in the parent (allowed allocation); only the
 /// `restrict_self` syscall runs post-fork in the child.
+#[cfg(target_os = "linux")]
 fn attach_landlock(cmd: &mut std::process::Command, workdir: &str) {
     use landlock::{
         path_beneath_rules, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,

@@ -47,7 +47,8 @@ pub async fn generate_text(state: &AppState, prompt: &str) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let parsed: Value = serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).ok()?;
+    let parsed: Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).ok()?;
     Some(
         parsed
             .get("result")

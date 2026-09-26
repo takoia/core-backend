@@ -14,7 +14,9 @@ pub async fn validate_outbound_url(url: &str) -> Result<()> {
         "http" | "https" => {}
         other => bail!("URL scheme '{other}' is not allowed"),
     }
-    let host = parsed.host_str().ok_or_else(|| anyhow!("URL has no host"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("URL has no host"))?;
     let port = parsed.port_or_known_default().unwrap_or(443).max(1);
     let mut resolved = false;
     for addr in tokio::net::lookup_host((host, port))

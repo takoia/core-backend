@@ -17,33 +17,56 @@ pub struct ToolOutput {
 /// Fetch public market data for a symbol (Yahoo Finance, no API key).
 /// `symbol` examples: AAPL, MSFT, ^IXIC (NASDAQ Composite), NVDA.
 pub async fn market_data(symbol: &str) -> Result<ToolOutput> {
-    let sym = if symbol.trim().is_empty() { "^IXIC" } else { symbol.trim() };
-    let url = format!("https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5d");
+    let sym = if symbol.trim().is_empty() {
+        "^IXIC"
+    } else {
+        symbol.trim()
+    };
+    let url =
+        format!("https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5d");
     let resp = reqwest::Client::new()
         .get(&url)
         .header("User-Agent", "takoia-core")
         .send()
         .await?;
     if !resp.status().is_success() {
-        return Err(anyhow!("market data request for {sym} failed: {}", resp.status()));
+        return Err(anyhow!(
+            "market data request for {sym} failed: {}",
+            resp.status()
+        ));
     }
     let v: serde_json::Value = resp.json().await?;
     let result = &v["chart"]["result"][0];
     let meta = &result["meta"];
     let price = meta["regularMarketPrice"].as_f64().unwrap_or(0.0);
-    let prev = meta["chartPreviousClose"].as_f64().or_else(|| meta["previousClose"].as_f64()).unwrap_or(price);
+    let prev = meta["chartPreviousClose"]
+        .as_f64()
+        .or_else(|| meta["previousClose"].as_f64())
+        .unwrap_or(price);
     let change = price - prev;
-    let pct = if prev != 0.0 { change / prev * 100.0 } else { 0.0 };
+    let pct = if prev != 0.0 {
+        change / prev * 100.0
+    } else {
+        0.0
+    };
     let cur = meta["currency"].as_str().unwrap_or("");
     let closes: Vec<String> = result["indicators"]["quote"][0]["close"]
         .as_array()
-        .map(|a| a.iter().filter_map(|x| x.as_f64()).map(|x| format!("{x:.2}")).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_f64())
+                .map(|x| format!("{x:.2}"))
+                .collect()
+        })
         .unwrap_or_default();
     let output = format!(
         "market_data {sym}: last {price:.2} {cur} ({change:+.2}, {pct:+.2}%), prev close {prev:.2}. Recent closes: {}.",
         closes.join(", ")
     );
-    Ok(ToolOutput { output, usage: TokenUsage::default() })
+    Ok(ToolOutput {
+        output,
+        usage: TokenUsage::default(),
+    })
 }
 
 /// Post a message to a Discord webhook (the agent's "alert" channel).
@@ -57,7 +80,10 @@ pub async fn send_discord(webhook_url: &str, content: &str) -> Result<()> {
     // Discord's Cloudflare rejects requests with no User-Agent (error 1010).
     let resp = crate::net::safe_client()
         .post(webhook_url)
-        .header("User-Agent", "TakoIA-bot/1.0 (+https://takoia.szymkowiak.fr)")
+        .header(
+            "User-Agent",
+            "TakoIA-bot/1.0 (+https://takoia.szymkowiak.fr)",
+        )
         .json(&body)
         .send()
         .await?;

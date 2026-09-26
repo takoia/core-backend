@@ -84,7 +84,11 @@ impl ProviderRegistry {
         }
 
         let canned: Arc<dyn LlmProvider> = Arc::new(CannedProvider::new());
-        Ok(Self { providers, canned, default_name })
+        Ok(Self {
+            providers,
+            canned,
+            default_name,
+        })
     }
 
     /// Resolve a provider by name, falling back to the default, then to canned.
@@ -102,10 +106,5 @@ impl ProviderRegistry {
     /// The canned offline provider (used as a last-resort fallback on error).
     pub fn canned(&self) -> Arc<dyn LlmProvider> {
         self.canned.clone()
-    }
-
-    /// Names of all configured (non-canned) providers.
-    pub fn names(&self) -> Vec<String> {
-        self.providers.keys().cloned().collect()
     }
 }

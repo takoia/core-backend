@@ -74,9 +74,12 @@ pub async fn email_test(
         )
     })?;
 
-    let blob = row.encrypted_secret.filter(|b| !b.is_empty()).ok_or_else(|| {
-        AppError::BadRequest("email integration has no stored credentials".into())
-    })?;
+    let blob = row
+        .encrypted_secret
+        .filter(|b| !b.is_empty())
+        .ok_or_else(|| {
+            AppError::BadRequest("email integration has no stored credentials".into())
+        })?;
 
     let plaintext = crate::secrets::SecretManager::new(&state.cipher, &state.db)
         .resolve_blob(&blob)
@@ -111,19 +114,18 @@ pub async fn email_test(
         req.body.clone()
     };
 
-    let email = Message::builder()
-        .from(
-            from.parse()
-                .map_err(|e| AppError::BadRequest(format!("invalid sender address '{from}': {e}")))?,
-        )
-        .to(req
-            .to
-            .parse()
-            .map_err(|e| AppError::BadRequest(format!("invalid recipient '{}': {e}", req.to)))?)
-        .subject(subject)
-        .header(ContentType::TEXT_PLAIN)
-        .body(body)
-        .map_err(|e| AppError::BadRequest(format!("failed to build message: {e}")))?;
+    let email =
+        Message::builder()
+            .from(from.parse().map_err(|e| {
+                AppError::BadRequest(format!("invalid sender address '{from}': {e}"))
+            })?)
+            .to(req.to.parse().map_err(|e| {
+                AppError::BadRequest(format!("invalid recipient '{}': {e}", req.to))
+            })?)
+            .subject(subject)
+            .header(ContentType::TEXT_PLAIN)
+            .body(body)
+            .map_err(|e| AppError::BadRequest(format!("failed to build message: {e}")))?;
 
     let creds = Credentials::new(secret.user.clone(), secret.password.clone());
     let mailer: AsyncSmtpTransport<Tokio1Executor> =

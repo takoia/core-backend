@@ -150,7 +150,9 @@ pub async fn personalization(db: &crate::db::Db, agent_id: &str) -> Personalizat
             commitments: c != 0,
             persona_evolution: pe != 0,
             personality: p != 0,
-            big_five: bf.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+            big_five: bf
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default(),
         },
         None => Personalization::default(),
     }
@@ -191,7 +193,9 @@ pub async fn current(db: &crate::db::Db, agent_id: &str) -> InnerState {
             mood,
             energy,
             familiarity,
-            emotions: emotions.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+            emotions: emotions
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default(),
         },
         None => InnerState::default(),
     }
@@ -315,7 +319,10 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
     .await
     .unwrap_or((0, 0));
     let st = current(&state.db, agent_id).await;
-    let recent = state.memory.recall(agent_id, "recent work and how it went", 5).await;
+    let recent = state
+        .memory
+        .recall(agent_id, "recent work and how it went", 5)
+        .await;
 
     let prompt = format!(
         "You are an autonomous agent reflecting between tasks, like a person \
@@ -330,7 +337,11 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
          no code fences.",
         st.mood,
         st.energy * 100.0,
-        if recent.trim().is_empty() { "(none yet)" } else { &recent },
+        if recent.trim().is_empty() {
+            "(none yet)"
+        } else {
+            &recent
+        },
         if pers.emotions {
             ", emotions (an object with joy, trust, fear, surprise, sadness, \
              disgust, anger, anticipation — each a 0..1 number reflecting how the \
@@ -344,11 +355,22 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
         Some(v) => v,
         None => return,
     };
-    let s = |k: &str| fields.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let s = |k: &str| {
+        fields
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
     let reflection = s("reflection");
     let mood = {
         let m = s("mood");
-        if m.is_empty() { st.mood.clone() } else { m }
+        if m.is_empty() {
+            st.mood.clone()
+        } else {
+            m
+        }
     };
     let energy = fields
         .get("energy")
@@ -365,8 +387,11 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
         None
     };
     // Store the journalled thought only when reflection is enabled.
-    let reflection_to_store: Option<String> =
-        if pers.reflection && !reflection.is_empty() { Some(reflection.clone()) } else { None };
+    let reflection_to_store: Option<String> = if pers.reflection && !reflection.is_empty() {
+        Some(reflection.clone())
+    } else {
+        None
+    };
 
     // Persist the new affective state. reflection/emotions keep their previous
     // value when this run did not produce one (COALESCE on the NULL bind).
@@ -515,23 +540,27 @@ async fn enqueue_self_objective(state: &AppState, agent_id: &str, title: &str, p
         Ok(t) => t,
         Err(_) => return,
     };
-    if sqlx::query("INSERT INTO objectives (id, account_id, agent_id, title, prompt) VALUES (?, ?, ?, ?, ?)")
-        .bind(&objective_id)
-        .bind(DEFAULT_ACCOUNT_ID)
-        .bind(agent_id)
-        .bind(title)
-        .bind(prompt)
-        .execute(&mut *tx)
-        .await
-        .is_err()
+    if sqlx::query(
+        "INSERT INTO objectives (id, account_id, agent_id, title, prompt) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&objective_id)
+    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(agent_id)
+    .bind(title)
+    .bind(prompt)
+    .execute(&mut *tx)
+    .await
+    .is_err()
     {
         return;
     }
-    let _ = sqlx::query("INSERT INTO jobs (id, objective_id, agent_id, status) VALUES (?, ?, ?, 'queued')")
-        .bind(&job_id)
-        .bind(&objective_id)
-        .bind(agent_id)
-        .execute(&mut *tx)
-        .await;
+    let _ = sqlx::query(
+        "INSERT INTO jobs (id, objective_id, agent_id, status) VALUES (?, ?, ?, 'queued')",
+    )
+    .bind(&job_id)
+    .bind(&objective_id)
+    .bind(agent_id)
+    .execute(&mut *tx)
+    .await;
     let _ = tx.commit().await;
 }
