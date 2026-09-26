@@ -583,7 +583,16 @@ pub fn require_admin(user: &User) -> AppResult<()> {
 /// The user's effective role on an agent ("owner" for org admins), or None.
 pub async fn agent_role(state: &AppState, agent_id: &str, user: &User) -> Option<String> {
     if user.is_admin != 0 {
-        return Some("owner".to_string());
+        // Org admin: owner of every agent of THEIR account, nothing elsewhere.
+        let same_account: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM agents WHERE id = ? AND account_id = ?")
+                .bind(agent_id)
+                .bind(&user.account_id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
+        return same_account.map(|_| "owner".to_string());
     }
     sqlx::query_as::<_, (String,)>(
         "SELECT role FROM agent_permissions WHERE agent_id = ? AND user_id = ?",

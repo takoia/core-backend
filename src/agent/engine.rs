@@ -296,7 +296,18 @@ pub async fn run_job(
     }
 
     bus.publish(JobEvent::report(&job.id, &report));
-    queue::set_status(&state.db, &job.id, JobStatus::Done).await?;
+    if !queue::finish(&state.db, &job.id).await? {
+        // Failed underneath us (stale sweep): report it, do not undo it.
+        bus.publish(JobEvent::status(
+            &job.id,
+            "failed",
+            "job was marked failed while running",
+        ));
+        return Err(anyhow::anyhow!(
+            "job {} was marked failed while running",
+            job.id
+        ));
+    }
     bus.publish(JobEvent::status(&job.id, "done", "job completed"));
     // Skipped on a resumed-after-completion run so the run is counted once.
     if !restitution_was_done {

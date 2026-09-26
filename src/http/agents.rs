@@ -269,11 +269,26 @@ pub async fn update_steps(
     crate::http::users::require_agent_role(&state, &id, &me, "editor").await?;
     let mut tx = state.db.begin().await?;
     for step in &body.steps {
-        let options = if step.options.is_null() {
-            "{}".to_string()
+        // Non-owners receive masked credentials from GET; saving them back
+        // must not overwrite the real values with the mask.
+        let stored: Option<(String,)> = sqlx::query_as(
+            "SELECT options FROM agent_step_configs WHERE agent_id = ? AND step_type = ?",
+        )
+        .bind(&id)
+        .bind(&step.step_type)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let mut incoming = if step.options.is_null() {
+            json!({})
         } else {
-            step.options.to_string()
+            step.options.clone()
         };
+        if let Some((current,)) = stored {
+            if let Ok(current) = serde_json::from_str::<Value>(&current) {
+                crate::domain::restore_masked_secrets(&mut incoming, &current);
+            }
+        }
+        let options = incoming.to_string();
         sqlx::query(
             r#"UPDATE agent_step_configs
                SET system_prompt = ?, options = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -344,6 +359,17 @@ pub async fn import_toml(
     crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     body: String,
 ) -> AppResult<Json<Value>> {
+    // The TOML id is the primary key and import upserts: re-importing an
+    // existing agent is an edit, so it needs owner on that agent (and the
+    // agent must be in the caller's account — agent_role enforces both).
+    let def = crate::agentdef::parse(&body).map_err(AppError::Other)?;
+    let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM agents WHERE id = ?")
+        .bind(&def.agent.id)
+        .fetch_optional(&state.db)
+        .await?;
+    if existing.is_some() {
+        crate::http::users::require_agent_role(&state, &def.agent.id, &me, "owner").await?;
+    }
     let id = crate::agentdef::import(&state.db, &me.account_id, &body)
         .await
         .map_err(AppError::Other)?;

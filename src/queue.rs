@@ -44,6 +44,21 @@ pub async fn requeue_approved(db: &Db, job_id: &str) -> Result<()> {
     set_status(db, job_id, JobStatus::Queued).await
 }
 
+/// Mark a job done — unless something (the stale sweep, a rejection) already
+/// failed it, in which case the failure stands and the caller is told.
+pub async fn finish(db: &Db, job_id: &str) -> Result<bool> {
+    let res = sqlx::query(
+        r#"UPDATE jobs SET status = 'done',
+           finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+           WHERE id = ? AND status <> 'failed'"#,
+    )
+    .bind(job_id)
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected() > 0)
+}
+
 /// Update a job's status (and clear/set finished timestamp where relevant).
 pub async fn set_status(db: &Db, job_id: &str, status: JobStatus) -> Result<()> {
     let finished = matches!(status, JobStatus::Done | JobStatus::Failed);

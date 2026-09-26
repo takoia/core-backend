@@ -173,8 +173,8 @@ fn extra_args(cfg: &SandboxConfig) -> Vec<String> {
 /// database URL and is readable through /proc/self/environ by a confined child.
 /// `own_home` points HOME at the workdir so config/cache writes stay inside it.
 pub fn child_env(workdir: &str, token: Option<&str>, own_home: bool) -> Vec<(String, String)> {
+    // Created together with the workdir by claude_cli::prepare_workdir.
     let tmp = format!("{workdir}/tmp");
-    let _ = std::fs::create_dir_all(&tmp);
     let mut env: Vec<(String, String)> = vec![
         (
             "PATH".into(),
@@ -471,7 +471,7 @@ fn attach_landlock(cmd: &mut std::process::Command, workdir: &str, share_tmp: bo
     // writable by default because the CLI may still touch it directly, but it is
     // shared by every agent on the host: set the sandbox param share_tmp=false
     // to close it once TMPDIR is confirmed to be honoured on the target.
-    let mut rw = vec![workdir.to_string(), format!("{workdir}/tmp")];
+    let mut rw = vec![workdir.to_string()];
     if share_tmp {
         rw.push("/tmp".to_string());
     }

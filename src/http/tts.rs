@@ -71,8 +71,9 @@ pub async fn synthesize(
     };
     let base_url = row.base_url.trim_end_matches('/');
 
-    let resp = crate::net::http_client(std::time::Duration::from_secs(120))
+    let resp = crate::net::http_client()
         .post(format!("{base_url}/audio/speech"))
+        .timeout(std::time::Duration::from_secs(120))
         .bearer_auth(key)
         .json(&serde_json::json!({
             "model": body.model,

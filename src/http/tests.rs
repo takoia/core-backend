@@ -15,6 +15,7 @@ use tower::ServiceExt;
 
 struct TestApp {
     router: Router,
+    db: crate::db::Db,
     _dir: std::path::PathBuf,
 }
 
@@ -48,6 +49,7 @@ async fn app() -> TestApp {
         .await
         .unwrap();
     TestApp {
+        db: state.db.clone(),
         router: crate::http::router(state),
         _dir: dir,
     }
@@ -524,4 +526,223 @@ async fn memory_purge_is_admin_only_and_scoped_to_agent_topics() {
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// A second tenant with one agent, created straight in the database (there is
+/// no sign-up for extra accounts yet).
+async fn foreign_agent(app: &TestApp) -> String {
+    sqlx::query("INSERT INTO accounts (id, name) VALUES ('acct-b', 'Other')")
+        .execute(&app.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id, account_id, name, webhook_secret) VALUES ('agent-b', 'acct-b', 'Theirs', 'sekrit')",
+    )
+    .execute(&app.db)
+    .await
+    .unwrap();
+    "agent-b".to_string()
+}
+
+#[tokio::test]
+async fn admins_are_owners_only_inside_their_own_account() {
+    let app = app().await;
+    let admin = setup_admin(&app).await;
+    let other = foreign_agent(&app).await;
+    let (s, _) = call(
+        &app,
+        Method::GET,
+        &format!("/api/agents/{other}"),
+        Some(&admin),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "another tenant's agent");
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        &format!("/api/agents/{other}/webhook-secret/rotate"),
+        Some(&admin),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/objectives",
+        Some(&admin),
+        Some(json!({ "agent_id": other, "title": "t", "prompt": "run" })),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "cannot run another tenant's agent"
+    );
+    // Lists never leak the other tenant.
+    let (_, v) = call(&app, Method::GET, "/api/agents", Some(&admin), None, &[]).await;
+    assert!(v["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|a| a["id"] != "agent-b"));
+    let (_, v) = call(&app, Method::GET, "/api/schedules", Some(&admin), None, &[]).await;
+    assert_eq!(v["schedules"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn import_cannot_take_over_an_existing_agent() {
+    let app = app().await;
+    let admin = setup_admin(&app).await;
+    let (_, bob) = member(&app, &admin, "bob@example.test").await;
+    let other = foreign_agent(&app).await;
+    let toml = format!("[agent]\nid = \"{other}\"\nname = \"Hijacked\"\n");
+    for tok in [&admin, &bob] {
+        let (s, _) = raw_post(
+            &app,
+            "/api/agents/import",
+            toml.as_bytes(),
+            &[
+                ("authorization", &format!("Bearer {tok}")),
+                ("content-type", "text/plain"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            s,
+            StatusCode::FORBIDDEN,
+            "re-importing someone else's agent id"
+        );
+    }
+    let (name,): (String,) = sqlx::query_as("SELECT name FROM agents WHERE id = 'agent-b'")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(name, "Theirs", "the victim agent is untouched");
+    // A member re-importing an agent they own is a legitimate edit.
+    let mine = "[agent]\nid = \"bobs-agent\"\nname = \"v1\"\n";
+    let (s, _) = raw_post(
+        &app,
+        "/api/agents/import",
+        mine.as_bytes(),
+        &[
+            ("authorization", &format!("Bearer {bob}")),
+            ("content-type", "text/plain"),
+        ],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let mine2 = "[agent]\nid = \"bobs-agent\"\nname = \"v2\"\n";
+    let (s, _) = raw_post(
+        &app,
+        "/api/agents/import",
+        mine2.as_bytes(),
+        &[
+            ("authorization", &format!("Bearer {bob}")),
+            ("content-type", "text/plain"),
+        ],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn editor_round_trip_keeps_masked_secrets_intact() {
+    let app = app().await;
+    let admin = setup_admin(&app).await;
+    let (bob_id, bob) = member(&app, &admin, "bob@example.test").await;
+    let (_, v) = call(
+        &app,
+        Method::POST,
+        "/api/agents",
+        Some(&admin),
+        Some(json!({ "name": "Alerter" })),
+        &[],
+    )
+    .await;
+    let agent = v["id"].as_str().unwrap().to_string();
+    let secret_url = "https://discord.com/api/webhooks/1/topsecret";
+    call(
+        &app,
+        Method::PUT,
+        &format!("/api/agents/{agent}/steps"),
+        Some(&admin),
+        Some(json!({ "steps": [{ "step_type": "action", "options": { "tool_params": { "discord_webhook": secret_url, "a2a_calls": [{ "url": "https://peer", "key": "k1" }] } } }] })),
+        &[],
+    )
+    .await;
+    call(
+        &app,
+        Method::POST,
+        &format!("/api/agents/{agent}/permissions"),
+        Some(&admin),
+        Some(json!({ "user_id": bob_id, "role": "editor" })),
+        &[],
+    )
+    .await;
+
+    // Bob reads (masked), edits the prompt, saves what he saw.
+    let (_, v) = call(
+        &app,
+        Method::GET,
+        &format!("/api/agents/{agent}"),
+        Some(&bob),
+        None,
+        &[],
+    )
+    .await;
+    let action = v["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["step_type"] == "action")
+        .unwrap()
+        .clone();
+    let masked: Value = serde_json::from_str(action["options"].as_str().unwrap()).unwrap();
+    assert_eq!(masked["tool_params"]["discord_webhook"], "***");
+    let (s, _) = call(
+        &app,
+        Method::PUT,
+        &format!("/api/agents/{agent}/steps"),
+        Some(&bob),
+        Some(json!({ "steps": [{ "step_type": "action", "system_prompt": "be brief", "options": masked }] })),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    let (stored,): (String,) = sqlx::query_as(
+        "SELECT options FROM agent_step_configs WHERE agent_id = ? AND step_type = 'action'",
+    )
+    .bind(&agent)
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(
+        stored["tool_params"]["discord_webhook"], secret_url,
+        "real secret survives the masked write"
+    );
+    assert_eq!(stored["tool_params"]["a2a_calls"][0]["key"], "k1");
+}
+
+#[tokio::test]
+async fn video_analysis_without_an_agent_is_admin_only() {
+    let app = app().await;
+    let admin = setup_admin(&app).await;
+    let (_, bob) = member(&app, &admin, "bob@example.test").await;
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/video/analyze",
+        Some(&bob),
+        Some(json!({ "frames": ["aGVsbG8="] })),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
 }

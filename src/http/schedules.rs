@@ -33,11 +33,13 @@ pub async fn list(
         r#"SELECT id, agent_id, title, prompt, cron_expr, interval_seconds, enabled,
                   run_count, last_run_at, next_run_at
            FROM schedules
-           WHERE (?1 = 1 OR agent_id IN (SELECT agent_id FROM agent_permissions WHERE user_id = ?2))
+           WHERE agent_id IN (SELECT id FROM agents WHERE account_id = ?3)
+             AND (?1 = 1 OR agent_id IN (SELECT agent_id FROM agent_permissions WHERE user_id = ?2))
            ORDER BY created_at DESC"#,
     )
     .bind(me.is_admin != 0)
     .bind(&me.id)
+    .bind(&me.account_id)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "schedules": rows })))

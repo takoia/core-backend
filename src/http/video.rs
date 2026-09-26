@@ -40,8 +40,11 @@ pub async fn analyze(
     crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Json(body): Json<AnalyzeVideo>,
 ) -> AppResult<Json<Value>> {
-    if let Some(aid) = &body.agent_id {
-        crate::http::users::require_agent_role(&state, aid, &me, "editor").await?;
+    // Each call spends the operator's plan on up to MAX_FRAMES images: attach it
+    // to an agent the caller may edit, or be an admin.
+    match &body.agent_id {
+        Some(aid) => crate::http::users::require_agent_role(&state, aid, &me, "editor").await?,
+        None => crate::http::users::require_admin(&me)?,
     }
     if body.frames.is_empty() {
         return Err(AppError::BadRequest("no frames provided".into()));

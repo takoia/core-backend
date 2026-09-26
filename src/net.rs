@@ -57,16 +57,19 @@ pub fn pinned_client(url: &str, addrs: &[SocketAddr]) -> Result<reqwest::Client>
         .map_err(|e| anyhow!("failed to build HTTP client: {e}"))
 }
 
-/// A general-purpose client with a connect timeout and an overall `timeout`.
-/// Every outbound call in the codebase goes through this or [`pinned_client`];
-/// a bare `reqwest::Client::new()` has no timeout and a hung peer would pin a
-/// worker for good.
-pub fn http_client(timeout: Duration) -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(timeout)
-        .build()
-        .unwrap_or_default()
+/// The shared general-purpose client: connect timeout built in, TLS roots and
+/// connection pool initialised once per process. Callers set the overall bound
+/// per request with `.timeout(..)` on the builder. Every outbound call goes
+/// through this or [`pinned_client`]; a bare `reqwest::Client::new()` has no
+/// timeout and a hung peer would pin a worker for good.
+pub fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            .unwrap_or_default()
+    })
 }
 
 fn is_blocked(ip: IpAddr) -> bool {

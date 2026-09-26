@@ -16,9 +16,10 @@ use tokio::sync::Semaphore;
 /// Maximum number of jobs executing at the same time.
 const MAX_CONCURRENT_JOBS: usize = 4;
 
-/// A synchronous run is at most four steps of `STEP_TIMEOUT`; anything older
-/// than this still `running` has lost its handler.
-const STALE_SYNC_JOB_SECS: i64 = 4 * crate::llm::claude_cli::STEP_TIMEOUT.as_secs() as i64 + 60;
+/// Upper bound on a legitimate synchronous run: four steps plus a web search
+/// plus one call_agent sub-run of four steps, each bounded by `STEP_TIMEOUT`,
+/// with margin. Anything older and still `running` has lost its handler.
+const STALE_SYNC_JOB_SECS: i64 = 10 * crate::llm::claude_cli::STEP_TIMEOUT.as_secs() as i64;
 
 /// How often the stale synchronous-job sweep runs.
 const STALE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);

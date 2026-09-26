@@ -190,7 +190,8 @@ const STEERING_CLAUDE_MD: &str = "# Task agent\n\n\
     Produce the requested deliverable directly.\n";
 
 async fn prepare_workdir(workdir: &str, steering: bool) -> std::io::Result<()> {
-    tokio::fs::create_dir_all(workdir).await?;
+    // The private tmp is what TMPDIR points at (see sandbox::child_env).
+    tokio::fs::create_dir_all(format!("{workdir}/tmp")).await?;
     if steering {
         let path = std::path::Path::new(workdir).join("CLAUDE.md");
         if tokio::fs::metadata(&path).await.is_err() {

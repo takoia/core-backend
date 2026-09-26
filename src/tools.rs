@@ -26,8 +26,9 @@ pub async fn market_data(symbol: &str) -> Result<ToolOutput> {
     };
     let url =
         format!("https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5d");
-    let resp = crate::net::http_client(std::time::Duration::from_secs(20))
+    let resp = crate::net::http_client()
         .get(&url)
+        .timeout(std::time::Duration::from_secs(20))
         .header("User-Agent", "takoia-core")
         .send()
         .await?;

@@ -124,7 +124,15 @@ pub async fn gather(run: ToolRun<'_>) -> Result<Gathered> {
                     &job.id,
                     format!("orchestrating: calling agent {target}"),
                 ));
-                match run_subagent(run.state, target, run.objective_prompt, depth + 1).await {
+                match run_subagent(
+                    run.state,
+                    run.account_id,
+                    target,
+                    run.objective_prompt,
+                    depth + 1,
+                )
+                .await
+                {
                     Ok(result) => out.text.push_str(&format!("\nagent[{target}]:\n{result}")),
                     Err(e) => out.text.push_str(&format!("\nagent[{target}] error: {e}")),
                 }
@@ -229,17 +237,22 @@ async fn job_chain_depth(state: &AppState, job_id: &str) -> i64 {
 /// sub-task. `Box::pin` breaks the run_job -> call_agent -> run_job async cycle.
 async fn run_subagent(
     state: &AppState,
+    caller_account_id: &str,
     target_agent_id: &str,
     subtask: &str,
     depth: i64,
 ) -> Result<String> {
-    let target: Option<(String, String)> =
-        sqlx::query_as("SELECT account_id, autonomy_level FROM agents WHERE id = ?")
-            .bind(target_agent_id)
-            .fetch_optional(&state.db)
-            .await?;
+    // Same account only: another tenant's agent would run on their providers,
+    // recall their memory and bill their usage on behalf of the caller.
+    let target: Option<(String, String)> = sqlx::query_as(
+        "SELECT account_id, autonomy_level FROM agents WHERE id = ? AND account_id = ?",
+    )
+    .bind(target_agent_id)
+    .bind(caller_account_id)
+    .fetch_optional(&state.db)
+    .await?;
     let Some((account_id, autonomy)) = target else {
-        return Err(anyhow::anyhow!("target agent not found"));
+        return Err(anyhow::anyhow!("target agent not found in this account"));
     };
     // A synchronous sub-run has nobody to approve an action: a
     // confirm-before-action target would park a job in awaiting_approval for

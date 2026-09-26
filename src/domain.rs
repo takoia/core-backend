@@ -144,10 +144,76 @@ pub fn redact_step_options(options: &mut serde_json::Value, strip: bool) {
     }
 }
 
+/// Inverse of [`redact_step_options`] for writes: wherever `incoming` carries the
+/// `"***"` mask, put back the value from `current` so a masked read-modify-write
+/// cycle never destroys a stored credential. `a2a_calls` entries are matched by
+/// position.
+pub fn restore_masked_secrets(incoming: &mut serde_json::Value, current: &serde_json::Value) {
+    const MASK: &str = "***";
+    let cur_tp = current.get("tool_params");
+    let Some(tp) = incoming
+        .get_mut("tool_params")
+        .and_then(|v| v.as_object_mut())
+    else {
+        return;
+    };
+    for key in INLINE_SECRET_KEYS {
+        if tp.get(key).and_then(|v| v.as_str()) == Some(MASK) {
+            match cur_tp.and_then(|c| c.get(key)).cloned() {
+                Some(v) => {
+                    tp.insert(key.to_string(), v);
+                }
+                None => {
+                    tp.remove(key);
+                }
+            }
+        }
+    }
+    if let Some(calls) = tp.get_mut("a2a_calls").and_then(|v| v.as_array_mut()) {
+        let cur_calls = cur_tp
+            .and_then(|c| c.get("a2a_calls"))
+            .and_then(|v| v.as_array());
+        for (i, call) in calls.iter_mut().enumerate() {
+            let Some(obj) = call.as_object_mut() else {
+                continue;
+            };
+            if obj.get("key").and_then(|v| v.as_str()) == Some(MASK) {
+                match cur_calls
+                    .and_then(|c| c.get(i))
+                    .and_then(|c| c.get("key"))
+                    .cloned()
+                {
+                    Some(v) => {
+                        obj.insert("key".into(), v);
+                    }
+                    None => {
+                        obj.remove("key");
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn masked_write_restores_the_stored_secret() {
+        let current = json!({ "tool_params": { "discord_webhook": "https://real", "a2a_calls": [{ "url": "u", "key": "real-key" }] } });
+        let mut incoming = json!({ "tool_params": { "discord_webhook": "***", "symbol": "AAPL", "a2a_calls": [{ "url": "u", "key": "***" }] } });
+        restore_masked_secrets(&mut incoming, &current);
+        assert_eq!(incoming["tool_params"]["discord_webhook"], "https://real");
+        assert_eq!(incoming["tool_params"]["a2a_calls"][0]["key"], "real-key");
+        assert_eq!(incoming["tool_params"]["symbol"], "AAPL");
+        // A real new value passes through; a mask with nothing stored is dropped.
+        let mut fresh = json!({ "tool_params": { "discord_webhook": "***", "a2a_calls": [{ "url": "u", "key": "new" }] } });
+        restore_masked_secrets(&mut fresh, &json!({}));
+        assert!(fresh["tool_params"].get("discord_webhook").is_none());
+        assert_eq!(fresh["tool_params"]["a2a_calls"][0]["key"], "new");
+    }
 
     #[test]
     fn masks_inline_credentials_and_keeps_the_rest() {

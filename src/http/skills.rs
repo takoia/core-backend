@@ -116,10 +116,11 @@ pub async fn install(
         )
     };
 
-    let client = crate::net::http_client(std::time::Duration::from_secs(30));
+    let client = crate::net::http_client();
     let resp = client
         .get(&raw_url)
         .header("User-Agent", USER_AGENT)
+        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
         .map_err(|e| AppError::Other(e.into()))?;
@@ -164,7 +165,7 @@ pub async fn github(
         q.repo,
         q.path.trim_matches('/')
     );
-    let client = crate::net::http_client(std::time::Duration::from_secs(30));
+    let client = crate::net::http_client();
     let mut request = client
         .get(&api_url)
         .header("User-Agent", USER_AGENT)
@@ -173,6 +174,7 @@ pub async fn github(
         request = request.bearer_auth(token);
     }
     let resp = request
+        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
         .map_err(|e| AppError::Other(e.into()))?;

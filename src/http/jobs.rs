@@ -30,12 +30,16 @@ pub async fn list(
 ) -> AppResult<Json<Value>> {
     let rows = sqlx::query_as::<_, JobRow>(
         r#"SELECT j.id, j.agent_id, j.status, j.error, j.created_at, o.title
-           FROM jobs j LEFT JOIN objectives o ON o.id = j.objective_id
-           WHERE (?1 = 1 OR j.agent_id IN (SELECT agent_id FROM agent_permissions WHERE user_id = ?2))
+           FROM jobs j
+           JOIN agents a ON a.id = j.agent_id
+           LEFT JOIN objectives o ON o.id = j.objective_id
+           WHERE a.account_id = ?3
+             AND (?1 = 1 OR j.agent_id IN (SELECT agent_id FROM agent_permissions WHERE user_id = ?2))
            ORDER BY j.created_at DESC LIMIT 100"#,
     )
     .bind(me.is_admin != 0)
     .bind(&me.id)
+    .bind(&me.account_id)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "jobs": rows })))
