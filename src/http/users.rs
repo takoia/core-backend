@@ -670,3 +670,45 @@ pub async fn grant_owner(
     .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_allow_list_is_exact() {
+        for p in [
+            "/api/health",
+            "/health",
+            "/api/setup",
+            "/api/setup/status",
+            "/api/login",
+            "/api/marketplace",
+            "/api/v1/models",
+            "/api/v1/agents/x/invoke",
+            "/api/webhooks/invoice",
+        ] {
+            assert!(is_public_path(p), "{p} must be public");
+        }
+        for p in [
+            "/api/agents",
+            "/api/marketplace/earnings",
+            "/api/marketplace/usage",
+            "/api/users",
+            "/api/memory/purge",
+            "/api/connectors",
+            "/api/logs",
+            "/api/v1",
+            "/api/webhooks",
+        ] {
+            assert!(!is_public_path(p), "{p} must require a session");
+        }
+    }
+
+    #[test]
+    fn roles_are_ordered_owner_editor_viewer() {
+        assert!(role_rank("owner") > role_rank("editor"));
+        assert!(role_rank("editor") > role_rank("viewer"));
+        assert!(role_rank("viewer") > role_rank("nonsense"));
+    }
+}

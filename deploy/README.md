@@ -21,6 +21,7 @@ Health endpoint: `GET /api/health` → `{"status":"ok"}`.
 | [`docker-compose/`](docker-compose/) | Self-contained Compose file that builds from the repo root, named volume + healthcheck. | `docker compose -f deploy/docker-compose/docker-compose.yml up --build -d` | One host, you want restart policy, a healthcheck and persistent state declared in one file. |
 | [`kubernetes/`](kubernetes/) | Plain manifests (Namespace, Secret, PVC, Deployment, Service, Ingress) + kustomization. | `kubectl apply -k deploy/kubernetes` | You have a cluster and want probes, secrets, persistent volume and ingress. |
 | [`ansible/`](ansible/) | Playbook that installs Docker on a Debian/Ubuntu host and runs the container. | `ansible-playbook -i deploy/ansible/inventory.ini deploy/ansible/playbook.yml` | You manage one or more remote VMs over SSH and want a repeatable, idempotent install. |
+| [`systemd/`](systemd/) | Unit file for the bare release binary (no Docker): restart on crash and reboot, hardened service, state in `/var/lib/takoia`. | See the header of `deploy/systemd/takoia.service` | A VM where you deploy the CI-built binary directly — replaces `nohup cargo watch` on the host. |
 | [`cloud-init/`](cloud-init/) | `user-data` that installs Docker and starts the container on first boot via a systemd unit. | Pass `deploy/cloud-init/user-data.yaml` as the VM's user data at creation. | Provisioning a fresh cloud VM that should come up already running TakoIA. |
 
 ## Prerequisites (be honest)

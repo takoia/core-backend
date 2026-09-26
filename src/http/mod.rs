@@ -22,6 +22,9 @@ mod vaults;
 mod video;
 mod webhooks;
 
+#[cfg(test)]
+mod tests;
+
 use crate::state::AppState;
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse};

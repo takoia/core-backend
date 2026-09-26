@@ -1,0 +1,54 @@
+# TakoIA core-backend as a supervised service.
+#
+# The release binary is built once (CI artifact or `cargo build --release`) and
+# installed at /opt/takoia/takoia; state lives in /var/lib/takoia; configuration
+# comes from /etc/takoia/env (MASTER_KEY, ADMIN_PASSWORD, CLAUDE_MAX_TOKEN…).
+# systemd restarts the process on crash and on reboot — unlike `nohup cargo watch`,
+# which dies with its terminal and rebuilds on the production host.
+#
+#   sudo useradd --system --home /var/lib/takoia --shell /usr/sbin/nologin takoia
+#   sudo install -d -o takoia -g takoia /var/lib/takoia /opt/takoia /etc/takoia
+#   sudo install -m 0750 target/release/takoia /opt/takoia/takoia
+#   sudo cp -r frontend/dist /opt/takoia/frontend/dist
+#   sudo install -m 0640 -o root -g takoia .env /etc/takoia/env
+#   sudo install -m 0644 deploy/systemd/takoia.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now takoia
+#   curl -fsS http://127.0.0.1:8080/api/health
+
+[Unit]
+Description=TakoIA core-backend (agent orchestrator)
+Documentation=https://github.com/takoia/core-backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=takoia
+Group=takoia
+# The binary serves frontend/dist relative to its working directory and keeps
+# SQLite + ICM under data/ (DATABASE_URL / ICM_DB_PATH in the env file).
+WorkingDirectory=/opt/takoia
+EnvironmentFile=/etc/takoia/env
+Environment=DATABASE_URL=sqlite:///var/lib/takoia/takoia.db?mode=rwc
+Environment=ICM_DB_PATH=/var/lib/takoia/icm.db
+Environment=AGENT_WORKDIR=/var/lib/takoia/agent-workspace
+ExecStart=/opt/takoia/takoia
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+
+# Hardening. Agent subprocesses (`claude -p`) run under the same unit, confined
+# further by the Landlock sandbox chosen in Settings.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/takoia /opt/takoia/data /tmp
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

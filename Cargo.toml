@@ -1,6 +1,6 @@
 [package]
 name = "takoia-core"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2021"
 description = "TakoIA core-backend: autonomous agent orchestrator (4-step loop)"
 license = "BUSL-1.1"
@@ -15,7 +15,6 @@ tokio = { version = "1", features = ["full"] }
 # Web
 axum = { version = "0.7", features = ["macros"] }
 tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
-tower = "0.4"
 # DB
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
@@ -77,3 +76,12 @@ landlock = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+# Router-level tests drive the axum Router with `ServiceExt::oneshot` (axum 0.7
+# itself depends on tower 0.5).
+tower = { version = "0.5", features = ["util"] }
+
+# The VM and the Docker image run this binary; optimise it like one.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
