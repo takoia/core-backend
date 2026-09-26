@@ -70,7 +70,9 @@ pub fn spawn(state: AppState) {
                     tracing::info!(job_id = %job.id, "claimed job");
                     let state = state.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = engine::run_job(&state, &job, false).await {
+                        if let Err(e) =
+                            engine::run_job(&state, &job, &engine::MemoryMode::Owner).await
+                        {
                             // Background runs fail loudly; the job row records why.
                             tracing::error!(job_id = %job.id, error = %e, "job run failed");
                             engine::fail(&state, &job.id, &e).await;

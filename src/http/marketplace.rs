@@ -298,8 +298,18 @@ async fn run_and_bill(
         objective_id,
         agent_id: id.to_string(),
     };
-    // read_only_memory = true: never write to the publisher's curated memory.
-    let canned = match crate::agent::engine::run_job(state, &claimed, true).await {
+    // A consumer recalls the publisher's curated memory plus their own fork and
+    // writes only to the fork. The publisher calling their own agent is just an
+    // owner run.
+    let self_invoke = consumer == publisher;
+    let mode = if self_invoke {
+        crate::agent::engine::MemoryMode::Owner
+    } else {
+        crate::agent::engine::MemoryMode::Consumer {
+            account_id: consumer.to_string(),
+        }
+    };
+    let canned = match crate::agent::engine::run_job(state, &claimed, &mode).await {
         Ok(crate::agent::engine::RunOutcome::AwaitingApproval) => {
             crate::queue::mark_failed(
                 &state.db,
@@ -350,7 +360,6 @@ async fn run_and_bill(
     .await?;
     // Nothing is charged for demo (canned) output, nor when the publisher calls
     // its own agent: a self-invoke is a test, not a sale.
-    let self_invoke = consumer == publisher;
     let (billed, publisher_usd) = compute_bill(ct, price_per_1k, rev_share, canned || self_invoke);
 
     sqlx::query(
@@ -515,4 +524,51 @@ pub async fn list_models(State(state): State<AppState>) -> AppResult<Json<Value>
         })
         .collect();
     Ok(Json(json!({ "object": "list", "data": data })))
+}
+
+/// `GET /api/v1/agents/:id/memory` — what this agent has learnt about the
+/// calling consumer account: their fork only, never the publisher's memory.
+pub async fn consumer_memory(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    let consumer = auth_key(&state, &headers).await?;
+    ensure_published(&state, &id).await?;
+    let entries = state
+        .memory
+        .list(&crate::memory::MemoryScope::consumer(&id, &consumer))
+        .await
+        .map_err(AppError::Other)?;
+    Ok(Json(json!({ "agent": id, "memories": entries })))
+}
+
+/// `DELETE /api/v1/agents/:id/memory` — erase the calling consumer's fork
+/// (ICM topic + mirror). The publisher's memory is untouched; this is the
+/// consumer's right-to-erasure switch.
+pub async fn forget_consumer_memory(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    let consumer = auth_key(&state, &headers).await?;
+    ensure_published(&state, &id).await?;
+    state
+        .memory
+        .forget(&crate::memory::MemoryScope::consumer(&id, &consumer))
+        .await
+        .map_err(AppError::Other)?;
+    Ok(Json(json!({ "ok": true, "agent": id })))
+}
+
+async fn ensure_published(state: &AppState, agent_id: &str) -> AppResult<()> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT visibility FROM agents WHERE id = ?")
+        .bind(agent_id)
+        .fetch_optional(&state.db)
+        .await?;
+    match row {
+        Some((v,)) if v == "public" => Ok(()),
+        Some(_) => Err(AppError::BadRequest("agent is not published".into())),
+        None => Err(AppError::NotFound("agent not found".into())),
+    }
 }

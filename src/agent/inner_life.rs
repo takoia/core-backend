@@ -313,7 +313,11 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
     let st = current(&state.db, agent_id).await;
     let recent = state
         .memory
-        .recall(agent_id, "recent work and how it went", 5)
+        .recall(
+            &crate::memory::MemoryScope::owner(agent_id),
+            "recent work and how it went",
+            5,
+        )
         .await;
 
     let prompt = format!(
@@ -405,7 +409,14 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
     .execute(&state.db)
     .await;
     if let Some(text) = &reflection_to_store {
-        let _ = state.memory.store(agent_id, "reflection", text).await;
+        let _ = state
+            .memory
+            .store(
+                &crate::memory::MemoryScope::owner(agent_id),
+                "reflection",
+                text,
+            )
+            .await;
         tracing::info!(agent_id, mood = %mood, "agent reflected");
         audit(
             state,

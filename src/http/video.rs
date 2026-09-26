@@ -80,7 +80,12 @@ pub async fn analyze(
     // ICM recall: bring in what the target agent already learned from previous
     // analyses, so each video analysis builds on the prior ones.
     let recalled = match &body.agent_id {
-        Some(aid) => state.memory.recall(aid, &instruction, 5).await,
+        Some(aid) => {
+            state
+                .memory
+                .recall(&crate::memory::MemoryScope::owner(aid), &instruction, 5)
+                .await
+        }
         None => String::new(),
     };
     let memory_block = if recalled.trim().is_empty() {
@@ -146,7 +151,15 @@ pub async fn analyze(
             .collect::<Vec<_>>()
             .join("; ");
         if !summary.trim().is_empty() {
-            if let Err(e) = state.memory.store(aid, "video-analysis", &summary).await {
+            if let Err(e) = state
+                .memory
+                .store(
+                    &crate::memory::MemoryScope::owner(aid),
+                    "video-analysis",
+                    &summary,
+                )
+                .await
+            {
                 tracing::warn!(error = %e, "failed to store video analysis in memory");
             }
         }

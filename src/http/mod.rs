@@ -165,6 +165,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/keys/:id", delete(marketplace::revoke_key))
         .route("/v1/agents/:id/invoke", post(marketplace::invoke))
+        .route(
+            "/v1/agents/:id/memory",
+            get(marketplace::consumer_memory).delete(marketplace::forget_consumer_memory),
+        )
         // OpenAI-compatible API: point any OpenAI SDK base_url at `<host>/api/v1`.
         .route("/v1/chat/completions", post(marketplace::chat_completions))
         .route("/v1/models", get(marketplace::list_models))

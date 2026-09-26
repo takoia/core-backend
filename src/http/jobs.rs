@@ -137,7 +137,7 @@ pub async fn feedback(
     state
         .memory
         .record_feedback(
-            &agent_id,
+            &crate::memory::MemoryScope::owner(&agent_id),
             &context.chars().take(400).collect::<String>(),
             &body.predicted,
             &body.corrected,
