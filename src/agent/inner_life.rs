@@ -113,12 +113,14 @@ pub struct Personalization {
 impl Default for Personalization {
     fn default() -> Self {
         Self {
-            reflection: true,
-            emotions: true,
-            initiative: true,
-            commitments: true,
-            persona_evolution: true,
-            personality: true,
+            // Everything opt-in: each feature is an LLM call per agent per tick
+            // (reflection), extra memory writes, or self-initiated runs.
+            reflection: false,
+            emotions: false,
+            initiative: false,
+            commitments: false,
+            persona_evolution: false,
+            personality: false,
             big_five: BigFive::default(),
         }
     }
@@ -130,7 +132,7 @@ impl Personalization {
     }
 }
 
-/// Read an agent's personalization toggles (defaults: everything on, neutral).
+/// Read an agent's personalization toggles (defaults: everything off, neutral).
 pub async fn personalization(db: &crate::db::Db, agent_id: &str) -> Personalization {
     let row: Option<(i64, i64, i64, i64, i64, i64, Option<String>)> = sqlx::query_as(
         "SELECT reflection, emotions, initiative, commitments, persona_evolution, personality, big_five
@@ -309,7 +311,7 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
     // Gather signals.
     let (completed, failed): (i64, i64) = sqlx::query_as(
         r#"SELECT
-             COALESCE(SUM(status = 'completed'), 0),
+             COALESCE(SUM(status = 'done'), 0),
              COALESCE(SUM(status = 'failed'), 0)
            FROM (SELECT status FROM jobs WHERE agent_id = ? ORDER BY created_at DESC LIMIT 20)"#,
     )

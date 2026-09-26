@@ -190,10 +190,14 @@ impl Memory {
         // User-specific memories are protected from decay/consolidation by
         // storing them at high importance; other (generic step) memories keep
         // ICM's default (medium).
-        let high_importance = matches!(
-            key,
-            "correction" | "preference" | "demonstration" | "instruction"
-        );
+        // User-authored signal outranks the agent's own output: corrections and
+        // preferences must survive consolidation and decay; run summaries and
+        // self-reflections are the bulk that decay should thin out first.
+        let importance = match key {
+            "correction" | "preference" | "demonstration" | "instruction" => Some("high"),
+            "run-summary" | "reflection" => Some("low"),
+            _ => None,
+        };
         // Keyword set: the key first (generic step name), then salient terms
         // derived from the content so keyword recall can match content queries.
         let mut keywords = vec![key.to_string()];
@@ -212,8 +216,8 @@ impl Memory {
             .arg("--db")
             .arg(&self.icm_db_path)
             .arg("--no-embeddings");
-        if high_importance {
-            cmd.arg("--importance").arg("high");
+        if let Some(level) = importance {
+            cmd.arg("--importance").arg(level);
         }
         let icm = cmd.output().await;
         if let Err(e) = &icm {

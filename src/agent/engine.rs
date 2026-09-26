@@ -125,15 +125,12 @@ pub async fn run_job(
     };
 
     // ── Analyse ────────────────────────────────────────────────────────────
+    // The recalled memory is injected once per step by `RunCtx::step` (system
+    // message); repeating it here doubled the Analyse prompt.
     let analyse_input = format!(
-        "Objective: {}\n\n{}\n\nRelevant memory:\n{}\n\nPast corrections to apply:\n{}",
+        "Objective: {}\n\n{}\n\nPast corrections to apply:\n{}",
         objective.title,
         objective.prompt,
-        if memory_ctx.trim().is_empty() {
-            "(none)"
-        } else {
-            &memory_ctx
-        },
         if corrections.trim().is_empty() {
             "(none)"
         } else {
@@ -437,6 +434,14 @@ impl<'a> RunCtx<'a> {
             .unwrap_or_default()
     }
 
+    fn remember(&self, step: StepType) -> bool {
+        self.configs
+            .get(step.as_str())
+            .and_then(|c| serde_json::from_str::<StepOptions>(&c.options).ok())
+            .map(|o| o.remember)
+            .unwrap_or(false)
+    }
+
     fn tool_params(&self, step: StepType) -> serde_json::Value {
         self.configs
             .get(step.as_str())
@@ -579,12 +584,13 @@ impl<'a> RunCtx<'a> {
         )
         .await?;
 
-        // ── ICM store at the END of every step ─────────────────────────────
-        // Persist this step's result so later steps and future runs recall it.
-        // Skipped for read-only (marketplace) runs to protect the publisher, and
-        // when the canned offline fallback was used (its generic demo content
-        // would poison the agent's recalled memory).
-        if !self.read_only && !used_canned {
+        // ── ICM store (opt-in per step) ────────────────────────────────────
+        // Persist this step's result only when the step config asks for it
+        // (`remember: true`): by default only the run summary and the user's
+        // interaction are stored, at the end of the run. Skipped for read-only
+        // (marketplace) runs to protect the publisher, and when the canned demo
+        // fallback was used (its generic content would poison recall).
+        if !self.read_only && !used_canned && self.remember(step) {
             let trimmed: String = completion.content.chars().take(500).collect();
             if let Err(e) = self
                 .state

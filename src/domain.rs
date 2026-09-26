@@ -92,6 +92,12 @@ pub struct StepOptions {
     /// Tools the agent is allowed to call during the Action step.
     #[serde(default)]
     pub allowed_tools: Vec<String>,
+    /// Store this step's own output in long-term memory. Off by default:
+    /// intermediate reasoning (analysis, plan, tool digest) is not knowledge
+    /// and only dilutes recall. The run summary and the user's interaction are
+    /// always stored at the end of the run.
+    #[serde(default)]
+    pub remember: bool,
     /// Per-tool parameters, e.g. { "symbol": "^IXIC", "discord_webhook": "https://..." }.
     #[serde(default)]
     pub tool_params: serde_json::Value,
