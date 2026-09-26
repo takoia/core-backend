@@ -17,6 +17,7 @@ pub struct Decision {
 /// `POST /api/approvals/:id` — approve or reject a pending action.
 pub async fn decide(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
     Json(body): Json<Decision>,
 ) -> AppResult<Json<Value>> {
@@ -38,6 +39,13 @@ pub async fn decide(
     let Some((job_id, status)) = row else {
         return Err(AppError::NotFound("approval not found".into()));
     };
+    crate::http::users::require_agent_role(
+        &state,
+        &crate::http::users::job_agent_id(&state, &job_id).await?,
+        &me,
+        "editor",
+    )
+    .await?;
     if status != "pending" {
         return Err(AppError::Conflict(format!("approval already {status}")));
     }

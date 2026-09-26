@@ -1,6 +1,5 @@
 //! Objectives: creating one enqueues a job for the agent engine.
 
-use crate::bootstrap::DEFAULT_ACCOUNT_ID;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::extract::State;
@@ -52,7 +51,7 @@ pub async fn create(
            VALUES (?, ?, ?, ?, ?)"#,
     )
     .bind(&objective_id)
-    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(&me.account_id)
     .bind(&body.agent_id)
     .bind(&body.title)
     .bind(&body.prompt)
@@ -83,7 +82,10 @@ pub async fn create(
 }
 
 /// `GET /api/objectives` — list recent objectives (for the demo prefill).
-pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
+pub async fn list(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+) -> AppResult<Json<Value>> {
     #[derive(Serialize, sqlx::FromRow)]
     struct Row {
         id: String,
@@ -94,9 +96,13 @@ pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
     }
     let rows = sqlx::query_as::<_, Row>(
         "SELECT id, agent_id, title, prompt, created_at FROM objectives
-         WHERE account_id = ? ORDER BY created_at DESC LIMIT 50",
+         WHERE account_id = ?1
+           AND (?2 = 1 OR agent_id IN (SELECT agent_id FROM agent_permissions WHERE user_id = ?3))
+         ORDER BY created_at DESC LIMIT 50",
     )
-    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(&me.account_id)
+    .bind(me.is_admin != 0)
+    .bind(&me.id)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "objectives": rows })))

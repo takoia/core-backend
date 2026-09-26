@@ -2,7 +2,6 @@
 //! full-auto agent loops and accumulates ICM memory over time. Supports a cron
 //! expression or a simple `interval_seconds` (for fast local learning tests).
 
-use crate::bootstrap::DEFAULT_ACCOUNT_ID;
 use crate::db::Db;
 use crate::state::AppState;
 use anyhow::Result;
@@ -112,13 +111,13 @@ async fn enqueue_run(db: &Db, s: &ScheduleRow) -> Result<()> {
     let mut tx = db.begin().await?;
     sqlx::query(
         r#"INSERT INTO objectives (id, account_id, agent_id, title, prompt)
-           VALUES (?, ?, ?, ?, ?)"#,
+           SELECT ?, account_id, ?, ?, ? FROM agents WHERE id = ?"#,
     )
     .bind(&objective_id)
-    .bind(DEFAULT_ACCOUNT_ID)
     .bind(&s.agent_id)
     .bind(&title)
     .bind(&s.prompt)
+    .bind(&s.agent_id)
     .execute(&mut *tx)
     .await?;
     sqlx::query(

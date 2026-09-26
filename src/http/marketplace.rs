@@ -114,14 +114,18 @@ pub async fn revoke_key(
 }
 
 /// `GET /api/marketplace/earnings` — publisher revenue + consumer spend summary.
-pub async fn earnings(State(state): State<AppState>) -> AppResult<Json<Value>> {
+pub async fn earnings(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+) -> AppResult<Json<Value>> {
     let row: (i64, i64, f64, f64) = sqlx::query_as(
         r#"SELECT COUNT(*),
                   COALESCE(SUM(completion_tokens), 0),
                   COALESCE(SUM(billed_usd), 0.0),
                   COALESCE(SUM(publisher_usd), 0.0)
-           FROM marketplace_usage"#,
+           FROM marketplace_usage WHERE publisher_account = ?"#,
     )
+    .bind(&me.account_id)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(json!({
@@ -134,7 +138,10 @@ pub async fn earnings(State(state): State<AppState>) -> AppResult<Json<Value>> {
 
 /// `GET /api/marketplace/usage` — per-request usage detail: the most recent
 /// metered invocations with their token counts and the price billed for each.
-pub async fn usage(State(state): State<AppState>) -> AppResult<Json<Value>> {
+pub async fn usage(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+) -> AppResult<Json<Value>> {
     #[derive(Serialize, sqlx::FromRow)]
     struct UsageRow {
         id: String,
@@ -152,9 +159,11 @@ pub async fn usage(State(state): State<AppState>) -> AppResult<Json<Value>> {
                   u.prompt_tokens, u.completion_tokens, u.billed_usd, u.publisher_usd, u.created_at
            FROM marketplace_usage u
            LEFT JOIN agents a ON a.id = u.agent_id
+           WHERE u.publisher_account = ?1 OR u.consumer_account = ?1
            ORDER BY u.created_at DESC
            LIMIT 100"#,
     )
+    .bind(&me.account_id)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "usage": rows })))

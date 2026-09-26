@@ -11,7 +11,6 @@
 //!   take a small proactive action.
 //! - **Commitments**: promises to follow up are honoured on a later tick.
 
-use crate::bootstrap::DEFAULT_ACCOUNT_ID;
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -541,13 +540,14 @@ async fn enqueue_self_objective(state: &AppState, agent_id: &str, title: &str, p
         Err(_) => return,
     };
     if sqlx::query(
-        "INSERT INTO objectives (id, account_id, agent_id, title, prompt) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO objectives (id, account_id, agent_id, title, prompt)
+         SELECT ?, account_id, ?, ?, ? FROM agents WHERE id = ?",
     )
     .bind(&objective_id)
-    .bind(DEFAULT_ACCOUNT_ID)
     .bind(agent_id)
     .bind(title)
     .bind(prompt)
+    .bind(agent_id)
     .execute(&mut *tx)
     .await
     .is_err()

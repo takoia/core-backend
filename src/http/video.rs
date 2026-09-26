@@ -37,8 +37,12 @@ pub struct AnalyzeVideo {
 /// `POST /api/video/analyze` — analyze sampled video frames with claude -p.
 pub async fn analyze(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Json(body): Json<AnalyzeVideo>,
 ) -> AppResult<Json<Value>> {
+    if let Some(aid) = &body.agent_id {
+        crate::http::users::require_agent_role(&state, aid, &me, "editor").await?;
+    }
     if body.frames.is_empty() {
         return Err(AppError::BadRequest("no frames provided".into()));
     }

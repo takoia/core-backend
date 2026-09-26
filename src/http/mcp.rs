@@ -3,7 +3,6 @@
 //! a server registers it with Claude Code (`claude mcp add`) so the agent can
 //! actually use its tools.
 
-use crate::bootstrap::DEFAULT_ACCOUNT_ID;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::extract::State;
@@ -24,7 +23,10 @@ pub async fn catalog() -> AppResult<Json<Value>> {
 }
 
 /// `GET /api/mcp/installed` — MCP servers currently registered with Claude Code.
-pub async fn installed() -> AppResult<Json<Value>> {
+pub async fn installed(
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+) -> AppResult<Json<Value>> {
+    crate::http::users::require_admin(&me)?;
     let output = Command::new("claude").arg("mcp").arg("list").output().await;
     let servers = match output {
         Ok(o) if o.status.success() => parse_mcp_list(&String::from_utf8_lossy(&o.stdout)),
@@ -58,8 +60,10 @@ pub struct ConnectMcp {
 /// record it as a connector. Best-effort: reports whether the CLI add succeeded.
 pub async fn connect(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Json(body): Json<ConnectMcp>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_admin(&me)?;
     let catalog: Vec<Value> = serde_json::from_str(CATALOG_JSON)
         .map_err(|e| AppError::Other(anyhow::anyhow!("invalid catalog: {e}")))?;
     let entry = catalog
@@ -116,7 +120,7 @@ pub async fn connect(
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')"#,
     )
     .bind(Uuid::new_v4().to_string())
-    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(&me.account_id)
     .bind(&body.id)
     .bind(&target)
     .bind(json!({ "transport": transport, "name": name }).to_string())

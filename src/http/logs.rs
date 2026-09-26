@@ -33,8 +33,10 @@ struct LogRow {
 /// `GET /api/logs` — paginated audit log with optional filters.
 pub async fn list(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Query(params): Query<LogsQuery>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_admin(&me)?;
     let limit = params.limit.unwrap_or(50).clamp(1, 500);
     let offset = params.offset.unwrap_or(0).max(0);
 

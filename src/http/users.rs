@@ -572,7 +572,7 @@ pub async fn remove_agent_permission(
 
 // ── RBAC helpers ───────────────────────────────────────────────────────────
 
-fn require_admin(user: &User) -> AppResult<()> {
+pub fn require_admin(user: &User) -> AppResult<()> {
     if user.is_admin != 0 {
         Ok(())
     } else {
@@ -610,4 +610,63 @@ pub async fn require_agent_role(
             "{min} role required on this agent"
         ))),
     }
+}
+
+/// Agent behind a job, or 404. Used to apply the agent's RBAC to job routes.
+pub async fn job_agent_id(state: &AppState, job_id: &str) -> AppResult<String> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT agent_id FROM jobs WHERE id = ?")
+        .bind(job_id)
+        .fetch_optional(&state.db)
+        .await?;
+    row.map(|r| r.0)
+        .ok_or_else(|| AppError::NotFound("job not found".into()))
+}
+
+/// Require at least `min` role on the agent that owns `job_id`; returns the
+/// agent id so the caller does not look it up twice.
+pub async fn require_job_role(
+    state: &AppState,
+    job_id: &str,
+    user: &User,
+    min: &str,
+) -> AppResult<String> {
+    let agent_id = job_agent_id(state, job_id).await?;
+    require_agent_role(state, &agent_id, user, min).await?;
+    Ok(agent_id)
+}
+
+/// Require at least `min` role on the agent that owns `schedule_id`.
+pub async fn require_schedule_role(
+    state: &AppState,
+    schedule_id: &str,
+    user: &User,
+    min: &str,
+) -> AppResult<String> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT agent_id FROM schedules WHERE id = ?")
+        .bind(schedule_id)
+        .fetch_optional(&state.db)
+        .await?;
+    let agent_id = row
+        .map(|r| r.0)
+        .ok_or_else(|| AppError::NotFound("schedule not found".into()))?;
+    require_agent_role(state, &agent_id, user, min).await?;
+    Ok(agent_id)
+}
+
+/// Grant `owner` on a freshly created or imported agent to the user who made it,
+/// so it is visible and editable to them (admins see everything regardless).
+pub async fn grant_owner(
+    db: &crate::db::Db,
+    agent_id: &str,
+    user_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO agent_permissions (agent_id, user_id, role) VALUES (?, ?, 'owner')
+         ON CONFLICT(agent_id, user_id) DO UPDATE SET role = 'owner'",
+    )
+    .bind(agent_id)
+    .bind(user_id)
+    .execute(db)
+    .await?;
+    Ok(())
 }

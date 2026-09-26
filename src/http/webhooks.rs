@@ -2,7 +2,6 @@
 //! a payload that emits an event; any agent whose `trigger_on` matches is run.
 //! For the demo: POST an invoice body to /api/webhooks/invoice.received.
 
-use crate::bootstrap::DEFAULT_ACCOUNT_ID;
 use crate::error::AppResult;
 use crate::state::AppState;
 use axum::extract::{Path, State};
@@ -36,13 +35,13 @@ pub async fn receive(
         let mut tx = state.db.begin().await?;
         sqlx::query(
             r#"INSERT INTO objectives (id, account_id, agent_id, title, prompt)
-               VALUES (?, ?, ?, ?, ?)"#,
+               SELECT ?, account_id, ?, ?, ? FROM agents WHERE id = ?"#,
         )
         .bind(&objective_id)
-        .bind(DEFAULT_ACCOUNT_ID)
         .bind(agent_id)
         .bind(&title)
         .bind(&prompt)
+        .bind(agent_id)
         .execute(&mut *tx)
         .await?;
         sqlx::query(

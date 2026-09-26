@@ -2,7 +2,6 @@
 //! an encrypted connector (`openai_tts` preferred, else `codex`) and streams the
 //! generated MP3 back to the browser.
 
-use crate::bootstrap::DEFAULT_ACCOUNT_ID;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::body::Body;
@@ -36,6 +35,7 @@ struct ProviderRow {
 /// `POST /api/tts` — synthesize speech, returns `audio/mpeg`.
 pub async fn synthesize(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     axum::Json(body): axum::Json<TtsInput>,
 ) -> AppResult<Response> {
     if body.text.trim().is_empty() {
@@ -50,7 +50,7 @@ pub async fn synthesize(
            ORDER BY CASE name WHEN 'openai_tts' THEN 0 ELSE 1 END
            LIMIT 1"#,
     )
-    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(&me.account_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| {

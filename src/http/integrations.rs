@@ -6,7 +6,6 @@
 //! message. Email (SMTP) is the one fully-functional example, sending via the
 //! `lettre` crate.
 
-use crate::bootstrap::DEFAULT_ACCOUNT_ID;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::extract::State;
@@ -53,8 +52,10 @@ pub struct EmailTestRequest {
 /// connector, decrypt its SMTP credentials and send a real test email.
 pub async fn email_test(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Json(req): Json<EmailTestRequest>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_admin(&me)?;
     if req.to.trim().is_empty() {
         return Err(AppError::BadRequest("recipient 'to' is required".into()));
     }
@@ -64,7 +65,7 @@ pub async fn email_test(
            FROM connectors
            WHERE account_id = ? AND kind = 'integration' AND name = 'email'"#,
     )
-    .bind(DEFAULT_ACCOUNT_ID)
+    .bind(&me.account_id)
     .fetch_optional(&state.db)
     .await?;
 

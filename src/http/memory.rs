@@ -8,7 +8,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 /// `GET /api/memory/overview` — global ICM stats + per-topic counts.
-pub async fn overview(State(state): State<AppState>) -> AppResult<Json<Value>> {
+pub async fn overview(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+) -> AppResult<Json<Value>> {
+    crate::http::users::require_admin(&me)?;
     let stats = state.memory.stats().await;
     let topics = state.memory.topics().await;
     Ok(Json(json!({ "stats": stats, "topics": topics })))
@@ -22,8 +26,24 @@ pub struct TopicQuery {
 /// `POST /api/memory/purge?topic=...` — forget all memories in a topic.
 pub async fn purge(
     State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Query(q): Query<TopicQuery>,
 ) -> AppResult<Json<Value>> {
+    crate::http::users::require_admin(&me)?;
+    let Some(agent_id) = q.topic.strip_prefix("takoia/agent/") else {
+        return Err(crate::error::AppError::BadRequest(
+            "topic must be takoia/agent/<agent id>".into(),
+        ));
+    };
+    let owned: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM agents WHERE id = ? AND account_id = ?")
+            .bind(agent_id)
+            .bind(&me.account_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if owned.is_none() {
+        return Err(crate::error::AppError::NotFound("agent not found".into()));
+    }
     state
         .memory
         .forget_topic(&q.topic)
