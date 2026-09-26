@@ -491,10 +491,7 @@ fn attach_landlock(cmd: &mut std::process::Command, workdir: &str, share_tmp: bo
                 cmd.pre_exec(move || {
                     if let Some(r) = cell.take() {
                         r.restrict_self().map_err(|e| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                format!("landlock restrict failed: {e}"),
-                            )
+                            std::io::Error::other(format!("landlock restrict failed: {e}"))
                         })?;
                     }
                     Ok(())
@@ -508,9 +505,7 @@ fn attach_landlock(cmd: &mut std::process::Command, workdir: &str, share_tmp: bo
             let msg = format!("landlock sandbox unavailable, refusing to run unconfined: {e}");
             tracing::error!("{msg}");
             unsafe {
-                cmd.pre_exec(move || {
-                    Err(std::io::Error::new(std::io::ErrorKind::Other, msg.clone()))
-                });
+                cmd.pre_exec(move || Err(std::io::Error::other(msg.clone())));
             }
         }
     }
