@@ -2215,6 +2215,7 @@ dependencies = [
  "cron",
  "dotenvy",
  "futures",
+ "hmac",
  "landlock",
  "lettre",
  "rand 0.8.6",

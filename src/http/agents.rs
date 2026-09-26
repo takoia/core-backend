@@ -83,7 +83,48 @@ pub async fn get(
     .fetch_all(&state.db)
     .await?;
 
-    Ok(Json(json!({ "agent": agent, "steps": steps })))
+    // Only owners see the webhook secret: it is what authorises inbound
+    // /api/webhooks/:event payloads for this agent.
+    let webhook_secret: Option<String> = if crate::http::users::agent_role(&state, &id, &me)
+        .await
+        .as_deref()
+        == Some("owner")
+    {
+        sqlx::query_scalar("SELECT webhook_secret FROM agents WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await?
+            .flatten()
+    } else {
+        None
+    };
+
+    Ok(Json(
+        json!({ "agent": agent, "steps": steps, "webhook_secret": webhook_secret }),
+    ))
+}
+
+/// `POST /api/agents/:id/webhook-secret/rotate` — mint a new HMAC secret for the
+/// agent's inbound webhooks (owner only). The previous secret stops working
+/// immediately; the new one is returned once.
+pub async fn rotate_webhook_secret(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "owner").await?;
+    let secret: Option<String> = sqlx::query_scalar(
+        "UPDATE agents SET webhook_secret = lower(hex(randomblob(24))),
+                           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE id = ? RETURNING webhook_secret",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await?;
+    match secret {
+        Some(s) => Ok(Json(json!({ "webhook_secret": s }))),
+        None => Err(AppError::NotFound("agent not found".into())),
+    }
 }
 
 #[derive(Deserialize)]
@@ -114,8 +155,8 @@ pub async fn create(
     let id = Uuid::new_v4().to_string();
     let mut tx = state.db.begin().await?;
     sqlx::query(
-        r#"INSERT INTO agents (id, account_id, name, description, autonomy_level, expertise_domain)
-           VALUES (?, ?, ?, ?, ?, ?)"#,
+        r#"INSERT INTO agents (id, account_id, name, description, autonomy_level, expertise_domain, webhook_secret)
+           VALUES (?, ?, ?, ?, ?, ?, lower(hex(randomblob(24))))"#,
     )
     .bind(&id)
     .bind(&me.account_id)
@@ -365,8 +406,8 @@ pub async fn import_soul(
     let id = Uuid::new_v4().to_string();
     let mut tx = state.db.begin().await?;
     sqlx::query(
-        r#"INSERT INTO agents (id, account_id, name, description, autonomy_level, expertise_domain, persona)
-           VALUES (?, ?, ?, ?, 'confirm_before_action', ?, ?)"#,
+        r#"INSERT INTO agents (id, account_id, name, description, autonomy_level, expertise_domain, persona, webhook_secret)
+           VALUES (?, ?, ?, ?, 'confirm_before_action', ?, ?, lower(hex(randomblob(24))))"#,
     )
     .bind(&id)
     .bind(&me.account_id)

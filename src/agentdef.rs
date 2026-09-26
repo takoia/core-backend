@@ -120,8 +120,9 @@ pub async fn import(db: &Db, account_id: &str, toml_str: &str) -> Result<String>
     sqlx::query(
         r#"INSERT INTO agents
              (id, account_id, name, description, autonomy_level, expertise_domain,
-              author, version, trigger_on, emit, definition_toml, visibility, price_per_run_usd, icon, persona)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              author, version, trigger_on, emit, definition_toml, visibility, price_per_run_usd, icon, persona,
+              webhook_secret)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, lower(hex(randomblob(24))))
            ON CONFLICT(id) DO UPDATE SET
              name = excluded.name,
              description = excluded.description,

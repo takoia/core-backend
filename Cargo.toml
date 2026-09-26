@@ -27,8 +27,9 @@ sqlx = { version = "0.8", default-features = false, features = [
     "chrono",
     "json",
 ] }
-# Hashing (API key digests)
+# Hashing (API key digests) + webhook signatures
 sha2 = "0.10"
+hmac = "0.12"
 # HTTP client (LLM providers + connectors)
 reqwest = { version = "0.12", default-features = false, features = [
     "json",

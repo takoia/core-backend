@@ -63,6 +63,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/agents/:id/steps", put(agents::update_steps))
         .route("/agents/:id/publish", post(agents::publish))
+        .route(
+            "/agents/:id/webhook-secret/rotate",
+            post(agents::rotate_webhook_secret),
+        )
         .route("/agents/:id/export", get(agents::export_toml))
         .route("/agents/:id/memories", get(agents::memories))
         .route("/agents/:id/icm-memories", get(agents::icm_memories))
