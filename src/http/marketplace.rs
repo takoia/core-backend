@@ -225,6 +225,8 @@ pub async fn invoke(
         "usage": { "prompt_tokens": r.prompt_tokens, "completion_tokens": r.completion_tokens },
         "cost_usd": r.billed_usd,
         "publisher_earned_usd": r.publisher_usd,
+        "demo": r.demo,
+        "self_invoke": r.self_invoke,
     })))
 }
 
@@ -237,6 +239,10 @@ struct InvokeResult {
     completion_tokens: i64,
     billed_usd: f64,
     publisher_usd: f64,
+    /// Output came (at least partly) from the offline demo provider.
+    demo: bool,
+    /// The consumer is the publisher's own account.
+    self_invoke: bool,
 }
 
 /// Run a published agent synchronously (read-only memory), meter its outgoing
@@ -293,7 +299,7 @@ async fn run_and_bill(
         agent_id: id.to_string(),
     };
     // read_only_memory = true: never write to the publisher's curated memory.
-    match crate::agent::engine::run_job(state, &claimed, true).await {
+    let canned = match crate::agent::engine::run_job(state, &claimed, true).await {
         Ok(crate::agent::engine::RunOutcome::AwaitingApproval) => {
             crate::queue::mark_failed(
                 &state.db,
@@ -306,11 +312,16 @@ async fn run_and_bill(
                 "This agent requires human approval before acting and cannot be invoked via the synchronous API".into(),
             ));
         }
-        Ok(_) => {}
+        Ok(crate::agent::engine::RunOutcome::Completed { canned }) => canned,
         Err(e) => {
+            // Synchronous jobs are excluded from crash recovery: an unmarked
+            // failure would leave the row `running` forever.
+            crate::queue::mark_failed(&state.db, &job_id, &format!("{e:#}"))
+                .await
+                .ok();
             return Err(AppError::Other(anyhow::anyhow!("agent run failed: {e}")));
         }
-    }
+    };
 
     // The deliverable is the restitution step output.
     let output: Option<(String,)> = sqlx::query_as(
@@ -337,8 +348,10 @@ async fn run_and_bill(
     .bind(&job_id)
     .fetch_one(&state.db)
     .await?;
-    let billed = (ct as f64 / 1000.0) * price_per_1k;
-    let publisher_usd = billed * rev_share;
+    // Nothing is charged for demo (canned) output, nor when the publisher calls
+    // its own agent: a self-invoke is a test, not a sale.
+    let self_invoke = consumer == publisher;
+    let (billed, publisher_usd) = compute_bill(ct, price_per_1k, rev_share, canned || self_invoke);
 
     sqlx::query(
         r#"INSERT INTO marketplace_usage
@@ -365,7 +378,52 @@ async fn run_and_bill(
         completion_tokens: ct,
         billed_usd: billed,
         publisher_usd,
+        demo: canned,
+        self_invoke,
     })
+}
+
+/// Consumer charge and publisher share for `completion_tokens` at
+/// `price_per_1k`. `free` (demo output, self-invoke) yields zero for both.
+/// Never negative: a misconfigured price or share is clamped.
+fn compute_bill(
+    completion_tokens: i64,
+    price_per_1k: f64,
+    revenue_share: f64,
+    free: bool,
+) -> (f64, f64) {
+    if free || completion_tokens <= 0 {
+        return (0.0, 0.0);
+    }
+    let billed = (completion_tokens as f64 / 1000.0) * price_per_1k.max(0.0);
+    let share = revenue_share.clamp(0.0, 1.0);
+    (billed, billed * share)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_bill;
+
+    #[test]
+    fn bills_output_tokens_and_splits_the_share() {
+        let (billed, publisher) = compute_bill(2_000, 0.5, 0.7, false);
+        assert!((billed - 1.0).abs() < 1e-9);
+        assert!((publisher - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn demo_and_self_invoke_are_free() {
+        assert_eq!(compute_bill(2_000, 0.5, 0.7, true), (0.0, 0.0));
+    }
+
+    #[test]
+    fn never_negative_and_share_is_clamped() {
+        assert_eq!(compute_bill(-5, 0.5, 0.7, false), (0.0, 0.0));
+        assert_eq!(compute_bill(1_000, -1.0, 0.7, false), (0.0, 0.0));
+        let (billed, publisher) = compute_bill(1_000, 1.0, 1.5, false);
+        assert!((billed - 1.0).abs() < 1e-9);
+        assert!((publisher - 1.0).abs() < 1e-9, "share clamped to 1.0");
+    }
 }
 
 // ── OpenAI-compatible API ──────────────────────────────────────────────────

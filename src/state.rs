@@ -51,6 +51,7 @@ impl AppState {
             &self.config.default_llm_provider,
             &workdir,
             &sandbox,
+            self.config.demo_mode,
         )
         .await
     }

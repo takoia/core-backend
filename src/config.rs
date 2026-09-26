@@ -39,6 +39,13 @@ pub struct Config {
     /// How often the inner-life pass runs (reflection, mood update, initiative,
     /// kept commitments), in seconds. Lower it to watch the agent come alive.
     pub inner_life_interval_secs: u64,
+    /// Demo mode (`DEMO_MODE=true`): when no LLM provider answers, steps fall
+    /// back to the offline canned provider so a run still completes. Off by
+    /// default: in production a provider failure fails the run instead of
+    /// delivering demo text as if it were real.
+    pub demo_mode: bool,
+    /// Per-model notional pricing (`LLM_PRICING`, `LLM_PRICING_DEFAULT`).
+    pub pricing: crate::pricing::Pricing,
 }
 
 impl Config {
@@ -80,6 +87,14 @@ impl Config {
             .filter(|n| *n >= 60)
             .unwrap_or(900);
 
+        let demo_mode = std::env::var("DEMO_MODE")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+        let pricing = crate::pricing::Pricing::from_env(
+            std::env::var("LLM_PRICING").ok().as_deref(),
+            std::env::var("LLM_PRICING_DEFAULT").ok().as_deref(),
+        )?;
+
         Ok(Self {
             bind_addr,
             frontend_dev_origin,
@@ -94,6 +109,8 @@ impl Config {
             admin_password,
             memory_maintenance_interval_secs,
             inner_life_interval_secs,
+            demo_mode,
+            pricing,
         })
     }
 }

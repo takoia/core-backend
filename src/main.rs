@@ -13,6 +13,7 @@ mod http;
 mod llm;
 mod memory;
 mod net;
+mod pricing;
 mod queue;
 mod sandbox;
 mod scheduler;

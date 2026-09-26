@@ -20,7 +20,12 @@ use uuid::Uuid;
 /// Outcome of a run attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOutcome {
-    Completed,
+    /// The run finished. `canned` is true when at least one step was served by
+    /// the offline demo provider (only possible in demo mode); such output
+    /// must never be billed or presented as real.
+    Completed {
+        canned: bool,
+    },
     AwaitingApproval,
 }
 
@@ -116,6 +121,7 @@ pub async fn run_job(
         mood_flavor,
         read_only: read_only_memory,
         last_step_canned: false,
+        any_step_canned: false,
     };
 
     // ── Analyse ────────────────────────────────────────────────────────────
@@ -154,7 +160,7 @@ pub async fn run_job(
                 let msg = "action rejected by human";
                 queue::mark_failed(&state.db, &job.id, msg).await?;
                 bus.publish(JobEvent::status(&job.id, "failed", msg));
-                return Ok(RunOutcome::Completed);
+                return Ok(RunOutcome::Completed { canned: false });
             }
             Some(_) => return Ok(RunOutcome::AwaitingApproval), // still pending
             None => {
@@ -198,7 +204,7 @@ pub async fn run_job(
         }
     }
     if !action_done && allowed.iter().any(|t| t == "web_search") {
-        let provider = registry.resolve(ctx.provider_for(StepType::Action).as_deref());
+        let provider = registry.resolve(ctx.provider_for(StepType::Action).as_deref())?;
         // Restrict to a specific site when the web_search tool has a `site` param.
         let site = params.get("site").and_then(|v| v.as_str()).unwrap_or("");
         let query = if site.trim().is_empty() {
@@ -383,7 +389,9 @@ pub async fn run_job(
         }
     }
 
-    Ok(RunOutcome::Completed)
+    Ok(RunOutcome::Completed {
+        canned: ctx.any_step_canned,
+    })
 }
 
 /// Per-run context bundling everything the steps need.
@@ -409,6 +417,8 @@ struct RunCtx<'a> {
     /// Whether the most recent step fell back to the canned offline provider
     /// (its generic demo content must not be pushed as a real Discord alert).
     last_step_canned: bool,
+    /// Whether ANY step of this run used the canned provider (demo mode only).
+    any_step_canned: bool,
 }
 
 impl<'a> RunCtx<'a> {
@@ -486,7 +496,7 @@ impl<'a> RunCtx<'a> {
             ));
         }
 
-        let provider = self.registry.resolve(self.provider_for(step).as_deref());
+        let provider = self.registry.resolve(self.provider_for(step).as_deref())?;
         let mut messages = vec![Message::system(self.system_prompt(step))];
         // Per-agent persona (static identity/voice). The evolving half is the
         // ICM memory recalled just below — together they form the agent's
@@ -530,21 +540,34 @@ impl<'a> RunCtx<'a> {
         messages.push(Message::user(input.to_string()));
         let req = CompletionRequest::new(messages);
 
+        // A provider failure fails the step (and the run). Only demo mode
+        // substitutes the offline canned provider, and the run is then flagged
+        // so its output is never billed or alerted on.
         let mut used_canned = false;
         let completion = match provider.complete(req.clone()).await {
             Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(step = step.as_str(), error = %e, "step failed, canned fallback");
+            Err(e) if self.registry.demo_mode() => {
+                tracing::warn!(step = step.as_str(), error = %e, "step failed, canned fallback (demo mode)");
                 bus.publish(JobEvent::log(
                     &self.job.id,
-                    format!("{} provider error, using offline fallback", label(step)),
+                    format!(
+                        "{} provider error, using offline demo fallback",
+                        label(step)
+                    ),
                 ));
                 used_canned = true;
                 self.registry.canned().complete(req).await?
             }
+            Err(e) => {
+                bus.publish(JobEvent::log(
+                    &self.job.id,
+                    format!("{} provider error: {e}", label(step)),
+                ));
+                return Err(e).with_context(|| format!("{} step failed", label(step)));
+            }
         };
 
-        self.record_usage(&provider.name(), step.as_str(), completion.usage)
+        self.record_usage(&provider.name(), &completion.model, completion.usage)
             .await;
         persist_step(
             self.state,
@@ -590,11 +613,12 @@ impl<'a> RunCtx<'a> {
             serde_json::json!({ "text": completion.content }),
         ));
         self.last_step_canned = used_canned;
+        self.any_step_canned |= used_canned;
         Ok(completion.content)
     }
 
     async fn record_usage(&self, provider: &str, model: &str, usage: TokenUsage) {
-        let cost = notional_cost(usage);
+        let cost = self.state.config.pricing.cost_usd(model, usage);
         let res = sqlx::query(
             r#"INSERT INTO token_usage
                (id, account_id, agent_id, job_id, provider, model,
@@ -623,12 +647,6 @@ impl<'a> RunCtx<'a> {
             ),
         ));
     }
-}
-
-/// Notional USD cost estimate (real cost is the flat plan). Indicative only,
-/// the basis for usage-based billing of marketplace consumers.
-fn notional_cost(usage: TokenUsage) -> f64 {
-    (usage.prompt_tokens as f64 * 3.0 + usage.completion_tokens as f64 * 15.0) / 1_000_000.0
 }
 
 async fn load_step_configs(
@@ -775,13 +793,24 @@ async fn run_subagent(
     subtask: &str,
     depth: i64,
 ) -> Result<String> {
-    let account: Option<(String,)> = sqlx::query_as("SELECT account_id FROM agents WHERE id = ?")
-        .bind(target_agent_id)
-        .fetch_optional(&state.db)
-        .await?;
-    let Some((account_id,)) = account else {
+    let target: Option<(String, String)> =
+        sqlx::query_as("SELECT account_id, autonomy_level FROM agents WHERE id = ?")
+            .bind(target_agent_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((account_id, autonomy)) = target else {
         return Err(anyhow::anyhow!("target agent not found"));
     };
+    // A synchronous sub-run has nobody to approve an action: a
+    // confirm-before-action target would park a job in awaiting_approval for
+    // good. Refuse up front instead.
+    if AutonomyLevel::from_db(&autonomy) != AutonomyLevel::FullAuto {
+        return Err(anyhow::anyhow!(
+            "target agent {target_agent_id} is '{}'; call_agent requires a '{}' target",
+            autonomy,
+            AutonomyLevel::FullAuto.as_str()
+        ));
+    }
 
     let objective_id = Uuid::new_v4().to_string();
     let sub_job_id = Uuid::new_v4().to_string();
@@ -811,7 +840,22 @@ async fn run_subagent(
         objective_id,
         agent_id: target_agent_id.to_string(),
     };
-    Box::pin(run_job(state, &claimed, true)).await?;
+    match Box::pin(run_job(state, &claimed, true)).await {
+        Ok(RunOutcome::Completed { .. }) => {}
+        Ok(RunOutcome::AwaitingApproval) => {
+            let msg = "sub-agent paused for approval inside a synchronous call";
+            queue::mark_failed(&state.db, &sub_job_id, msg).await.ok();
+            return Err(anyhow::anyhow!(msg));
+        }
+        Err(e) => {
+            // Synchronous jobs are never requeued by crash recovery, so an
+            // unmarked failure would leave this row `running` forever.
+            queue::mark_failed(&state.db, &sub_job_id, &format!("{e:#}"))
+                .await
+                .ok();
+            return Err(e);
+        }
+    }
 
     let out: Option<(String,)> = sqlx::query_as(
         "SELECT output FROM steps WHERE job_id = ? AND step_type = 'restitution' ORDER BY position DESC LIMIT 1",

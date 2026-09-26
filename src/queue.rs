@@ -97,3 +97,24 @@ pub async fn recover_orphans(db: &Db) -> Result<u64> {
     .await?;
     Ok(res.rows_affected())
 }
+
+/// Synchronous jobs (marketplace invokes, call_agent sub-runs) execute inside
+/// the HTTP handler or the parent run. They are excluded from
+/// `recover_orphans`, so one left `running` by a crashed handler or a server
+/// restart would stay there forever and keep its agent "busy" for the
+/// scheduler and the inner-life loop. Fail those older than `max_age_secs`.
+pub async fn fail_stale_synchronous(db: &Db, max_age_secs: i64) -> Result<u64> {
+    let res = sqlx::query(
+        r#"UPDATE jobs SET status = 'failed',
+           error = 'synchronous job abandoned (handler failed or server restarted)',
+           finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+           WHERE synchronous = 1
+             AND status IN ('running', 'awaiting_approval')
+             AND COALESCE(started_at, created_at) < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)"#,
+    )
+    .bind(format!("-{} seconds", max_age_secs.max(0)))
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected())
+}
