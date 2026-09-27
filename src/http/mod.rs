@@ -72,7 +72,14 @@ pub fn router(state: AppState) -> Router {
             post(agents::rotate_webhook_secret),
         )
         .route("/agents/:id/export", get(agents::export_toml))
-        .route("/agents/:id/memories", get(agents::memories))
+        .route(
+            "/agents/:id/memories",
+            get(agents::memories).delete(agents::erase_subject),
+        )
+        .route(
+            "/agents/:id/memories/:memory_id",
+            delete(agents::erase_memory),
+        )
         .route("/agents/:id/icm-memories", get(agents::icm_memories))
         .route("/agents/:id/memory", post(agents::add_memory))
         .route("/agents/:id/evolve-persona", post(agents::evolve_persona))

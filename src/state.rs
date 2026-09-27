@@ -17,6 +17,8 @@ pub struct AppState {
     pub cipher: Cipher,
     pub memory: Memory,
     pub events: EventBus,
+    /// Per-event attempt limiter for the public webhook route.
+    pub webhook_limiter: Arc<crate::ratelimit::SlidingWindow>,
 }
 
 impl AppState {
@@ -24,12 +26,16 @@ impl AppState {
         let cipher = Cipher::new(config.master_key);
         let memory = Memory::new(db.clone(), config.icm_db_path.clone());
         let events = EventBus::new(db.clone());
+        let webhook_limiter = Arc::new(crate::ratelimit::SlidingWindow::new(
+            config.webhook_rate_limit_per_min,
+        ));
         Self {
             db,
             config: Arc::new(config),
             cipher,
             memory,
             events,
+            webhook_limiter,
         }
     }
 

@@ -59,6 +59,15 @@ pub async fn receive(
     headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<Json<Value>> {
+    // Attempts are counted per (client, event) before any work, signed or not,
+    // so a flood of unsigned payloads costs one map lookup and nothing else —
+    // and cannot lock a legitimate sender out of the same event.
+    let client = crate::security::client_ip(&headers);
+    if !state.webhook_limiter.allow(&format!("{client}|{event}")) {
+        return Err(AppError::TooManyRequests(
+            "too many webhook deliveries for this event; retry later".into(),
+        ));
+    }
     let Some(signature) = signature_header(&headers) else {
         return Err(AppError::Unauthorized(
             "missing X-Takoia-Signature (sha256=<hex hmac of the raw body>)".into(),

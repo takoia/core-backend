@@ -61,6 +61,9 @@ pub struct Config {
     /// (`MARKETPLACE_MIN_PRICE_PER_1K`, default 0 = free agents allowed; the
     /// publisher then pays the LLM cost of every consumer call).
     pub marketplace_min_price_per_1k: f64,
+    /// Attempts per minute accepted on `/api/webhooks/:event`, per event name,
+    /// signed or not (`WEBHOOK_RATE_LIMIT_PER_MIN`, default 60, 0 = off).
+    pub webhook_rate_limit_per_min: u32,
     /// Extra environment variable names passed through to agent subprocesses
     /// (`AGENT_ENV_PASSTHROUGH`, comma-separated), on top of the built-in
     /// proxy and CA variables.
@@ -129,6 +132,10 @@ impl Config {
             .and_then(|v| v.trim().parse::<f64>().ok())
             .filter(|p| p.is_finite() && *p >= 0.0)
             .unwrap_or(0.0);
+        let webhook_rate_limit_per_min = std::env::var("WEBHOOK_RATE_LIMIT_PER_MIN")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(60);
         let agent_env_passthrough: Vec<String> = std::env::var("AGENT_ENV_PASSTHROUGH")
             .ok()
             .map(|v| {
@@ -158,6 +165,7 @@ impl Config {
             sync_job_max_secs,
             invoke_max_output_tokens,
             marketplace_min_price_per_1k,
+            webhook_rate_limit_per_min,
             agent_env_passthrough,
         })
     }
