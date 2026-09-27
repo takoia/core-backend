@@ -59,6 +59,13 @@ pub async fn receive(
     headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<Json<Value>> {
+    // Attempts are counted per event name before any work, signed or not, so a
+    // flood of unsigned payloads costs one map lookup and nothing else.
+    if !state.webhook_limiter.allow(&event) {
+        return Err(AppError::TooManyRequests(
+            "too many webhook deliveries for this event; retry later".into(),
+        ));
+    }
     let Some(signature) = signature_header(&headers) else {
         return Err(AppError::Unauthorized(
             "missing X-Takoia-Signature (sha256=<hex hmac of the raw body>)".into(),

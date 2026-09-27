@@ -34,6 +34,18 @@ outside demo mode.
   admin `POST /api/accounts/:id/credit`. Stripe is deliberately out: the
   ledger is the source of truth and a provider will only write `topup` rows.
 
+## Shipped in v0.6.0 (sellable, part 2)
+
+- **Memory provenance**: source, data subject, legal basis, retention and the
+  ICM id on every row; consumer-run rows default to the consumer as subject
+  under `contract`, user-authored ones to the author under `consent`.
+- **Targeted erasure**: by subject across every scope, by single memory, and
+  automatically past `retain_until` (maintenance loop). ICM and mirror.
+- **Webhook rate limit** per event name (`WEBHOOK_RATE_LIMIT_PER_MIN`), counted
+  before signature verification.
+- Verified against icm 0.10.63: `icm consolidate --topic` is an exact match
+  (only `recall --topic` is a prefix match), so no sibling folding.
+
 ## Milestone 1 — sellable
 
 What a first paying customer would hit in the first hour.
@@ -44,12 +56,6 @@ What a first paying customer would hit in the first hour.
   (charged exactly, balance goes negative, next call blocked). Options: cap by
   killing the child once its streamed output exceeds the budget, or route
   consumer runs to a provider that honours `max_tokens`.
-- **Verify `icm consolidate --topic` matching.** `icm recall --topic` is a
-  prefix match (verified, 0.10.63); recall now filters on the exact topic and
-  fork topics live under `takoia/fork/`, but consolidation of an owner topic
-  whose slug id prefixes another (`invoice-bot` / `invoice-bot-v2`) may still
-  fold the sibling in. Created agents use UUID ids; imported TOML ids are
-  slugs.
 
 - **Payment provider adapter** writing `topup` rows (Stripe checkout →
   webhook → `billing::topup`), and a consumer-facing way to buy credit.
@@ -57,12 +63,8 @@ What a first paying customer would hit in the first hour.
   account, so publisher == consumer for every key today (self-invokes are now
   free, which makes the ledger honest but empty). Consumer sign-up creates its
   own account; publisher earnings and consumer spend then separate naturally.
-- **Provenance on memories.** `memories` has no source, data subject, legal
-  basis or retention, and erasure is all-or-nothing per agent. Needed before
-  selling an agent trained on personal context (AI Act lineage, GDPR erasure).
-- **Webhook rate limiting** on top of the signature (a valid sender can still
-  flood an agent), and a per-user rate limit on the plan-spending one-shots
-  any member may call (`/api/agents/scaffold`, video analysis with an agent).
+- **Per-user rate limit** on the plan-spending one-shots any member may call
+  (`/api/agents/scaffold`, video analysis with an agent).
 
 ## Milestone 2 — credible
 

@@ -20,6 +20,11 @@ struct TestApp {
 }
 
 async fn app() -> TestApp {
+    app_with(|_| {}).await
+}
+
+/// Build the app with a tweaked configuration.
+async fn app_with(tweak: impl FnOnce(&mut Config)) -> TestApp {
     // Never seed the showcase agent: tests want an empty catalogue.
     std::env::set_var("SEED_SHOWCASE_AGENT", "false");
     let dir = std::env::temp_dir().join(format!("takoia-test-{}", uuid::Uuid::new_v4()));
@@ -27,7 +32,7 @@ async fn app() -> TestApp {
     let db_url = format!("sqlite://{}/takoia.db?mode=rwc", dir.display());
     let pool = crate::db::connect(&db_url).await.unwrap();
     crate::db::migrate(&pool).await.unwrap();
-    let config = Config {
+    let mut config = Config {
         bind_addr: "127.0.0.1:0".into(),
         frontend_dev_origin: "http://localhost:5173".into(),
         database_url: db_url,
@@ -46,8 +51,10 @@ async fn app() -> TestApp {
         sync_job_max_secs: 4 * 3600,
         invoke_max_output_tokens: 4096,
         marketplace_min_price_per_1k: 0.0,
+        webhook_rate_limit_per_min: 60,
         agent_env_passthrough: vec![],
     };
+    tweak(&mut config);
     let state = AppState::new(pool, config);
     crate::bootstrap::run(&state.db, &state.cipher, &state.config)
         .await
@@ -1177,4 +1184,194 @@ async fn publish_enforces_the_price_floor_when_configured() {
     let (s, v) = call(&app, Method::GET, "/api/credit", Some(&admin), None, &[]).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["balance"]["balance_usd"], 0.0);
+}
+
+#[tokio::test]
+async fn memories_carry_provenance_and_can_be_erased_by_subject_or_id() {
+    let app = app().await;
+    let admin = setup_admin(&app).await;
+    let (_, me) = call(&app, Method::GET, "/api/me", Some(&admin), None, &[]).await;
+    let admin_id = me["user"]["id"]
+        .as_str()
+        .or(me["id"].as_str())
+        .unwrap()
+        .to_string();
+    let (_, v) = call(
+        &app,
+        Method::POST,
+        "/api/agents",
+        Some(&admin),
+        Some(json!({ "name": "Prov" })),
+        &[],
+    )
+    .await;
+    let agent = v["id"].as_str().unwrap().to_string();
+
+    // A manual memory records who added it, on what basis.
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        &format!("/api/agents/{agent}/memory"),
+        Some(&admin),
+        Some(json!({ "content": "client prefers French", "key": "preference" })),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    // A consumer fork row carries the consumer account as subject.
+    let memory = crate::memory::Memory::new(
+        app.db.clone(),
+        app._dir.join("icm.db").to_string_lossy().into_owned(),
+    );
+    memory
+        .store(
+            &crate::memory::MemoryScope::consumer(&agent, "acct-z"),
+            "interaction",
+            "asked about invoices",
+        )
+        .await
+        .unwrap();
+    memory
+        .store(
+            &crate::memory::MemoryScope::consumer(&agent, "acct-z"),
+            "run-summary",
+            "summarised invoices",
+        )
+        .await
+        .unwrap();
+
+    let (_, v) = call(
+        &app,
+        Method::GET,
+        &format!("/api/agents/{agent}/memories"),
+        Some(&admin),
+        None,
+        &[],
+    )
+    .await;
+    let owner_rows = v["memories"].as_array().unwrap();
+    assert_eq!(owner_rows.len(), 1);
+    assert_eq!(owner_rows[0]["source"], "manual");
+    assert_eq!(owner_rows[0]["subject"], admin_id);
+    assert_eq!(owner_rows[0]["legal_basis"], "consent");
+    let (n,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM memories WHERE agent_id = ? AND subject = 'acct-z'")
+            .bind(&agent)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+    assert_eq!(n, 2, "fork rows default to the consumer as subject");
+
+    // Targeted erasure by subject removes exactly that subject's rows.
+    let (s, v) = call(
+        &app,
+        Method::DELETE,
+        &format!("/api/agents/{agent}/memories?subject=acct-z"),
+        Some(&admin),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["erased"], 2);
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM memories WHERE agent_id = ?")
+        .bind(&agent)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "the owner's manual memory survives");
+
+    // Erasure by id, owner-only.
+    let (_, bob) = member(&app, &admin, "bob@example.test").await;
+    let mem_id = owner_rows[0]["id"].as_str().unwrap().to_string();
+    let (s, _) = call(
+        &app,
+        Method::DELETE,
+        &format!("/api/agents/{agent}/memories/{mem_id}"),
+        Some(&bob),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = call(
+        &app,
+        Method::DELETE,
+        &format!("/api/agents/{agent}/memories/{mem_id}"),
+        Some(&admin),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = call(
+        &app,
+        Method::DELETE,
+        &format!("/api/agents/{agent}/memories/{mem_id}"),
+        Some(&admin),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn memories_past_their_retention_are_erased_by_the_sweep() {
+    let app = app().await;
+    let memory = crate::memory::Memory::new(
+        app.db.clone(),
+        app._dir.join("icm.db").to_string_lossy().into_owned(),
+    );
+    sqlx::query("INSERT INTO agents (id, account_id, name) VALUES ('ag', ?, 'A')")
+        .bind(crate::bootstrap::DEFAULT_ACCOUNT_ID)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    let scope = crate::memory::MemoryScope::owner("ag");
+    memory
+        .store_with(
+            &scope,
+            "preference",
+            "expired",
+            &crate::memory::Provenance::default().retain_until("2000-01-01T00:00:00.000Z"),
+        )
+        .await
+        .unwrap();
+    memory
+        .store_with(
+            &scope,
+            "preference",
+            "keeps",
+            &crate::memory::Provenance::default().retain_until("2999-01-01T00:00:00.000Z"),
+        )
+        .await
+        .unwrap();
+    memory.store(&scope, "preference", "forever").await.unwrap();
+    assert_eq!(memory.expire_retained().await.unwrap(), 1);
+    let left: Vec<String> = memory
+        .list(&scope)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.content)
+        .collect();
+    assert_eq!(left.len(), 2);
+    assert!(!left.contains(&"expired".to_string()));
+}
+
+#[tokio::test]
+async fn webhook_floods_are_rate_limited_per_event() {
+    let app = app_with(|c| c.webhook_rate_limit_per_min = 2).await;
+    for expected in [
+        StatusCode::UNAUTHORIZED,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::TOO_MANY_REQUESTS,
+    ] {
+        let (s, _) = raw_post(&app, "/api/webhooks/flood", b"{}", &[]).await;
+        assert_eq!(s, expected);
+    }
+    // Another event name has its own budget.
+    let (s, _) = raw_post(&app, "/api/webhooks/other", b"{}", &[]).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 }

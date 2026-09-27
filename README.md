@@ -215,6 +215,7 @@ The four logical providers are `claude_max` (Claude plan proxy), `ollama`
 | `LLM_PRICING_DEFAULT` | `{"input_per_m":3,"output_per_m":15}` | Rate for models matching no prefix. The canned provider is always free. |
 | `INVOKE_MAX_OUTPUT_TOKENS` | `4096` | Per-step output budget for marketplace consumer runs; also sizes the credit reserved before a run (5 billable steps × budget × price, capped by the account's `max_invoke_usd`). |
 | `MARKETPLACE_MIN_PRICE_PER_1K` | `0` | Lowest `price_per_1k_output_tokens` a publisher may set. `0` allows free agents (the publisher then pays the LLM cost of every consumer call). |
+| `WEBHOOK_RATE_LIMIT_PER_MIN` | `60` | Attempts per minute accepted on `/api/webhooks/:event`, per event name, signed or not (`0` = off). Beyond it the route answers 429 before verifying anything. |
 | `SYNC_JOB_MAX_SECS` | `14400` | A synchronous job (marketplace invoke, `call_agent` sub-run) still running after this long is considered abandoned and failed. Generous on purpose: nested sub-runs and web searches take time, and a false positive fails a paying call after its tokens were spent. |
 | `AGENT_ENV_PASSTHROUGH` | *(unset)* | Comma-separated extra environment variables forwarded to agent subprocesses, on top of the built-in proxy (`HTTP(S)_PROXY`, `NO_PROXY`), CA (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`) and `CLAUDE_CONFIG_DIR` passthrough. `MASTER_KEY`, `DATABASE_URL`, `ADMIN_PASSWORD`, `*_API_KEY` and `*_TOKEN` are never forwarded. |
 
@@ -432,7 +433,21 @@ curl -X POST http://localhost:8080/api/webhooks/invoice \
 ```
 
 `X-Hub-Signature-256` is accepted as an alias. Unsigned or mis-signed payloads
-create no job and get a 401.
+create no job and get a 401; more than `WEBHOOK_RATE_LIMIT_PER_MIN` attempts per
+minute on one event name get a 429.
+
+### 8. Memory provenance and erasure
+
+Every memory row records its provenance: `source` (run, interaction, step,
+correction, manual, video, reflection, import), `subject` (whose data it is —
+a consumer account, the user who added it, an external reference),
+`legal_basis` (`contract` for consumer runs, `consent` for user-authored
+entries), an optional `retain_until`, and the ICM id. `GET /api/agents/:id/memories`
+returns them. Erasure is targeted: `DELETE /api/agents/:id/memories?subject=<id>`
+erases everything the agent holds about one subject in every scope (ICM and
+mirror), `DELETE /api/agents/:id/memories/:memory_id` erases one entry, and the
+maintenance loop erases rows past their `retain_until`. `POST /api/agents/:id/memory`
+accepts `retain_until`.
 
 ---
 

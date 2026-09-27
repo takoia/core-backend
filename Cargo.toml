@@ -1,6 +1,6 @@
 [package]
 name = "takoia-core"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "TakoIA core-backend: autonomous agent orchestrator (4-step loop)"
 license = "BUSL-1.1"

@@ -269,8 +269,21 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, mode: &MemoryMode) -> R
     // Skipped on a resumed-after-completion run so the summary is stored once.
     if !restitution_was_done {
         let scope = mode.write_scope(&job.agent_id);
+        // Provenance: a consumer run is their data, kept under the marketplace
+        // contract; an owner run is the publisher's own.
+        let prov = match mode {
+            MemoryMode::Consumer { account_id } => crate::memory::Provenance::default()
+                .subject(account_id.clone())
+                .basis("contract")
+                .job(&job.id),
+            MemoryMode::Owner => crate::memory::Provenance::default().job(&job.id),
+        };
         let summary = report.chars().take(600).collect::<String>();
-        if let Err(e) = state.memory.store(&scope, "run-summary", &summary).await {
+        if let Err(e) = state
+            .memory
+            .store_with(&scope, "run-summary", &summary, &prov)
+            .await
+        {
             tracing::warn!(error = %e, "failed to persist memory");
         }
         // Capture HOW the user interacted (their wording/tone), separate from the
@@ -278,7 +291,7 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, mode: &MemoryMode) -> R
         let interaction = objective.prompt.chars().take(400).collect::<String>();
         let _ = state
             .memory
-            .store(&scope, "interaction", &interaction)
+            .store_with(&scope, "interaction", &interaction, &prov)
             .await;
         // Inner life: a completed interaction grows familiarity and lifts energy.
         // Only the owner's own interactions move the agent's mood/familiarity;
@@ -567,10 +580,17 @@ impl<'a> RunCtx<'a> {
         if !used_canned && self.remember(step) {
             let scope = &self.write_scope;
             let trimmed: String = completion.content.chars().take(500).collect();
+            let prov = match &scope {
+                MemoryScope::Consumer { account_id, .. } => crate::memory::Provenance::default()
+                    .subject(account_id.clone())
+                    .basis("contract")
+                    .job(&self.job.id),
+                MemoryScope::Owner { .. } => crate::memory::Provenance::default().job(&self.job.id),
+            };
             if let Err(e) = self
                 .state
                 .memory
-                .store(scope, step.as_str(), &trimmed)
+                .store_with(scope, step.as_str(), &trimmed, &prov)
                 .await
             {
                 tracing::warn!(error = %e, "failed to store step memory");

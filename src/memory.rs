@@ -26,7 +26,7 @@ pub struct IcmEntry {
     pub importance: String,
 }
 
-/// A stored memory entry, surfaced in the UI.
+/// A stored memory entry, surfaced in the UI and the consumer API.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct MemoryEntry {
     pub id: String,
@@ -34,6 +34,74 @@ pub struct MemoryEntry {
     pub key: String,
     pub content: String,
     pub created_at: String,
+    /// Where it came from: run, interaction, step, correction, manual, video,
+    /// reflection, import.
+    pub source: String,
+    /// Whose data it is (a consumer account, a user id, an external reference).
+    pub subject: Option<String>,
+    /// contract | consent | legitimate_interest.
+    pub legal_basis: Option<String>,
+    /// ISO-8601 instant after which the row is erased by the maintenance loop.
+    pub retain_until: Option<String>,
+    pub job_id: Option<String>,
+}
+
+/// Where a memory came from, whose data it is, and how long it may be kept.
+/// Stored next to the content so a single memory can be traced and erased.
+#[derive(Debug, Clone, Default)]
+pub struct Provenance {
+    pub source: Option<String>,
+    pub subject: Option<String>,
+    pub legal_basis: Option<String>,
+    pub retain_until: Option<String>,
+    pub job_id: Option<String>,
+}
+
+impl Provenance {
+    pub fn subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
+    }
+    pub fn basis(mut self, basis: &str) -> Self {
+        self.legal_basis = Some(basis.to_string());
+        self
+    }
+    pub fn job(mut self, job_id: &str) -> Self {
+        self.job_id = Some(job_id.to_string());
+        self
+    }
+    pub fn source(mut self, source: &str) -> Self {
+        self.source = Some(source.to_string());
+        self
+    }
+    pub fn retain_until(mut self, until: impl Into<String>) -> Self {
+        self.retain_until = Some(until.into());
+        self
+    }
+}
+
+/// Default `source` for a memory key when the caller gives none.
+fn source_for_key(key: &str) -> &'static str {
+    match key {
+        "run-summary" => "run",
+        "interaction" => "interaction",
+        "correction" => "correction",
+        "reflection" => "reflection",
+        "video-analysis" => "video",
+        "demonstration" | "preference" | "instruction" => "manual",
+        "analyse" | "decision" | "action" | "restitution" => "step",
+        _ => "run",
+    }
+}
+
+/// The id ICM printed for a stored memory (`Stored: <id> (+N links)`).
+fn parse_icm_stored_id(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Stored:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
 }
 
 /// Whose memory a read or write addresses.
@@ -259,7 +327,8 @@ impl Memory {
     async fn recall_db(&self, scope: &MemoryScope, limit: usize) -> Result<String> {
         // `IS ?` so a NULL bind matches the owner rows (`= NULL` never matches).
         let rows = sqlx::query_as::<_, MemoryEntry>(
-            r#"SELECT id, agent_id, key, content, created_at
+            r#"SELECT id, agent_id, key, content, created_at,
+                      source, subject, legal_basis, retain_until, job_id
                FROM memories WHERE agent_id = ? AND consumer_account IS ?
                ORDER BY created_at DESC LIMIT ?"#,
         )
@@ -304,8 +373,20 @@ impl Memory {
         out
     }
 
-    /// Persist a new memory at the Restitution step: ICM (best-effort) + DB.
+    /// Persist a new memory with default provenance (source derived from `key`).
     pub async fn store(&self, scope: &MemoryScope, key: &str, content: &str) -> Result<()> {
+        self.store_with(scope, key, content, &Provenance::default())
+            .await
+    }
+
+    /// Persist a new memory: ICM (best-effort) + DB mirror with provenance.
+    pub async fn store_with(
+        &self,
+        scope: &MemoryScope,
+        key: &str,
+        content: &str,
+        prov: &Provenance,
+    ) -> Result<()> {
         let agent_id = scope.agent_id();
         // User-specific memories are protected from decay/consolidation by
         // storing them at high importance; other (generic step) memories keep
@@ -339,23 +420,108 @@ impl Memory {
         if let Some(level) = importance {
             cmd.arg("--importance").arg(level);
         }
-        let icm = cmd.output().await;
-        if let Err(e) = &icm {
-            tracing::warn!(agent_id, error = %e, "icm store failed (db still persisted)");
-        }
+        let icm_id = match cmd.output().await {
+            Ok(o) if o.status.success() => parse_icm_stored_id(&String::from_utf8_lossy(&o.stdout)),
+            Ok(o) => {
+                tracing::warn!(agent_id, stderr = %String::from_utf8_lossy(&o.stderr), "icm store failed (db still persisted)");
+                None
+            }
+            Err(e) => {
+                tracing::warn!(agent_id, error = %e, "icm store failed (db still persisted)");
+                None
+            }
+        };
 
+        // For a consumer fork the data subject is that consumer unless the
+        // caller says otherwise.
+        let subject = prov
+            .subject
+            .clone()
+            .or_else(|| scope.consumer_account().map(str::to_string));
+        let source = prov
+            .source
+            .clone()
+            .unwrap_or_else(|| source_for_key(key).to_string());
         sqlx::query(
-            r#"INSERT INTO memories (id, agent_id, consumer_account, key, content)
-               VALUES (?, ?, ?, ?, ?)"#,
+            r#"INSERT INTO memories
+                 (id, agent_id, consumer_account, key, content,
+                  source, subject, legal_basis, retain_until, job_id, icm_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(Uuid::new_v4().to_string())
         .bind(agent_id)
         .bind(scope.consumer_account())
         .bind(key)
         .bind(content)
+        .bind(&source)
+        .bind(&subject)
+        .bind(&prov.legal_basis)
+        .bind(&prov.retain_until)
+        .bind(&prov.job_id)
+        .bind(&icm_id)
         .execute(&self.db)
         .await?;
         Ok(())
+    }
+
+    /// Erase every memory of `agent_id` whose data subject is `subject`, in any
+    /// scope, on both sides (ICM by id where known, then the mirror). Returns
+    /// the number of rows erased. This is the targeted right-to-erasure path;
+    /// `forget` (whole scope) is the blunt one.
+    pub async fn forget_subject(&self, agent_id: &str, subject: &str) -> Result<u64> {
+        let rows: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT id, icm_id FROM memories WHERE agent_id = ? AND subject = ?")
+                .bind(agent_id)
+                .bind(subject)
+                .fetch_all(&self.db)
+                .await?;
+        self.erase_rows(&rows).await
+    }
+
+    /// Erase one memory row (and its ICM entry) by mirror id, if it belongs to
+    /// `agent_id`. Returns whether a row was erased.
+    pub async fn forget_one(&self, agent_id: &str, memory_id: &str) -> Result<bool> {
+        let rows: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT id, icm_id FROM memories WHERE agent_id = ? AND id = ?")
+                .bind(agent_id)
+                .bind(memory_id)
+                .fetch_all(&self.db)
+                .await?;
+        Ok(self.erase_rows(&rows).await? > 0)
+    }
+
+    /// Erase rows whose retention period has ended. Run by the maintenance loop.
+    pub async fn expire_retained(&self) -> Result<u64> {
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT id, icm_id FROM memories
+             WHERE retain_until IS NOT NULL AND retain_until <= strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+        )
+        .fetch_all(&self.db)
+        .await?;
+        self.erase_rows(&rows).await
+    }
+
+    async fn erase_rows(&self, rows: &[(String, Option<String>)]) -> Result<u64> {
+        let mut erased = 0u64;
+        for (id, icm_id) in rows {
+            if let Some(icm_id) = icm_id {
+                // Best-effort on the ICM side; the mirror row goes regardless so
+                // the memory is no longer served from the DB fallback either.
+                let _ = Command::new("icm")
+                    .arg("forget")
+                    .arg(icm_id)
+                    .arg("--db")
+                    .arg(&self.icm_db_path)
+                    .output()
+                    .await;
+            }
+            let res = sqlx::query("DELETE FROM memories WHERE id = ?")
+                .bind(id)
+                .execute(&self.db)
+                .await?;
+            erased += res.rows_affected();
+        }
+        Ok(erased)
     }
 
     /// Record a correction (what the agent predicted vs the correct answer) so
@@ -363,6 +529,7 @@ impl Memory {
     pub async fn record_feedback(
         &self,
         scope: &MemoryScope,
+        subject: Option<&str>,
         context: &str,
         predicted: &str,
         corrected: &str,
@@ -396,7 +563,11 @@ impl Memory {
         let lesson = format!(
             "CORRECTION — when: {context}. Wrong: {predicted}. Correct: {corrected}. Reason: {reason}"
         );
-        self.store(scope, "correction", &lesson).await
+        let mut prov = Provenance::default().basis("consent");
+        if let Some(s) = subject {
+            prov = prov.subject(s);
+        }
+        self.store_with(scope, "correction", &lesson, &prov).await
     }
 
     /// Recall past corrections relevant to `query` (ICM feedback search).
@@ -690,8 +861,8 @@ impl Memory {
 
         for entry in &entries {
             if let Err(e) = sqlx::query(
-                r#"INSERT INTO memories (id, agent_id, consumer_account, key, content)
-                   VALUES (?, ?, ?, 'consolidated', ?)"#,
+                r#"INSERT INTO memories (id, agent_id, consumer_account, key, content, source)
+                   VALUES (?, ?, ?, 'consolidated', ?, 'consolidated')"#,
             )
             .bind(Uuid::new_v4().to_string())
             .bind(agent_id)
@@ -713,7 +884,8 @@ impl Memory {
     /// List stored memories of one scope (UI / consumer API).
     pub async fn list(&self, scope: &MemoryScope) -> Result<Vec<MemoryEntry>> {
         let rows = sqlx::query_as::<_, MemoryEntry>(
-            r#"SELECT id, agent_id, key, content, created_at
+            r#"SELECT id, agent_id, key, content, created_at,
+                      source, subject, legal_basis, retain_until, job_id
                FROM memories WHERE agent_id = ? AND consumer_account IS ?
                ORDER BY created_at DESC"#,
         )
@@ -788,6 +960,13 @@ pub fn spawn_maintenance(memory: Memory, interval_secs: u64) {
                 memory.consolidate(&scope).await;
             }
             memory.decay_and_prune().await;
+            match memory.expire_retained().await {
+                Ok(n) if n > 0 => {
+                    tracing::info!(erased = n, "erased memories past their retention")
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "retention sweep failed"),
+            }
             tokio::time::sleep(interval).await;
         }
     });
@@ -852,6 +1031,25 @@ mod tests {
         assert!(render_recall(json, "takoia/agent/a2").is_none());
         assert!(render_recall("memories[0]{id}:", "takoia/agent/a1").is_none());
         assert!(render_recall("[]", "takoia/agent/a1").is_none());
+    }
+
+    #[test]
+    fn icm_stored_id_is_parsed_from_the_cli_line() {
+        assert_eq!(
+            parse_icm_stored_id("Stored: 01M3G4T5CM634F1X1RYBEGPMGJ (+5 links)\n").as_deref(),
+            Some("01M3G4T5CM634F1X1RYBEGPMGJ")
+        );
+        assert_eq!(parse_icm_stored_id("Stored: \n"), None);
+        assert_eq!(parse_icm_stored_id("No memories found."), None);
+    }
+
+    #[test]
+    fn source_defaults_follow_the_key() {
+        assert_eq!(source_for_key("run-summary"), "run");
+        assert_eq!(source_for_key("interaction"), "interaction");
+        assert_eq!(source_for_key("analyse"), "step");
+        assert_eq!(source_for_key("preference"), "manual");
+        assert_eq!(source_for_key("whatever"), "run");
     }
 
     #[test]

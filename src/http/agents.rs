@@ -595,6 +595,9 @@ pub struct AddMemory {
     pub content: String,
     #[serde(default = "default_mem_key")]
     pub key: String,
+    /// Optional ISO-8601 instant after which the memory is erased automatically.
+    #[serde(default)]
+    pub retain_until: Option<String>,
 }
 
 fn default_mem_key() -> String {
@@ -614,15 +617,71 @@ pub async fn add_memory(
     if body.content.trim().is_empty() {
         return Err(AppError::BadRequest("content is required".into()));
     }
+    let mut prov = crate::memory::Provenance::default()
+        .source("manual")
+        .subject(me.id.clone())
+        .basis("consent");
+    if let Some(until) = body
+        .retain_until
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        prov = prov.retain_until(until.trim());
+    }
     state
         .memory
-        .store(
+        .store_with(
             &crate::memory::MemoryScope::owner(&id),
             &body.key,
             &body.content,
+            &prov,
         )
         .await
         .map_err(AppError::Other)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct EraseQuery {
+    /// Erase every memory whose data subject is this value (any scope).
+    pub subject: String,
+}
+
+/// `DELETE /api/agents/:id/memories?subject=…` — targeted erasure (owner):
+/// every memory of this agent about `subject`, ICM and mirror, in every scope.
+pub async fn erase_subject(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<EraseQuery>,
+) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "owner").await?;
+    if q.subject.trim().is_empty() {
+        return Err(AppError::BadRequest("subject is required".into()));
+    }
+    let erased = state
+        .memory
+        .forget_subject(&id, q.subject.trim())
+        .await
+        .map_err(AppError::Other)?;
+    Ok(Json(json!({ "ok": true, "erased": erased })))
+}
+
+/// `DELETE /api/agents/:id/memories/:memory_id` — erase one memory (owner).
+pub async fn erase_memory(
+    State(state): State<AppState>,
+    crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
+    Path((id, memory_id)): Path<(String, String)>,
+) -> AppResult<Json<Value>> {
+    crate::http::users::require_agent_role(&state, &id, &me, "owner").await?;
+    let erased = state
+        .memory
+        .forget_one(&id, &memory_id)
+        .await
+        .map_err(AppError::Other)?;
+    if !erased {
+        return Err(AppError::NotFound("memory not found".into()));
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
