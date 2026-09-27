@@ -271,13 +271,7 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, mode: &MemoryMode) -> R
         let scope = mode.write_scope(&job.agent_id);
         // Provenance: a consumer run is their data, kept under the marketplace
         // contract; an owner run is the publisher's own.
-        let prov = match mode {
-            MemoryMode::Consumer { account_id } => crate::memory::Provenance::default()
-                .subject(account_id.clone())
-                .basis("contract")
-                .job(&job.id),
-            MemoryMode::Owner => crate::memory::Provenance::default().job(&job.id),
-        };
+        let prov = crate::memory::Provenance::for_run(&scope, &job.id);
         let summary = report.chars().take(600).collect::<String>();
         if let Err(e) = state
             .memory
@@ -580,13 +574,7 @@ impl<'a> RunCtx<'a> {
         if !used_canned && self.remember(step) {
             let scope = &self.write_scope;
             let trimmed: String = completion.content.chars().take(500).collect();
-            let prov = match &scope {
-                MemoryScope::Consumer { account_id, .. } => crate::memory::Provenance::default()
-                    .subject(account_id.clone())
-                    .basis("contract")
-                    .job(&self.job.id),
-                MemoryScope::Owner { .. } => crate::memory::Provenance::default().job(&self.job.id),
-            };
+            let prov = crate::memory::Provenance::for_run(scope, &self.job.id);
             if let Err(e) = self
                 .state
                 .memory

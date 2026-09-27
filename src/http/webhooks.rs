@@ -59,9 +59,11 @@ pub async fn receive(
     headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<Json<Value>> {
-    // Attempts are counted per event name before any work, signed or not, so a
-    // flood of unsigned payloads costs one map lookup and nothing else.
-    if !state.webhook_limiter.allow(&event) {
+    // Attempts are counted per (client, event) before any work, signed or not,
+    // so a flood of unsigned payloads costs one map lookup and nothing else —
+    // and cannot lock a legitimate sender out of the same event.
+    let client = crate::security::client_ip(&headers);
+    if !state.webhook_limiter.allow(&format!("{client}|{event}")) {
         return Err(AppError::TooManyRequests(
             "too many webhook deliveries for this event; retry later".into(),
         ));

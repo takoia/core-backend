@@ -20,6 +20,8 @@ use uuid::Uuid;
 /// An ICM memory with its native importance metadata.
 #[derive(Debug, Clone, Serialize)]
 pub struct IcmEntry {
+    /// ICM's own id, so a mirrored (or consolidated) row can be erased there.
+    pub id: Option<String>,
     pub summary: String,
     pub weight: f64,
     pub access_count: i64,
@@ -74,10 +76,46 @@ impl Provenance {
         self.source = Some(source.to_string());
         self
     }
-    pub fn retain_until(mut self, until: impl Into<String>) -> Self {
-        self.retain_until = Some(until.into());
-        self
+    /// Set the retention deadline from an RFC 3339 timestamp; stored normalised
+    /// to UTC in the exact `strftime('%Y-%m-%dT%H:%M:%fZ')` shape the sweep
+    /// compares against, so a lexical comparison is a chronological one.
+    pub fn retain_until(mut self, until: &str) -> Result<Self> {
+        self.retain_until = Some(normalize_deadline(until)?);
+        Ok(self)
     }
+
+    /// Provenance of what a run writes: the consumer's data under the
+    /// marketplace contract for a fork, the publisher's own for owner memory.
+    pub fn for_run(scope: &MemoryScope, job_id: &str) -> Self {
+        let p = Provenance::default().job(job_id);
+        match scope {
+            MemoryScope::Consumer { account_id, .. } => {
+                p.subject(account_id.clone()).basis("contract")
+            }
+            MemoryScope::Owner { .. } => p,
+        }
+    }
+}
+
+/// Parse an RFC 3339 instant and render it like SQLite's
+/// `strftime('%Y-%m-%dT%H:%M:%fZ','now')` (UTC, millisecond fraction).
+pub fn normalize_deadline(input: &str) -> Result<String> {
+    let dt = chrono::DateTime::parse_from_rfc3339(input.trim())
+        .map_err(|e| anyhow::anyhow!("retain_until must be an RFC 3339 timestamp: {e}"))?;
+    Ok(dt
+        .with_timezone(&chrono::Utc)
+        .format("%Y-%m-%dT%H:%M:%S.%3fZ")
+        .to_string())
+}
+
+/// Result of an erasure: rows removed from the mirror, and how many of them
+/// could NOT be removed from ICM (no id known, or `icm forget` failed) — the
+/// caller must surface that, an erasure that silently left ICM copies is not
+/// an erasure.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct Erased {
+    pub rows: u64,
+    pub icm_failed: u64,
 }
 
 /// Default `source` for a memory key when the caller gives none.
@@ -468,30 +506,60 @@ impl Memory {
     /// scope, on both sides (ICM by id where known, then the mirror). Returns
     /// the number of rows erased. This is the targeted right-to-erasure path;
     /// `forget` (whole scope) is the blunt one.
-    pub async fn forget_subject(&self, agent_id: &str, subject: &str) -> Result<u64> {
+    pub async fn forget_subject(&self, agent_id: &str, subject: &str) -> Result<Erased> {
         let rows: Vec<(String, Option<String>)> =
             sqlx::query_as("SELECT id, icm_id FROM memories WHERE agent_id = ? AND subject = ?")
                 .bind(agent_id)
                 .bind(subject)
                 .fetch_all(&self.db)
                 .await?;
-        self.erase_rows(&rows).await
+        let mut erased = self.erase_rows(&rows).await?;
+        // The subject is usually a consumer account: their whole fork topic goes
+        // too (exact match), which also covers rows stored before ICM ids were
+        // recorded. Owner-scope rows without an id stay reported as failures.
+        let fork = MemoryScope::consumer(agent_id, subject);
+        let has_fork: Option<(i64,)> = sqlx::query_as(
+            "SELECT COUNT(*) FROM memories WHERE agent_id = ? AND consumer_account = ?",
+        )
+        .bind(agent_id)
+        .bind(subject)
+        .fetch_optional(&self.db)
+        .await?;
+        let fork_rows_left = has_fork.map(|r| r.0).unwrap_or(0);
+        let fork_forget = Command::new("icm")
+            .arg("forget")
+            .arg("--topic")
+            .arg(fork.topic())
+            .arg("--db")
+            .arg(&self.icm_db_path)
+            .output()
+            .await;
+        if matches!(fork_forget, Ok(ref o) if o.status.success()) && fork_rows_left == 0 {
+            // Every ICM copy of the fork is gone whatever the per-row outcome.
+            erased.icm_failed = erased
+                .icm_failed
+                .saturating_sub(rows.iter().filter(|(_, icm)| icm.is_none()).count() as u64);
+        }
+        Ok(erased)
     }
 
     /// Erase one memory row (and its ICM entry) by mirror id, if it belongs to
     /// `agent_id`. Returns whether a row was erased.
-    pub async fn forget_one(&self, agent_id: &str, memory_id: &str) -> Result<bool> {
+    pub async fn forget_one(&self, agent_id: &str, memory_id: &str) -> Result<Option<Erased>> {
         let rows: Vec<(String, Option<String>)> =
             sqlx::query_as("SELECT id, icm_id FROM memories WHERE agent_id = ? AND id = ?")
                 .bind(agent_id)
                 .bind(memory_id)
                 .fetch_all(&self.db)
                 .await?;
-        Ok(self.erase_rows(&rows).await? > 0)
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(self.erase_rows(&rows).await?))
     }
 
     /// Erase rows whose retention period has ended. Run by the maintenance loop.
-    pub async fn expire_retained(&self) -> Result<u64> {
+    pub async fn expire_retained(&self) -> Result<Erased> {
         let rows: Vec<(String, Option<String>)> = sqlx::query_as(
             "SELECT id, icm_id FROM memories
              WHERE retain_until IS NOT NULL AND retain_until <= strftime('%Y-%m-%dT%H:%M:%fZ','now')",
@@ -501,27 +569,59 @@ impl Memory {
         self.erase_rows(&rows).await
     }
 
-    async fn erase_rows(&self, rows: &[(String, Option<String>)]) -> Result<u64> {
-        let mut erased = 0u64;
-        for (id, icm_id) in rows {
-            if let Some(icm_id) = icm_id {
-                // Best-effort on the ICM side; the mirror row goes regardless so
-                // the memory is no longer served from the DB fallback either.
-                let _ = Command::new("icm")
-                    .arg("forget")
-                    .arg(icm_id)
-                    .arg("--db")
-                    .arg(&self.icm_db_path)
-                    .output()
-                    .await;
-            }
-            let res = sqlx::query("DELETE FROM memories WHERE id = ?")
-                .bind(id)
-                .execute(&self.db)
-                .await?;
-            erased += res.rows_affected();
+    /// ICM forgets run concurrently (bounded), then the mirror rows go in one
+    /// statement. Every ICM failure — unknown id or a failed `icm forget` — is
+    /// counted and logged: recall consults ICM before the mirror, so a copy
+    /// left there would still be served.
+    async fn erase_rows(&self, rows: &[(String, Option<String>)]) -> Result<Erased> {
+        use futures::stream::{self, StreamExt};
+        if rows.is_empty() {
+            return Ok(Erased::default());
         }
-        Ok(erased)
+        let db_path = self.icm_db_path.clone();
+        let icm_failed = stream::iter(rows.iter().cloned())
+            .map(|(row_id, icm_id)| {
+                let db_path = db_path.clone();
+                async move {
+                    let Some(icm_id) = icm_id else {
+                        tracing::warn!(row_id, "memory has no ICM id; ICM copy (if any) not erased");
+                        return 1u64;
+                    };
+                    match Command::new("icm")
+                        .arg("forget")
+                        .arg(&icm_id)
+                        .arg("--db")
+                        .arg(&db_path)
+                        .output()
+                        .await
+                    {
+                        Ok(o) if o.status.success() => 0,
+                        Ok(o) => {
+                            tracing::warn!(row_id, icm_id, stderr = %String::from_utf8_lossy(&o.stderr), "icm forget failed");
+                            1
+                        }
+                        Err(e) => {
+                            tracing::warn!(row_id, icm_id, error = %e, "icm forget could not run");
+                            1
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(8)
+            .fold(0u64, |acc, n| async move { acc + n })
+            .await;
+
+        let placeholders = vec!["?"; rows.len()].join(",");
+        let sql = format!("DELETE FROM memories WHERE id IN ({placeholders})");
+        let mut q = sqlx::query(&sql);
+        for (id, _) in rows {
+            q = q.bind(id);
+        }
+        let removed = q.execute(&self.db).await?.rows_affected();
+        Ok(Erased {
+            rows: removed,
+            icm_failed,
+        })
     }
 
     /// Record a correction (what the agent predicted vs the correct answer) so
@@ -563,9 +663,9 @@ impl Memory {
         let lesson = format!(
             "CORRECTION — when: {context}. Wrong: {predicted}. Correct: {corrected}. Reason: {reason}"
         );
-        let mut prov = Provenance::default().basis("consent");
+        let mut prov = Provenance::default();
         if let Some(s) = subject {
-            prov = prov.subject(s);
+            prov = prov.subject(s).basis("consent");
         }
         self.store_with(scope, "correction", &lesson, &prov).await
     }
@@ -702,6 +802,7 @@ impl Memory {
             .map(|arr| {
                 arr.iter()
                     .map(|m| IcmEntry {
+                        id: m.get("id").and_then(|v| v.as_str()).map(str::to_string),
                         summary: m
                             .get("summary")
                             .and_then(|v| v.as_str())
@@ -848,6 +949,14 @@ impl Memory {
 
         // Scoped delete: consolidating the owner's memory must never wipe the
         // consumer forks (and vice versa). `IS ?` matches NULL for the owner.
+        let retentions: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT retain_until FROM memories WHERE agent_id = ? AND consumer_account IS ?",
+        )
+        .bind(agent_id)
+        .bind(scope.consumer_account())
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap_or_default();
         if let Err(e) =
             sqlx::query("DELETE FROM memories WHERE agent_id = ? AND consumer_account IS ?")
                 .bind(agent_id)
@@ -859,15 +968,25 @@ impl Memory {
             return; // dropping `tx` rolls back automatically
         }
 
+        // Provenance survives consolidation: the scope's subject and basis, and
+        // the EARLIEST retention deadline of the rows being replaced (a
+        // distilled memory may never outlive its strictest source).
+        let (subject, basis, retain_until) = consolidated_provenance(scope, &retentions);
         for entry in &entries {
             if let Err(e) = sqlx::query(
-                r#"INSERT INTO memories (id, agent_id, consumer_account, key, content, source)
-                   VALUES (?, ?, ?, 'consolidated', ?, 'consolidated')"#,
+                r#"INSERT INTO memories
+                     (id, agent_id, consumer_account, key, content, source,
+                      subject, legal_basis, retain_until, icm_id)
+                   VALUES (?, ?, ?, 'consolidated', ?, 'consolidated', ?, ?, ?, ?)"#,
             )
             .bind(Uuid::new_v4().to_string())
             .bind(agent_id)
             .bind(scope.consumer_account())
             .bind(entry.summary.trim())
+            .bind(&subject)
+            .bind(&basis)
+            .bind(&retain_until)
+            .bind(&entry.id)
             .execute(&mut *tx)
             .await
             {
@@ -903,6 +1022,23 @@ const OWNER_CONSOLIDATE_MIN: i64 = 6;
 /// every consolidation is an LLM call on the publisher's plan and a popular
 /// agent has one fork per paying account.
 const CONSUMER_CONSOLIDATE_MIN: i64 = 20;
+
+/// Subject, legal basis and retention for the consolidated rows of a scope:
+/// the scope's own subject/basis, and the earliest deadline among `retentions`.
+fn consolidated_provenance(
+    scope: &MemoryScope,
+    retentions: &[Option<String>],
+) -> (Option<String>, Option<String>, Option<String>) {
+    let (subject, basis) = match scope {
+        MemoryScope::Consumer { account_id, .. } => {
+            (Some(account_id.clone()), Some("contract".to_string()))
+        }
+        MemoryScope::Owner { .. } => (None, None),
+    };
+    // Normalised deadlines sort chronologically as strings.
+    let earliest = retentions.iter().flatten().min().cloned();
+    (subject, basis, earliest)
+}
 
 /// Turn `icm recall --format json` output into prompt text, keeping only rows
 /// whose `topic` is exactly `wanted` (most important first, as ICM orders
@@ -961,9 +1097,11 @@ pub fn spawn_maintenance(memory: Memory, interval_secs: u64) {
             }
             memory.decay_and_prune().await;
             match memory.expire_retained().await {
-                Ok(n) if n > 0 => {
-                    tracing::info!(erased = n, "erased memories past their retention")
-                }
+                Ok(e) if e.rows > 0 => tracing::info!(
+                    erased = e.rows,
+                    icm_failed = e.icm_failed,
+                    "erased memories past their retention"
+                ),
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "retention sweep failed"),
             }
@@ -1041,6 +1179,39 @@ mod tests {
         );
         assert_eq!(parse_icm_stored_id("Stored: \n"), None);
         assert_eq!(parse_icm_stored_id("No memories found."), None);
+    }
+
+    #[test]
+    fn deadlines_are_normalised_to_utc_millis_or_rejected() {
+        assert_eq!(
+            normalize_deadline("2026-09-27T01:00:00+02:00").unwrap(),
+            "2026-09-26T23:00:00.000Z"
+        );
+        assert_eq!(
+            normalize_deadline("2027-01-01T00:00:00Z").unwrap(),
+            "2027-01-01T00:00:00.000Z"
+        );
+        for bad in ["1 year", "12/31/2027", "tomorrow", "2026-09-27", ""] {
+            assert!(normalize_deadline(bad).is_err(), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn consolidation_keeps_the_scope_subject_and_the_earliest_deadline() {
+        let fork = MemoryScope::consumer("a", "acct");
+        let (subject, basis, until) = consolidated_provenance(
+            &fork,
+            &[
+                None,
+                Some("2027-01-01T00:00:00.000Z".into()),
+                Some("2026-06-01T00:00:00.000Z".into()),
+            ],
+        );
+        assert_eq!(subject.as_deref(), Some("acct"));
+        assert_eq!(basis.as_deref(), Some("contract"));
+        assert_eq!(until.as_deref(), Some("2026-06-01T00:00:00.000Z"));
+        let (subject, basis, until) = consolidated_provenance(&MemoryScope::owner("a"), &[None]);
+        assert!(subject.is_none() && basis.is_none() && until.is_none());
     }
 
     #[test]

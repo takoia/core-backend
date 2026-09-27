@@ -138,7 +138,8 @@ pub async fn feedback(
         .memory
         .record_feedback(
             &crate::memory::MemoryScope::owner(&agent_id),
-            Some(&me.id),
+            // The correcting user authored it; they are not its data subject.
+            None,
             &context.chars().take(400).collect::<String>(),
             &body.predicted,
             &body.corrected,

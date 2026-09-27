@@ -1207,13 +1207,39 @@ async fn memories_carry_provenance_and_can_be_erased_by_subject_or_id() {
     .await;
     let agent = v["id"].as_str().unwrap().to_string();
 
-    // A manual memory records who added it, on what basis.
+    // A manual memory records whose data it is and on what basis; a subject
+    // without a basis, an unknown basis, or a malformed deadline are 400s.
+    for (body, code) in [
+        (
+            json!({ "content": "x", "subject": "client-x" }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({ "content": "x", "subject": "client-x", "legal_basis": "vibes" }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({ "content": "x", "retain_until": "1 year" }),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let (s, _) = call(
+            &app,
+            Method::POST,
+            &format!("/api/agents/{agent}/memory"),
+            Some(&admin),
+            Some(body),
+            &[],
+        )
+        .await;
+        assert_eq!(s, code);
+    }
     let (s, _) = call(
         &app,
         Method::POST,
         &format!("/api/agents/{agent}/memory"),
         Some(&admin),
-        Some(json!({ "content": "client prefers French", "key": "preference" })),
+        Some(json!({ "content": "client prefers French", "key": "preference", "subject": "client-x", "legal_basis": "consent" })),
         &[],
     )
     .await;
@@ -1252,7 +1278,8 @@ async fn memories_carry_provenance_and_can_be_erased_by_subject_or_id() {
     let owner_rows = v["memories"].as_array().unwrap();
     assert_eq!(owner_rows.len(), 1);
     assert_eq!(owner_rows[0]["source"], "manual");
-    assert_eq!(owner_rows[0]["subject"], admin_id);
+    assert_eq!(owner_rows[0]["subject"], "client-x");
+    let _ = admin_id;
     assert_eq!(owner_rows[0]["legal_basis"], "consent");
     let (n,): (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM memories WHERE agent_id = ? AND subject = 'acct-z'")
@@ -1334,7 +1361,9 @@ async fn memories_past_their_retention_are_erased_by_the_sweep() {
             &scope,
             "preference",
             "expired",
-            &crate::memory::Provenance::default().retain_until("2000-01-01T00:00:00.000Z"),
+            &crate::memory::Provenance::default()
+                .retain_until("2000-01-01T00:00:00Z")
+                .unwrap(),
         )
         .await
         .unwrap();
@@ -1343,12 +1372,14 @@ async fn memories_past_their_retention_are_erased_by_the_sweep() {
             &scope,
             "preference",
             "keeps",
-            &crate::memory::Provenance::default().retain_until("2999-01-01T00:00:00.000Z"),
+            &crate::memory::Provenance::default()
+                .retain_until("2999-01-01T00:00:00Z")
+                .unwrap(),
         )
         .await
         .unwrap();
     memory.store(&scope, "preference", "forever").await.unwrap();
-    assert_eq!(memory.expire_retained().await.unwrap(), 1);
+    assert_eq!(memory.expire_retained().await.unwrap().rows, 1);
     let left: Vec<String> = memory
         .list(&scope)
         .await
@@ -1361,17 +1392,27 @@ async fn memories_past_their_retention_are_erased_by_the_sweep() {
 }
 
 #[tokio::test]
-async fn webhook_floods_are_rate_limited_per_event() {
+async fn webhook_floods_are_rate_limited_per_client_and_event() {
     let app = app_with(|c| c.webhook_rate_limit_per_min = 2).await;
+    let attacker = [("x-forwarded-for", "203.0.113.9")];
     for expected in [
         StatusCode::UNAUTHORIZED,
         StatusCode::UNAUTHORIZED,
         StatusCode::TOO_MANY_REQUESTS,
     ] {
-        let (s, _) = raw_post(&app, "/api/webhooks/flood", b"{}", &[]).await;
+        let (s, _) = raw_post(&app, "/api/webhooks/flood", b"{}", &attacker).await;
         assert_eq!(s, expected);
     }
-    // Another event name has its own budget.
-    let (s, _) = raw_post(&app, "/api/webhooks/other", b"{}", &[]).await;
+    // Another client keeps its own budget on the same event: no lock-out.
+    let (s, _) = raw_post(
+        &app,
+        "/api/webhooks/flood",
+        b"{}",
+        &[("x-forwarded-for", "198.51.100.7")],
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    // Another event name has its own budget too.
+    let (s, _) = raw_post(&app, "/api/webhooks/other", b"{}", &attacker).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }

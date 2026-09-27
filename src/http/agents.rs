@@ -595,7 +595,14 @@ pub struct AddMemory {
     pub content: String,
     #[serde(default = "default_mem_key")]
     pub key: String,
-    /// Optional ISO-8601 instant after which the memory is erased automatically.
+    /// Whose data this is (a consumer account, a person's reference); NOT the
+    /// author. Leave empty for the agent's own general knowledge.
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// contract | consent | legitimate_interest — required when `subject` is set.
+    #[serde(default)]
+    pub legal_basis: Option<String>,
+    /// Optional RFC 3339 instant after which the memory is erased automatically.
     #[serde(default)]
     pub retain_until: Option<String>,
 }
@@ -617,16 +624,41 @@ pub async fn add_memory(
     if body.content.trim().is_empty() {
         return Err(AppError::BadRequest("content is required".into()));
     }
-    let mut prov = crate::memory::Provenance::default()
-        .source("manual")
-        .subject(me.id.clone())
-        .basis("consent");
+    let mut prov = crate::memory::Provenance::default().source("manual");
+    let subject = body
+        .subject
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let basis = body
+        .legal_basis
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(b) = basis {
+        if !matches!(b, "contract" | "consent" | "legitimate_interest") {
+            return Err(AppError::BadRequest(
+                "legal_basis must be contract, consent or legitimate_interest".into(),
+            ));
+        }
+    }
+    match (subject, basis) {
+        (Some(s), Some(b)) => prov = prov.subject(s).basis(b),
+        (Some(_), None) => {
+            return Err(AppError::BadRequest(
+                "legal_basis is required when subject is set".into(),
+            ))
+        }
+        _ => {}
+    }
     if let Some(until) = body
         .retain_until
         .as_deref()
         .filter(|s| !s.trim().is_empty())
     {
-        prov = prov.retain_until(until.trim());
+        prov = prov
+            .retain_until(until)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
     }
     state
         .memory
@@ -664,7 +696,14 @@ pub async fn erase_subject(
         .forget_subject(&id, q.subject.trim())
         .await
         .map_err(AppError::Other)?;
-    Ok(Json(json!({ "ok": true, "erased": erased })))
+    // `complete` is false when ICM copies could not be removed: the caller must
+    // know an erasure is partial rather than trust a 200.
+    Ok(Json(json!({
+        "ok": true,
+        "erased": erased.rows,
+        "icm_failed": erased.icm_failed,
+        "complete": erased.icm_failed == 0,
+    })))
 }
 
 /// `DELETE /api/agents/:id/memories/:memory_id` — erase one memory (owner).
@@ -674,15 +713,19 @@ pub async fn erase_memory(
     Path((id, memory_id)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
     crate::http::users::require_agent_role(&state, &id, &me, "owner").await?;
-    let erased = state
+    let Some(erased) = state
         .memory
         .forget_one(&id, &memory_id)
         .await
-        .map_err(AppError::Other)?;
-    if !erased {
+        .map_err(AppError::Other)?
+    else {
         return Err(AppError::NotFound("memory not found".into()));
-    }
-    Ok(Json(json!({ "ok": true })))
+    };
+    Ok(Json(json!({
+        "ok": true,
+        "icm_failed": erased.icm_failed,
+        "complete": erased.icm_failed == 0,
+    })))
 }
 
 /// `GET /api/agents/:id/memories` — the agent's accumulated expertise.
