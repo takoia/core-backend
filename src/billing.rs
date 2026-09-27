@@ -58,7 +58,7 @@ pub async fn balance(db: &Db, account_id: &str) -> Result<Balance> {
     .bind(account_id)
     .fetch_optional(db)
     .await?;
-    let (balance_usd, max_invoke_usd) = row.unwrap_or((0.0, 5.0));
+    let (balance_usd, max_invoke_usd) = row.unwrap_or((0.0, DEFAULT_MAX_INVOKE_USD));
     let (held_usd,): (f64,) = sqlx::query_as(
         "SELECT COALESCE(SUM(amount_usd), 0.0) FROM credit_hold WHERE account_id = ?",
     )
@@ -73,46 +73,160 @@ pub async fn balance(db: &Db, account_id: &str) -> Result<Balance> {
     })
 }
 
-/// Reserve `amount` for `job_id` if the account's available credit covers it.
-/// One transaction: SQLite serialises writers, so two concurrent invokes cannot
-/// both pass the check on the same credit. Returns the hold id, or `None` when
-/// credit is insufficient. A zero amount always succeeds and still records a
-/// hold so the request counts towards the rate limit.
-pub async fn place_hold(
-    db: &Db,
-    key: &ConsumerKey,
-    amount: f64,
-    job_id: &str,
-) -> Result<Option<String>> {
+/// What admission needs to know about the call.
+pub struct AdmissionRequest<'a> {
+    pub key: &'a ConsumerKey,
+    pub job_id: &'a str,
+    pub price_per_1k: f64,
+    pub max_output_tokens: u32,
+    /// Steps that may produce billable output (loop steps, web search, nested
+    /// call_agent runs).
+    pub steps: u32,
+    /// The publisher calling their own agent: nothing is reserved, the call
+    /// still counts towards the key's rate limit.
+    pub self_invoke: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Admission {
+    Held { hold_id: String, amount_usd: f64 },
+    InsufficientCredit { needed_usd: f64, available_usd: f64 },
+    RateLimited { per_min: i64 },
+}
+
+/// Admit or refuse one call, atomically: rate limit, then credit. One
+/// transaction, so concurrent calls on the same key or account cannot all pass
+/// on the same headroom. Refusals are recorded as zero-delta `refused` ledger
+/// rows so they count towards the rate limit too — a key without credit cannot
+/// hammer the endpoint for free.
+pub async fn admit(db: &Db, req: AdmissionRequest<'_>) -> Result<Admission> {
+    let key = req.key;
     let mut tx = db.begin().await?;
-    let row: Option<(f64,)> =
-        sqlx::query_as("SELECT balance_usd FROM account_credit WHERE account_id = ?")
-            .bind(&key.account_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let balance = row.map(|r| r.0).unwrap_or(0.0);
+
+    let (recent,): (i64,) = sqlx::query_as(
+        "SELECT
+           (SELECT COUNT(*) FROM credit_hold WHERE api_key_id = ?1
+              AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds'))
+         + (SELECT COUNT(*) FROM credit_ledger WHERE api_key_id = ?1
+              AND reason IN ('invoke', 'refused')
+              AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds'))",
+    )
+    .bind(&key.api_key_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !within_rate_limit(recent, key.rate_limit_per_min) {
+        record_refusal(&mut tx, key, req.job_id).await?;
+        tx.commit().await?;
+        return Ok(Admission::RateLimited {
+            per_min: key.rate_limit_per_min,
+        });
+    }
+
+    let credit: Option<(f64, f64)> = sqlx::query_as(
+        "SELECT balance_usd, max_invoke_usd FROM account_credit WHERE account_id = ?",
+    )
+    .bind(&key.account_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (balance, max_invoke) = credit.unwrap_or((0.0, DEFAULT_MAX_INVOKE_USD));
     let (held,): (f64,) = sqlx::query_as(
         "SELECT COALESCE(SUM(amount_usd), 0.0) FROM credit_hold WHERE account_id = ?",
     )
     .bind(&key.account_id)
     .fetch_one(&mut *tx)
     .await?;
-    if amount > 0.0 && balance - held < amount {
-        return Ok(None); // dropping tx rolls back
+    let amount = if req.self_invoke {
+        0.0
+    } else {
+        hold_amount(
+            req.price_per_1k,
+            req.max_output_tokens,
+            req.steps,
+            max_invoke,
+        )
+    };
+    let available = balance - held;
+    if amount > 0.0 && available < amount {
+        record_refusal(&mut tx, key, req.job_id).await?;
+        tx.commit().await?;
+        return Ok(Admission::InsufficientCredit {
+            needed_usd: amount,
+            available_usd: available,
+        });
     }
-    let id = Uuid::new_v4().to_string();
+
+    let hold_id = Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO credit_hold (id, account_id, api_key_id, amount_usd, job_id) VALUES (?, ?, ?, ?, ?)",
     )
-    .bind(&id)
+    .bind(&hold_id)
     .bind(&key.account_id)
     .bind(&key.api_key_id)
     .bind(amount)
-    .bind(job_id)
+    .bind(req.job_id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(Some(id))
+    Ok(Admission::Held {
+        hold_id,
+        amount_usd: amount,
+    })
+}
+
+/// Default per-invoke ceiling, also the schema default of account_credit.
+const DEFAULT_MAX_INVOKE_USD: f64 = 5.0;
+
+async fn record_refusal(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    key: &ConsumerKey,
+    job_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO credit_ledger (id, account_id, api_key_id, delta_usd, reason, job_id)
+         VALUES (?, ?, ?, 0.0, 'refused', ?)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&key.account_id)
+    .bind(&key.api_key_id)
+    .bind(job_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// A reservation that releases itself unless it is consumed. Covers every
+/// early `?` return and request cancellation between admission and settlement:
+/// on drop with the hold still armed, the release is spawned on the runtime.
+pub struct HoldGuard {
+    db: Db,
+    hold_id: Option<String>,
+}
+
+impl HoldGuard {
+    pub fn new(db: Db, hold_id: String) -> Self {
+        Self {
+            db,
+            hold_id: Some(hold_id),
+        }
+    }
+
+    /// Hand the hold over to settlement (which deletes it) and disarm the guard.
+    pub fn take(mut self) -> String {
+        self.hold_id.take().expect("hold taken twice")
+    }
+}
+
+impl Drop for HoldGuard {
+    fn drop(&mut self) {
+        if let Some(hold) = self.hold_id.take() {
+            let db = self.db.clone();
+            tokio::spawn(async move {
+                if let Err(e) = release_hold(&db, &hold).await {
+                    tracing::warn!(error = %e, hold_id = %hold, "failed to release credit hold");
+                }
+            });
+        }
+    }
 }
 
 /// Drop a reservation without charging (the run failed or was refused).
@@ -229,22 +343,6 @@ pub async fn topup(db: &Db, account_id: &str, delta_usd: f64, reason: &str) -> R
     balance(db, account_id).await
 }
 
-/// Calls attributed to a key in the last minute: holds in flight plus settled
-/// invokes. Rejected requests create neither and so do not count.
-pub async fn recent_calls(db: &Db, api_key_id: &str) -> Result<i64> {
-    let (n,): (i64,) = sqlx::query_as(
-        "SELECT
-           (SELECT COUNT(*) FROM credit_hold WHERE api_key_id = ?1
-              AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds'))
-         + (SELECT COUNT(*) FROM credit_ledger WHERE api_key_id = ?1 AND reason = 'invoke'
-              AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds'))",
-    )
-    .bind(api_key_id)
-    .fetch_one(db)
-    .await?;
-    Ok(n)
-}
-
 /// Delete holds older than `max_age_secs`: the only safety net when the
 /// process died mid-invoke. `0` means every hold (the startup case: none can
 /// belong to a live request) — an explicit rule rather than a `<` comparison
@@ -313,25 +411,39 @@ mod tests {
         }
     }
 
+    fn req<'a>(k: &'a ConsumerKey, job: &'a str) -> AdmissionRequest<'a> {
+        AdmissionRequest {
+            key: k,
+            job_id: job,
+            // 5 steps x 1000 tokens x 0.2 USD/1k = 1 USD per call.
+            price_per_1k: 0.2,
+            max_output_tokens: 1000,
+            steps: 5,
+            self_invoke: false,
+        }
+    }
+
     #[tokio::test]
-    async fn hold_blocks_when_credit_is_short_and_settle_keeps_the_invariant() {
+    async fn admission_blocks_when_credit_is_short_and_settle_keeps_the_invariant() {
         let db = db().await;
         let k = key();
-        assert!(
-            place_hold(&db, &k, 1.0, "j0").await.unwrap().is_none(),
-            "no credit yet"
-        );
+        assert!(matches!(
+            admit(&db, req(&k, "j0")).await.unwrap(),
+            Admission::InsufficientCredit { needed_usd, available_usd }
+                if (needed_usd - 1.0).abs() < 1e-9 && available_usd == 0.0
+        ));
         topup(&db, "a", 2.5, "topup").await.unwrap();
-        let h1 = place_hold(&db, &k, 1.0, "j1")
-            .await
-            .unwrap()
-            .expect("first hold fits");
-        let h2 = place_hold(&db, &k, 1.0, "j2")
-            .await
-            .unwrap()
-            .expect("second hold fits");
+        let Admission::Held { hold_id: h1, .. } = admit(&db, req(&k, "j1")).await.unwrap() else {
+            panic!("first hold fits")
+        };
+        let Admission::Held { hold_id: h2, .. } = admit(&db, req(&k, "j2")).await.unwrap() else {
+            panic!("second hold fits")
+        };
         assert!(
-            place_hold(&db, &k, 1.0, "j3").await.unwrap().is_none(),
+            matches!(
+                admit(&db, req(&k, "j3")).await.unwrap(),
+                Admission::InsufficientCredit { .. }
+            ),
             "2.5 - 2.0 held < 1.0"
         );
         let b = balance(&db, "a").await.unwrap();
@@ -371,7 +483,54 @@ mod tests {
         .await
         .unwrap();
         assert!((ledger + usage).abs() < 1e-9, "ledger and usage agree");
-        assert_eq!(recent_calls(&db, "k1").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn refusals_count_towards_the_rate_limit() {
+        let db = db().await;
+        let mut k = key();
+        k.rate_limit_per_min = 2;
+        // Two refusals for lack of credit, then the key is rate limited even
+        // after a top-up: a broke key cannot hammer the endpoint for free.
+        assert!(matches!(
+            admit(&db, req(&k, "j1")).await.unwrap(),
+            Admission::InsufficientCredit { .. }
+        ));
+        assert!(matches!(
+            admit(&db, req(&k, "j2")).await.unwrap(),
+            Admission::InsufficientCredit { .. }
+        ));
+        topup(&db, "a", 100.0, "topup").await.unwrap();
+        assert!(matches!(
+            admit(&db, req(&k, "j3")).await.unwrap(),
+            Admission::RateLimited { per_min: 2 }
+        ));
+        // Self-invokes reserve nothing but are admitted (and counted).
+        let mut free = key();
+        free.api_key_id = "k2".into();
+        let mut r = req(&free, "j4");
+        r.self_invoke = true;
+        assert!(matches!(
+            admit(&db, r).await.unwrap(),
+            Admission::Held { amount_usd, .. } if amount_usd == 0.0
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropping_an_armed_guard_releases_the_hold() {
+        let db = db().await;
+        let k = key();
+        topup(&db, "a", 10.0, "topup").await.unwrap();
+        let Admission::Held { hold_id, .. } = admit(&db, req(&k, "j1")).await.unwrap() else {
+            panic!("admitted")
+        };
+        {
+            let _guard = HoldGuard::new(db.clone(), hold_id);
+            assert!((balance(&db, "a").await.unwrap().held_usd - 1.0).abs() < 1e-9);
+        }
+        // The release is spawned; give the runtime a turn.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(balance(&db, "a").await.unwrap().held_usd, 0.0);
     }
 
     #[tokio::test]
@@ -379,7 +538,10 @@ mod tests {
         let db = db().await;
         let k = key();
         topup(&db, "a", 10.0, "topup").await.unwrap();
-        place_hold(&db, &k, 1.0, "j1").await.unwrap().unwrap();
+        assert!(matches!(
+            admit(&db, req(&k, "j1")).await.unwrap(),
+            Admission::Held { .. }
+        ));
         assert_eq!(
             sweep_stale_holds(&db, 3600).await.unwrap(),
             0,

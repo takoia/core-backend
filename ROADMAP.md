@@ -38,6 +38,19 @@ outside demo mode.
 
 What a first paying customer would hit in the first hour.
 
+- **Output-token cap on the claude-cli transport.** `INVOKE_MAX_OUTPUT_TOKENS`
+  is honoured by OpenAI-compatible providers only; `claude -p` has no such
+  flag, so the credit reservation is an estimate and a run can overshoot it
+  (charged exactly, balance goes negative, next call blocked). Options: cap by
+  killing the child once its streamed output exceeds the budget, or route
+  consumer runs to a provider that honours `max_tokens`.
+- **Verify `icm consolidate --topic` matching.** `icm recall --topic` is a
+  prefix match (verified, 0.10.63); recall now filters on the exact topic and
+  fork topics live under `takoia/fork/`, but consolidation of an owner topic
+  whose slug id prefixes another (`invoice-bot` / `invoice-bot-v2`) may still
+  fold the sibling in. Created agents use UUID ids; imported TOML ids are
+  slugs.
+
 - **Payment provider adapter** writing `topup` rows (Stripe checkout →
   webhook → `billing::topup`), and a consumer-facing way to buy credit.
 - **Real consumer accounts.** All users are created in the single default

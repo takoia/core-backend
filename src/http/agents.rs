@@ -367,12 +367,18 @@ pub async fn publish(
                 "price_per_1k_output_tokens must be at least {floor} on this marketplace"
             )));
         }
-        if let Some(share) = body.revenue_share {
-            if !(0.0..=1.0).contains(&share) {
-                return Err(AppError::BadRequest(
-                    "revenue_share must be between 0 and 1".into(),
-                ));
-            }
+        let share = match body.revenue_share {
+            Some(s) => s,
+            None => sqlx::query_scalar::<_, f64>("SELECT revenue_share FROM agents WHERE id = ?")
+                .bind(&id)
+                .fetch_optional(&state.db)
+                .await?
+                .unwrap_or(0.7),
+        };
+        if !(0.0..=1.0).contains(&share) {
+            return Err(AppError::BadRequest(
+                "revenue_share must be between 0 and 1".into(),
+            ));
         }
     }
     sqlx::query(

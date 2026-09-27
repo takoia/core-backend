@@ -136,6 +136,7 @@ pub async fn gather(run: ToolRun<'_>) -> Result<Gathered> {
                 match run_subagent(
                     run.state,
                     run.account_id,
+                    &run.job.id,
                     target,
                     run.objective_prompt,
                     depth + 1,
@@ -251,6 +252,7 @@ async fn job_chain_depth(state: &AppState, job_id: &str) -> i64 {
 async fn run_subagent(
     state: &AppState,
     caller_account_id: &str,
+    parent_job_id: &str,
     target_agent_id: &str,
     subtask: &str,
     depth: i64,
@@ -292,12 +294,14 @@ async fn run_subagent(
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "INSERT INTO jobs (id, objective_id, agent_id, status, synchronous, chain_depth) VALUES (?, ?, ?, 'running', 1, ?)",
+        "INSERT INTO jobs (id, objective_id, agent_id, status, synchronous, chain_depth, parent_job_id)
+         VALUES (?, ?, ?, 'running', 1, ?, ?)",
     )
     .bind(&sub_job_id)
     .bind(&objective_id)
     .bind(target_agent_id)
     .bind(depth)
+    .bind(parent_job_id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

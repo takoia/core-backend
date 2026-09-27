@@ -49,7 +49,12 @@ pub enum MemoryScope {
 }
 
 const TOPIC_PREFIX: &str = "takoia/agent/";
-const CONSUMER_SEGMENT: &str = "/consumer/";
+/// Forks live under a DIFFERENT root on purpose: `icm recall --topic` matches
+/// topics by prefix (verified against icm 0.10.63), so a fork named
+/// `takoia/agent/{id}/...` would be recalled by the owner's runs and by every
+/// other consumer's. `takoia/fork/{agent}/{account}` shares no prefix with
+/// `takoia/agent/{agent}`.
+const FORK_PREFIX: &str = "takoia/fork/";
 
 impl MemoryScope {
     pub fn owner(agent_id: &str) -> Self {
@@ -88,7 +93,7 @@ impl MemoryScope {
             MemoryScope::Consumer {
                 agent_id,
                 account_id,
-            } => format!("{TOPIC_PREFIX}{agent_id}{CONSUMER_SEGMENT}{account_id}"),
+            } => format!("{FORK_PREFIX}{agent_id}/{account_id}"),
         }
     }
 
@@ -96,22 +101,13 @@ impl MemoryScope {
     /// one of the two shapes (a bare `strip_prefix` would read a consumer topic
     /// as an owner topic with a bogus agent id).
     pub fn parse_topic(topic: &str) -> Option<MemoryScope> {
-        let rest = topic.strip_prefix(TOPIC_PREFIX)?;
-        if rest.is_empty() {
-            return None;
+        if let Some(agent) = topic.strip_prefix(TOPIC_PREFIX) {
+            return (!agent.is_empty() && !agent.contains('/')).then(|| MemoryScope::owner(agent));
         }
-        match rest.split_once(CONSUMER_SEGMENT) {
-            None if !rest.contains('/') => Some(MemoryScope::owner(rest)),
-            Some((agent, account))
-                if !agent.is_empty()
-                    && !account.is_empty()
-                    && !agent.contains('/')
-                    && !account.contains('/') =>
-            {
-                Some(MemoryScope::consumer(agent, account))
-            }
-            _ => None,
-        }
+        let rest = topic.strip_prefix(FORK_PREFIX)?;
+        let (agent, account) = rest.split_once('/')?;
+        (!agent.is_empty() && !account.is_empty() && !account.contains('/'))
+            .then(|| MemoryScope::consumer(agent, account))
     }
 }
 
@@ -143,32 +139,32 @@ impl Memory {
         query: &str,
         limit: usize,
     ) -> String {
-        let owner: String = self
-            .recall(&MemoryScope::owner(agent_id), query, limit)
-            .await
-            .chars()
-            .take(OWNER_RECALL_CHARS)
-            .collect();
+        let owner_scope = MemoryScope::owner(agent_id);
         let Some(account) = consumer_account else {
-            return owner;
+            return self
+                .recall(&owner_scope, query, limit)
+                .await
+                .chars()
+                .take(OWNER_RECALL_CHARS)
+                .collect();
         };
-        let own: String = self
-            .recall(&MemoryScope::consumer(agent_id, account), query, limit)
-            .await
-            .chars()
-            .take(CONSUMER_RECALL_CHARS)
-            .collect();
+        // Independent lookups (each up to three `icm` spawns): run them together.
+        let fork_scope = MemoryScope::consumer(agent_id, account);
+        let (owner, own) = tokio::join!(
+            self.recall(&owner_scope, query, limit),
+            self.recall(&fork_scope, query, limit)
+        );
+        let owner: String = owner.chars().take(OWNER_RECALL_CHARS).collect();
+        let own: String = own.chars().take(CONSUMER_RECALL_CHARS).collect();
         compose_recall(&owner, &own)
     }
 
     /// Recall expertise relevant to `query` for prompt injection at the Analyse
     /// step. Tries ICM first (semantic), falls back to recent DB memories.
     pub async fn recall(&self, scope: &MemoryScope, query: &str, limit: usize) -> String {
-        // 1) Query-scoped keyword recall.
+        // 1) Query-scoped keyword recall (exact topic, see `recall_icm`).
         if let Some(text) = self.recall_icm(scope, query, limit).await {
-            if Self::toon_has_entries(&text) {
-                return text;
-            }
+            return text;
         }
         // 2) Keyword recall frequently misses (memories carry generic step-name
         //    keywords, not content terms), in which case ICM returns an empty
@@ -231,28 +227,33 @@ impl Memory {
         Some(text.chars().take(4000).collect())
     }
 
+    /// Query-scoped recall, filtered to EXACTLY this scope's topic. `icm recall
+    /// --topic` is a prefix filter, so without this a slug agent id would pull
+    /// in its longer siblings (`invoice-bot` ⊂ `invoice-bot-v2`). Returns
+    /// `None` when nothing (of this topic) matched.
     async fn recall_icm(&self, scope: &MemoryScope, query: &str, limit: usize) -> Option<String> {
+        let topic = scope.topic();
         let output = Command::new("icm")
             .arg("recall")
             .arg(query)
             .arg("--topic")
-            .arg(scope.topic())
+            .arg(&topic)
             .arg("--db")
             .arg(&self.icm_db_path)
             .arg("--limit")
             .arg(limit.to_string())
             .arg("--format")
-            .arg("toon")
+            .arg("json")
             // Keyword search, matching how we store (no embedding model download).
             .arg("--no-embeddings")
             .output()
             .await
             .ok()?;
         if !output.status.success() {
-            tracing::warn!(topic = %scope.topic(), "icm recall failed, falling back to db memory");
+            tracing::warn!(%topic, "icm recall failed, falling back to db memory");
             return None;
         }
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        render_recall(&String::from_utf8_lossy(&output.stdout), &topic)
     }
 
     async fn recall_db(&self, scope: &MemoryScope, limit: usize) -> Result<String> {
@@ -731,6 +732,29 @@ const OWNER_CONSOLIDATE_MIN: i64 = 6;
 /// agent has one fork per paying account.
 const CONSUMER_CONSOLIDATE_MIN: i64 = 20;
 
+/// Turn `icm recall --format json` output into prompt text, keeping only rows
+/// whose `topic` is exactly `wanted` (most important first, as ICM orders
+/// them). `None` when no row of that topic came back or the JSON is not a list.
+fn render_recall(json: &str, wanted: &str) -> Option<String> {
+    let rows: Vec<serde_json::Value> = serde_json::from_str(json.trim()).ok()?;
+    let lines: Vec<String> = rows
+        .iter()
+        .filter(|r| r.get("topic").and_then(|t| t.as_str()) == Some(wanted))
+        .filter_map(|r| {
+            let summary = r.get("summary").and_then(|s| s.as_str())?.trim();
+            if summary.is_empty() {
+                return None;
+            }
+            let importance = r
+                .get("importance")
+                .and_then(|i| i.as_str())
+                .unwrap_or("medium");
+            Some(format!("- [{importance}] {summary}"))
+        })
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
 /// Join the owner's recalled memory and a consumer's own fork for the prompt.
 fn compose_recall(owner: &str, own: &str) -> String {
     match (owner.trim().is_empty(), own.trim().is_empty()) {
@@ -780,7 +804,11 @@ mod tests {
         assert_eq!(MemoryScope::parse_topic(&o.topic()), Some(o.clone()));
         assert_eq!(o.consumer_account(), None);
         let c = MemoryScope::consumer("agent-1", "acct-b");
-        assert_eq!(c.topic(), "takoia/agent/agent-1/consumer/acct-b");
+        assert_eq!(c.topic(), "takoia/fork/agent-1/acct-b");
+        assert!(
+            !c.topic().starts_with(&o.topic()),
+            "a fork topic must never extend the owner topic (icm recall is a prefix match)"
+        );
         assert_eq!(MemoryScope::parse_topic(&c.topic()), Some(c.clone()));
         assert_eq!(c.consumer_account(), Some("acct-b"));
         assert_eq!(c.agent_id(), "agent-1");
@@ -791,10 +819,11 @@ mod tests {
         for t in [
             "takoia/agent/",
             "other/agent/x",
-            "takoia/agent/a/consumer/",
-            "takoia/agent//consumer/b",
+            "takoia/fork/a/",
+            "takoia/fork//b",
+            "takoia/fork/a",
             "takoia/agent/a/b",
-            "takoia/agent/a/consumer/b/c",
+            "takoia/fork/a/b/c",
             "",
         ] {
             assert!(
@@ -802,6 +831,27 @@ mod tests {
                 "{t:?} must not parse"
             );
         }
+    }
+
+    #[test]
+    fn recall_rendering_keeps_only_the_exact_topic() {
+        let json = r#"[
+          {"topic":"takoia/agent/a1","summary":"owner fact","importance":"high"},
+          {"topic":"takoia/agent/a10","summary":"sibling fact","importance":"medium"},
+          {"topic":"takoia/fork/a1/c1","summary":"consumer fact","importance":"low"},
+          {"topic":"takoia/agent/a1","summary":"   ","importance":"low"}
+        ]"#;
+        assert_eq!(
+            render_recall(json, "takoia/agent/a1").as_deref(),
+            Some("- [high] owner fact")
+        );
+        assert_eq!(
+            render_recall(json, "takoia/fork/a1/c1").as_deref(),
+            Some("- [low] consumer fact")
+        );
+        assert!(render_recall(json, "takoia/agent/a2").is_none());
+        assert!(render_recall("memories[0]{id}:", "takoia/agent/a1").is_none());
+        assert!(render_recall("[]", "takoia/agent/a1").is_none());
     }
 
     #[test]

@@ -65,13 +65,11 @@ pub enum MemoryMode {
 }
 
 impl MemoryMode {
-    /// Scope that receives this run's writes, if any.
-    fn write_scope(&self, agent_id: &str) -> Option<MemoryScope> {
+    /// Scope that receives this run's writes.
+    fn write_scope(&self, agent_id: &str) -> MemoryScope {
         match self {
-            MemoryMode::Owner => Some(MemoryScope::owner(agent_id)),
-            MemoryMode::Consumer { account_id } => {
-                Some(MemoryScope::consumer(agent_id, account_id))
-            }
+            MemoryMode::Owner => MemoryScope::owner(agent_id),
+            MemoryMode::Consumer { account_id } => MemoryScope::consumer(agent_id, account_id),
         }
     }
 
@@ -269,7 +267,8 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, mode: &MemoryMode) -> R
     // Persist what was learned so the agent gets more expert over time.
     // Read-only (marketplace) runs never write to the publisher's memory.
     // Skipped on a resumed-after-completion run so the summary is stored once.
-    if let (Some(scope), false) = (mode.write_scope(&job.agent_id), restitution_was_done) {
+    if !restitution_was_done {
+        let scope = mode.write_scope(&job.agent_id);
         let summary = report.chars().take(600).collect::<String>();
         if let Err(e) = state.memory.store(&scope, "run-summary", &summary).await {
             tracing::warn!(error = %e, "failed to persist memory");
@@ -381,8 +380,8 @@ struct RunCtx<'a> {
     /// One line describing the agent's current mood/energy, injected so its tone
     /// reflects how it feels right now (its "inner life").
     mood_flavor: String,
-    /// Where this run's step memories go; `None` = recall only, write nothing.
-    write_scope: Option<MemoryScope>,
+    /// Where this run's step memories go (owner memory or the consumer's fork).
+    write_scope: MemoryScope,
     /// Whether the most recent step fell back to the canned offline provider
     /// (its generic demo content must not be pushed as a real Discord alert).
     last_step_canned: bool,
@@ -565,7 +564,8 @@ impl<'a> RunCtx<'a> {
         // interaction are stored, at the end of the run. Skipped for read-only
         // (marketplace) runs to protect the publisher, and when the canned demo
         // fallback was used (its generic content would poison recall).
-        if let (Some(scope), false, true) = (&self.write_scope, used_canned, self.remember(step)) {
+        if !used_canned && self.remember(step) {
+            let scope = &self.write_scope;
             let trimmed: String = completion.content.chars().take(500).collect();
             if let Err(e) = self
                 .state

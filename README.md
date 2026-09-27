@@ -396,7 +396,11 @@ set at key creation). The run settles in one transaction: usage row, ledger
 row, balance, reservation released. `GET /api/credit` shows your balance and
 ledger; an admin tops an account up with `POST /api/accounts/:id/credit
 {"delta_usd": 10}`. The ledger is the source of truth — a payment provider, when
-wired, will only write `topup` rows.
+wired, will only write `topup` rows. The reservation is an estimate: the
+`claude -p` transport has no output-token cap, so a run can cost more than was
+reserved; the exact amount is always charged and a negative balance blocks the
+next call until the account is topped up. Refused calls (402, 429) count
+towards the key's rate limit.
 
 The agent's memory is **forked per consumer**: your calls recall the
 publisher's curated expertise plus what the agent has learnt about you, and

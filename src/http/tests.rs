@@ -1018,7 +1018,7 @@ async fn consumer_memory_is_a_fork_the_consumer_can_read_and_erase() {
     let (s, _) = call(
         &app,
         Method::POST,
-        &format!("/api/memory/purge?topic=takoia/agent/{agent}/consumer/acct-c"),
+        &format!("/api/memory/purge?topic=takoia/fork/{agent}/acct-c"),
         Some(&admin),
         None,
         &[],
