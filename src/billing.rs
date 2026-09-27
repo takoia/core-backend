@@ -246,14 +246,20 @@ pub async fn recent_calls(db: &Db, api_key_id: &str) -> Result<i64> {
 }
 
 /// Delete holds older than `max_age_secs`: the only safety net when the
-/// process died mid-invoke (age 0 at startup, the sync-job bound afterwards).
+/// process died mid-invoke. `0` means every hold (the startup case: none can
+/// belong to a live request) — an explicit rule rather than a `<` comparison
+/// against "now" that a same-millisecond row would slip through.
 pub async fn sweep_stale_holds(db: &Db, max_age_secs: i64) -> Result<u64> {
-    let res = sqlx::query(
-        "DELETE FROM credit_hold WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now', ?)",
-    )
-    .bind(format!("-{} seconds", max_age_secs.max(0)))
-    .execute(db)
-    .await?;
+    let res = if max_age_secs <= 0 {
+        sqlx::query("DELETE FROM credit_hold").execute(db).await?
+    } else {
+        sqlx::query(
+            "DELETE FROM credit_hold WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now', ?)",
+        )
+        .bind(format!("-{max_age_secs} seconds"))
+        .execute(db)
+        .await?
+    };
     Ok(res.rows_affected())
 }
 
