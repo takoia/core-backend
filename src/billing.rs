@@ -101,7 +101,12 @@ pub enum Admission {
 /// hammer the endpoint for free.
 pub async fn admit(db: &Db, req: AdmissionRequest<'_>) -> Result<Admission> {
     let key = req.key;
-    let mut tx = db.begin().await?;
+    // BEGIN IMMEDIATE: this transaction reads first and writes last. A deferred
+    // transaction that starts as a reader cannot upgrade to a writer once
+    // another connection (the event-log writer, for one) has committed in the
+    // meantime — SQLite answers SQLITE_BUSY_SNAPSHOT at once instead of
+    // waiting. Taking the write lock up front makes it wait on busy_timeout.
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
 
     let (recent,): (i64,) = sqlx::query_as(
         "SELECT
