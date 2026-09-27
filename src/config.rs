@@ -52,6 +52,15 @@ pub struct Config {
     /// searches legitimately take long, and a false positive fails a paying
     /// call after its tokens were spent.
     pub sync_job_max_secs: i64,
+    /// Per-step output token budget applied to marketplace consumer runs
+    /// (`INVOKE_MAX_OUTPUT_TOKENS`, default 4096). It bounds both the model's
+    /// answer (where the provider honours max_tokens) and the credit reserved
+    /// before the run.
+    pub invoke_max_output_tokens: u32,
+    /// Lowest price per 1k output tokens a publisher may set when publishing
+    /// (`MARKETPLACE_MIN_PRICE_PER_1K`, default 0 = free agents allowed; the
+    /// publisher then pays the LLM cost of every consumer call).
+    pub marketplace_min_price_per_1k: f64,
     /// Extra environment variable names passed through to agent subprocesses
     /// (`AGENT_ENV_PASSTHROUGH`, comma-separated), on top of the built-in
     /// proxy and CA variables.
@@ -110,6 +119,16 @@ impl Config {
             .and_then(|v| v.trim().parse::<i64>().ok())
             .filter(|n| *n >= 60)
             .unwrap_or(4 * 3600);
+        let invoke_max_output_tokens = std::env::var("INVOKE_MAX_OUTPUT_TOKENS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|n| *n >= 256)
+            .unwrap_or(4096);
+        let marketplace_min_price_per_1k = std::env::var("MARKETPLACE_MIN_PRICE_PER_1K")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|p| p.is_finite() && *p >= 0.0)
+            .unwrap_or(0.0);
         let agent_env_passthrough: Vec<String> = std::env::var("AGENT_ENV_PASSTHROUGH")
             .ok()
             .map(|v| {
@@ -137,6 +156,8 @@ impl Config {
             demo_mode,
             pricing,
             sync_job_max_secs,
+            invoke_max_output_tokens,
+            marketplace_min_price_per_1k,
             agent_env_passthrough,
         })
     }

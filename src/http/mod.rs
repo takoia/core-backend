@@ -4,6 +4,7 @@
 mod agents;
 mod approvals;
 mod connectors;
+mod credit;
 mod health;
 mod integrations;
 mod jobs;
@@ -164,6 +165,9 @@ pub fn router(state: AppState) -> Router {
             get(marketplace::list_keys).post(marketplace::create_key),
         )
         .route("/keys/:id", delete(marketplace::revoke_key))
+        // Prepaid credit: consumers read their balance, admins top accounts up.
+        .route("/credit", get(credit::get))
+        .route("/accounts/:id/credit", post(credit::topup))
         .route("/v1/agents/:id/invoke", post(marketplace::invoke))
         .route(
             "/v1/agents/:id/memory",

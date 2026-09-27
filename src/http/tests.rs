@@ -44,6 +44,8 @@ async fn app() -> TestApp {
         demo_mode: false,
         pricing: crate::pricing::Pricing::default(),
         sync_job_max_secs: 4 * 3600,
+        invoke_max_output_tokens: 4096,
+        marketplace_min_price_per_1k: 0.0,
         agent_env_passthrough: vec![],
     };
     let state = AppState::new(pool, config);
@@ -1024,4 +1026,155 @@ async fn consumer_memory_is_a_fork_the_consumer_can_read_and_erase() {
     .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(memory.list(&fork).await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn invoke_requires_credit_and_respects_the_key_rate_limit() {
+    let app = app().await;
+    let admin = setup_admin(&app).await;
+    let (agent, _) = published_agent_and_key(&app, &admin).await;
+    let key = foreign_consumer_key(&app).await;
+    let auth = [("authorization", &*format!("Bearer {key}"))];
+
+    // No credit: the call is refused before any token is spent, with a 402.
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        &format!("/api/v1/agents/{agent}/invoke"),
+        None,
+        Some(json!({ "input": "hello" })),
+        &auth,
+    )
+    .await;
+    assert_eq!(s, StatusCode::PAYMENT_REQUIRED, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("insufficient credit"));
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "no job was created");
+
+    // Admin tops the consumer account up; the consumer sees it.
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/accounts/acct-c/credit",
+        Some(&admin),
+        Some(json!({ "delta_usd": 10.0 })),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/accounts/nope/credit",
+        Some(&admin),
+        Some(json!({ "delta_usd": 1.0 })),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (_, bob) = member(&app, &admin, "bob@example.test").await;
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/accounts/acct-c/credit",
+        Some(&bob),
+        Some(json!({ "delta_usd": 1.0 })),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "top-up is admin-only");
+
+    // With credit the run is admitted. There is no LLM in the test process, so
+    // the run fails — and the hold must be released, not leaked.
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        &format!("/api/v1/agents/{agent}/invoke"),
+        None,
+        Some(json!({ "input": "hello" })),
+        &auth,
+    )
+    .await;
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR);
+    let (holds,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM credit_hold")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(holds, 0, "failed run released its hold");
+    let bal = crate::billing::balance(&app.db, "acct-c").await.unwrap();
+    assert!(
+        (bal.balance_usd - 10.0).abs() < 1e-9,
+        "nothing charged for a failed run"
+    );
+
+    // Rate limit: cap the key at 1/min and pre-load one settled call.
+    sqlx::query("UPDATE api_keys SET rate_limit_per_min = 1 WHERE id = 'k-c'")
+        .execute(&app.db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO credit_ledger (id, account_id, api_key_id, delta_usd, reason) VALUES ('l1', 'acct-c', 'k-c', 0, 'invoke')").execute(&app.db).await.unwrap();
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        &format!("/api/v1/agents/{agent}/invoke"),
+        None,
+        Some(json!({ "input": "hello" })),
+        &auth,
+    )
+    .await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "{v}");
+}
+
+#[tokio::test]
+async fn publish_enforces_the_price_floor_when_configured() {
+    let app = app().await;
+    let admin = setup_admin(&app).await;
+    let (_, v) = call(
+        &app,
+        Method::POST,
+        "/api/agents",
+        Some(&admin),
+        Some(json!({ "name": "Cheap" })),
+        &[],
+    )
+    .await;
+    let agent = v["id"].as_str().unwrap().to_string();
+    // Floor is 0 in tests: free publishing is allowed, negative prices are not.
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        &format!("/api/agents/{agent}/publish"),
+        Some(&admin),
+        Some(json!({ "visibility": "public", "price_per_1k_output_tokens": -1.0 })),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        &format!("/api/agents/{agent}/publish"),
+        Some(&admin),
+        Some(json!({ "visibility": "public", "revenue_share": 1.5 })),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        &format!("/api/agents/{agent}/publish"),
+        Some(&admin),
+        Some(json!({ "visibility": "public", "price_per_1k_output_tokens": 0.0 })),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    // The consumer's balance view works for any member.
+    let (s, v) = call(&app, Method::GET, "/api/credit", Some(&admin), None, &[]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["balance"]["balance_usd"], 0.0);
 }

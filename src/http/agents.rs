@@ -343,6 +343,38 @@ pub async fn publish(
             ))
         }
     };
+    if visibility == "public" {
+        // The effective price after this update must clear the floor, so a
+        // publisher cannot keep a free agent live once a floor is configured.
+        let floor = state.config.marketplace_min_price_per_1k;
+        let effective = match body.price_per_1k_output_tokens {
+            Some(p) => p,
+            None => sqlx::query_scalar::<_, f64>(
+                "SELECT price_per_1k_output_tokens FROM agents WHERE id = ?",
+            )
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await?
+            .unwrap_or(0.0),
+        };
+        if !effective.is_finite() || effective < 0.0 {
+            return Err(AppError::BadRequest(
+                "price must be a non-negative number".into(),
+            ));
+        }
+        if effective < floor {
+            return Err(AppError::BadRequest(format!(
+                "price_per_1k_output_tokens must be at least {floor} on this marketplace"
+            )));
+        }
+        if let Some(share) = body.revenue_share {
+            if !(0.0..=1.0).contains(&share) {
+                return Err(AppError::BadRequest(
+                    "revenue_share must be between 0 and 1".into(),
+                ));
+            }
+        }
+    }
     sqlx::query(
         r#"UPDATE agents SET
              visibility = ?,

@@ -151,6 +151,10 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, mode: &MemoryMode) -> R
         write_scope: mode.write_scope(&job.agent_id),
         last_step_canned: false,
         any_step_canned: false,
+        max_tokens: match mode {
+            MemoryMode::Consumer { .. } => Some(state.config.invoke_max_output_tokens),
+            MemoryMode::Owner => None,
+        },
     };
 
     // ── Analyse ────────────────────────────────────────────────────────────
@@ -384,6 +388,8 @@ struct RunCtx<'a> {
     last_step_canned: bool,
     /// Whether ANY step of this run used the canned provider (demo mode only).
     any_step_canned: bool,
+    /// Per-step output budget (marketplace consumer runs); None = provider default.
+    max_tokens: Option<u32>,
 }
 
 impl<'a> RunCtx<'a> {
@@ -511,7 +517,8 @@ impl<'a> RunCtx<'a> {
             ));
         }
         messages.push(Message::user(input.to_string()));
-        let req = CompletionRequest::new(messages);
+        let mut req = CompletionRequest::new(messages);
+        req.max_tokens = self.max_tokens;
 
         // A provider failure fails the step (and the run). Only demo mode
         // substitutes the offline canned provider, and the run is then flagged

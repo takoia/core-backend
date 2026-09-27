@@ -50,6 +50,9 @@ fn hash_key(key: &str) -> String {
 pub struct NewKey {
     #[serde(default)]
     pub name: String,
+    /// Requests per minute allowed on this key (default 60; 0 = unlimited).
+    #[serde(default)]
+    pub rate_limit_per_min: Option<i64>,
 }
 
 /// `POST /api/keys` — create a consumer API key (plaintext shown once).
@@ -60,15 +63,17 @@ pub async fn create_key(
 ) -> AppResult<Json<Value>> {
     let secret = format!("sk_takoia_{}", Uuid::new_v4().simple());
     let prefix = secret.chars().take(16).collect::<String>();
+    let rate = body.rate_limit_per_min.unwrap_or(60).max(0);
     sqlx::query(
-        r#"INSERT INTO api_keys (id, account_id, name, key_hash, key_prefix)
-           VALUES (?, ?, ?, ?, ?)"#,
+        r#"INSERT INTO api_keys (id, account_id, name, key_hash, key_prefix, rate_limit_per_min)
+           VALUES (?, ?, ?, ?, ?, ?)"#,
     )
     .bind(Uuid::new_v4().to_string())
     .bind(&me.account_id)
     .bind(&body.name)
     .bind(hash_key(&secret))
     .bind(&prefix)
+    .bind(rate)
     .execute(&state.db)
     .await?;
     // The plaintext is returned only here, never stored.
@@ -176,8 +181,8 @@ pub struct InvokeInput {
     pub input: String,
 }
 
-/// Authenticate a `Bearer sk_...` key, returning the consumer account id.
-async fn auth_key(state: &AppState, headers: &HeaderMap) -> AppResult<String> {
+/// Authenticate a `Bearer sk_...` key, returning the consumer key record.
+async fn auth_key(state: &AppState, headers: &HeaderMap) -> AppResult<crate::billing::ConsumerKey> {
     let raw = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -187,21 +192,25 @@ async fn auth_key(state: &AppState, headers: &HeaderMap) -> AppResult<String> {
         return Err(AppError::Unauthorized("missing API key".into()));
     }
     let key_hash = hash_key(key);
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT account_id FROM api_keys WHERE key_hash = ? AND revoked = 0")
-            .bind(&key_hash)
-            .fetch_optional(&state.db)
-            .await?;
-    let account = row
-        .map(|(a,)| a)
-        .ok_or_else(|| AppError::Unauthorized("invalid API key".into()))?;
+    let row: Option<(String, String, i64)> = sqlx::query_as(
+        "SELECT id, account_id, rate_limit_per_min FROM api_keys WHERE key_hash = ? AND revoked = 0",
+    )
+    .bind(&key_hash)
+    .fetch_optional(&state.db)
+    .await?;
+    let (api_key_id, account_id, rate_limit_per_min) =
+        row.ok_or_else(|| AppError::Unauthorized("invalid API key".into()))?;
     let _ = sqlx::query(
         "UPDATE api_keys SET last_used_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key_hash = ?",
     )
     .bind(&key_hash)
     .execute(&state.db)
     .await;
-    Ok(account)
+    Ok(crate::billing::ConsumerKey {
+        account_id,
+        api_key_id,
+        rate_limit_per_min,
+    })
 }
 
 /// `POST /api/v1/agents/:id/invoke` — call a published agent over HTTP. Runs the
@@ -230,6 +239,17 @@ pub async fn invoke(
     })))
 }
 
+/// Steps that may produce billable output in one invoke: the four loop steps
+/// plus one web search. Sizes the credit reservation.
+const INVOKE_BILLABLE_STEPS: u32 = 5;
+
+/// Every early return after admission must give the reservation back.
+async fn release_hold_logged(state: &AppState, hold_id: &str) {
+    if let Err(e) = crate::billing::release_hold(&state.db, hold_id).await {
+        tracing::warn!(error = %e, hold_id, "failed to release credit hold");
+    }
+}
+
 /// Outcome of running a published agent once, with metered token usage and the
 /// amounts already recorded in `marketplace_usage`.
 struct InvokeResult {
@@ -252,10 +272,21 @@ async fn run_and_bill(
     state: &AppState,
     id: &str,
     input: &str,
-    consumer: &str,
+    key: &crate::billing::ConsumerKey,
 ) -> AppResult<InvokeResult> {
     if input.trim().is_empty() {
         return Err(AppError::BadRequest("input is required".into()));
+    }
+    let consumer: &str = &key.account_id;
+    // Per-key rate limit: holds in flight + invokes settled in the last minute.
+    let recent = crate::billing::recent_calls(&state.db, &key.api_key_id)
+        .await
+        .map_err(AppError::Other)?;
+    if !crate::billing::within_rate_limit(recent, key.rate_limit_per_min) {
+        return Err(AppError::TooManyRequests(format!(
+            "rate limit of {} requests per minute reached for this key",
+            key.rate_limit_per_min
+        )));
     }
     let agent: Option<(String, String, f64, f64, String)> = sqlx::query_as(
         "SELECT name, visibility, price_per_1k_output_tokens, revenue_share, account_id
@@ -270,10 +301,45 @@ async fn run_and_bill(
         return Err(AppError::BadRequest("agent is not published".into()));
     }
 
+    // Admission: reserve the worst-case charge before spending a token. A
+    // publisher calling their own agent is not a sale and reserves nothing
+    // (the zero hold still counts towards the key's rate limit).
+    let self_invoke = consumer == publisher;
+    let job_id = Uuid::new_v4().to_string();
+    let hold_id = {
+        let amount = if self_invoke {
+            0.0
+        } else {
+            let bal = crate::billing::balance(&state.db, consumer)
+                .await
+                .map_err(AppError::Other)?;
+            crate::billing::hold_amount(
+                price_per_1k,
+                state.config.invoke_max_output_tokens,
+                INVOKE_BILLABLE_STEPS,
+                bal.max_invoke_usd,
+            )
+        };
+        match crate::billing::place_hold(&state.db, key, amount, &job_id)
+            .await
+            .map_err(AppError::Other)?
+        {
+            Some(h) => h,
+            None => {
+                let bal = crate::billing::balance(&state.db, consumer)
+                    .await
+                    .map_err(AppError::Other)?;
+                return Err(AppError::PaymentRequired(format!(
+                    "insufficient credit: this call reserves up to {amount:.4} USD, {:.4} USD available",
+                    bal.available_usd
+                )));
+            }
+        }
+    };
+
     // Create the job already 'running' so the background worker skips it; we run
     // it inline for a synchronous response.
     let objective_id = Uuid::new_v4().to_string();
-    let job_id = Uuid::new_v4().to_string();
     let mut tx = state.db.begin().await?;
     sqlx::query(
         "INSERT INTO objectives (id, account_id, agent_id, title, prompt) VALUES (?, ?, ?, ?, ?)",
@@ -301,7 +367,6 @@ async fn run_and_bill(
     // A consumer recalls the publisher's curated memory plus their own fork and
     // writes only to the fork. The publisher calling their own agent is just an
     // owner run.
-    let self_invoke = consumer == publisher;
     let mode = if self_invoke {
         crate::agent::engine::MemoryMode::Owner
     } else {
@@ -318,6 +383,7 @@ async fn run_and_bill(
             )
             .await
             .ok();
+            release_hold_logged(state, &hold_id).await;
             return Err(AppError::BadRequest(
                 "This agent requires human approval before acting and cannot be invoked via the synchronous API".into(),
             ));
@@ -329,6 +395,7 @@ async fn run_and_bill(
             crate::queue::mark_failed(&state.db, &job_id, &format!("{e:#}"))
                 .await
                 .ok();
+            release_hold_logged(state, &hold_id).await;
             return Err(AppError::Other(anyhow::anyhow!("agent run failed: {e}")));
         }
     };
@@ -362,23 +429,23 @@ async fn run_and_bill(
     // its own agent: a self-invoke is a test, not a sale.
     let (billed, publisher_usd) = compute_bill(ct, price_per_1k, rev_share, canned || self_invoke);
 
-    sqlx::query(
-        r#"INSERT INTO marketplace_usage
-             (id, agent_id, publisher_account, consumer_account, job_id,
-              prompt_tokens, completion_tokens, billed_usd, publisher_usd)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+    // Usage row, ledger row, balance and hold in one transaction.
+    crate::billing::settle(
+        &state.db,
+        crate::billing::Settlement {
+            hold_id: Some(&hold_id),
+            key,
+            agent_id: id,
+            publisher_account: &publisher,
+            job_id: &job_id,
+            prompt_tokens: pt,
+            completion_tokens: ct,
+            billed_usd: billed,
+            publisher_usd,
+        },
     )
-    .bind(Uuid::new_v4().to_string())
-    .bind(id)
-    .bind(&publisher)
-    .bind(consumer)
-    .bind(&job_id)
-    .bind(pt)
-    .bind(ct)
-    .bind(billed)
-    .bind(publisher_usd)
-    .execute(&state.db)
-    .await?;
+    .await
+    .map_err(AppError::Other)?;
 
     Ok(InvokeResult {
         name,
@@ -537,7 +604,10 @@ pub async fn consumer_memory(
     ensure_published(&state, &id).await?;
     let entries = state
         .memory
-        .list(&crate::memory::MemoryScope::consumer(&id, &consumer))
+        .list(&crate::memory::MemoryScope::consumer(
+            &id,
+            &consumer.account_id,
+        ))
         .await
         .map_err(AppError::Other)?;
     Ok(Json(json!({ "agent": id, "memories": entries })))
@@ -555,7 +625,10 @@ pub async fn forget_consumer_memory(
     ensure_published(&state, &id).await?;
     state
         .memory
-        .forget(&crate::memory::MemoryScope::consumer(&id, &consumer))
+        .forget(&crate::memory::MemoryScope::consumer(
+            &id,
+            &consumer.account_id,
+        ))
         .await
         .map_err(AppError::Other)?;
     Ok(Json(json!({ "ok": true, "agent": id })))
