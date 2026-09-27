@@ -22,19 +22,37 @@ live search, SSE lag is signalled. Ops: builds on macOS, CI (fmt / clippy
 cached Docker layers, no baked-in admin password, `MASTER_KEY` required
 outside demo mode.
 
+## Shipped in v0.5.0 (sellable, part 1)
+
+- **Memory fork per consumer** (`MemoryScope`, `MemoryMode`): consumer runs
+  recall the publisher's memory read-only plus their own fork and write only
+  to the fork; `GET/DELETE /api/v1/agents/:id/memory` for the consumer.
+- **Prepaid credit**: `account_credit` / `credit_ledger` / `credit_hold`;
+  worst-case reservation before the run (402 without credit), one-transaction
+  settlement, stale-hold sweep, per-key rate limit (429), per-step output
+  budget for consumer runs, optional price floor at publish, `GET /api/credit`,
+  admin `POST /api/accounts/:id/credit`. Stripe is deliberately out: the
+  ledger is the source of truth and a provider will only write `topup` rows.
+
 ## Milestone 1 — sellable
 
 What a first paying customer would hit in the first hour.
 
-- **Memory fork per consumer.** `invoke` runs read-only against the publisher's
-  topic, so a buyer's usage teaches the agent nothing: they rent a frozen
-  snapshot. Plan (validated): `MemoryScope::{Owner, Consumer{agent, account}}`,
-  ICM topic `takoia/agent/{id}/consumer/{account}`, recall = publisher memory
-  (read-only) + consumer memory (read/write). Owner topics are unchanged, no
-  data migration.
-- **Collect and cap.** `marketplace_usage` is a ledger; nothing checks a
-  balance, quota or rate before running. Prepaid balance (or Stripe), a
-  pre-flight credit check, a per-key rate limit, a hard per-invoke ceiling.
+- **Output-token cap on the claude-cli transport.** `INVOKE_MAX_OUTPUT_TOKENS`
+  is honoured by OpenAI-compatible providers only; `claude -p` has no such
+  flag, so the credit reservation is an estimate and a run can overshoot it
+  (charged exactly, balance goes negative, next call blocked). Options: cap by
+  killing the child once its streamed output exceeds the budget, or route
+  consumer runs to a provider that honours `max_tokens`.
+- **Verify `icm consolidate --topic` matching.** `icm recall --topic` is a
+  prefix match (verified, 0.10.63); recall now filters on the exact topic and
+  fork topics live under `takoia/fork/`, but consolidation of an owner topic
+  whose slug id prefixes another (`invoice-bot` / `invoice-bot-v2`) may still
+  fold the sibling in. Created agents use UUID ids; imported TOML ids are
+  slugs.
+
+- **Payment provider adapter** writing `topup` rows (Stripe checkout →
+  webhook → `billing::topup`), and a consumer-facing way to buy credit.
 - **Real consumer accounts.** All users are created in the single default
   account, so publisher == consumer for every key today (self-invokes are now
   free, which makes the ledger honest but empty). Consumer sign-up creates its

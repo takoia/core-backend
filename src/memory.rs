@@ -4,6 +4,12 @@
 //! `memories` table as the always-available source of truth for the UI and as a
 //! fallback if ICM is unavailable. Each agent owns an ICM topic, so an expert
 //! agent (e.g. trading) accumulates and refines expertise across runs.
+//!
+//! Memory is scoped ([`MemoryScope`]): the owner's curated memory lives in
+//! `takoia/agent/{id}`; every marketplace consumer gets a fork of their own in
+//! `takoia/agent/{id}/consumer/{account}`. A consumer run recalls both (owner
+//! first, read-only) and writes only to its fork, so the agent becomes theirs
+//! without their inputs ever reaching the publisher's expertise.
 
 use crate::db::Db;
 use anyhow::Result;
@@ -30,6 +36,81 @@ pub struct MemoryEntry {
     pub created_at: String,
 }
 
+/// Whose memory a read or write addresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryScope {
+    /// The publisher's own memory of the agent: `takoia/agent/{id}`.
+    Owner { agent_id: String },
+    /// One consumer account's fork: `takoia/agent/{id}/consumer/{account}`.
+    Consumer {
+        agent_id: String,
+        account_id: String,
+    },
+}
+
+const TOPIC_PREFIX: &str = "takoia/agent/";
+/// Forks live under a DIFFERENT root on purpose: `icm recall --topic` matches
+/// topics by prefix (verified against icm 0.10.63), so a fork named
+/// `takoia/agent/{id}/...` would be recalled by the owner's runs and by every
+/// other consumer's. `takoia/fork/{agent}/{account}` shares no prefix with
+/// `takoia/agent/{agent}`.
+const FORK_PREFIX: &str = "takoia/fork/";
+
+impl MemoryScope {
+    pub fn owner(agent_id: &str) -> Self {
+        MemoryScope::Owner {
+            agent_id: agent_id.to_string(),
+        }
+    }
+
+    pub fn consumer(agent_id: &str, account_id: &str) -> Self {
+        MemoryScope::Consumer {
+            agent_id: agent_id.to_string(),
+            account_id: account_id.to_string(),
+        }
+    }
+
+    pub fn agent_id(&self) -> &str {
+        match self {
+            MemoryScope::Owner { agent_id } | MemoryScope::Consumer { agent_id, .. } => agent_id,
+        }
+    }
+
+    /// `None` for the owner's memory, the account id for a consumer fork. Also
+    /// the value of `memories.consumer_account`.
+    pub fn consumer_account(&self) -> Option<&str> {
+        match self {
+            MemoryScope::Owner { .. } => None,
+            MemoryScope::Consumer { account_id, .. } => Some(account_id),
+        }
+    }
+
+    /// The ICM topic. Owner topics are exactly what they were before scoping,
+    /// so existing ICM data needs no migration.
+    pub fn topic(&self) -> String {
+        match self {
+            MemoryScope::Owner { agent_id } => format!("{TOPIC_PREFIX}{agent_id}"),
+            MemoryScope::Consumer {
+                agent_id,
+                account_id,
+            } => format!("{FORK_PREFIX}{agent_id}/{account_id}"),
+        }
+    }
+
+    /// Inverse of [`topic`](Self::topic). Rejects anything that is not exactly
+    /// one of the two shapes (a bare `strip_prefix` would read a consumer topic
+    /// as an owner topic with a bogus agent id).
+    pub fn parse_topic(topic: &str) -> Option<MemoryScope> {
+        if let Some(agent) = topic.strip_prefix(TOPIC_PREFIX) {
+            return (!agent.is_empty() && !agent.contains('/')).then(|| MemoryScope::owner(agent));
+        }
+        let rest = topic.strip_prefix(FORK_PREFIX)?;
+        let (agent, account) = rest.split_once('/')?;
+        (!agent.is_empty() && !account.is_empty() && !account.contains('/'))
+            .then(|| MemoryScope::consumer(agent, account))
+    }
+}
+
 /// Memory store bridging ICM and the local `memories` table.
 #[derive(Clone)]
 pub struct Memory {
@@ -37,35 +118,65 @@ pub struct Memory {
     icm_db_path: String,
 }
 
+/// Prompt budget for the owner's recalled memory.
+const OWNER_RECALL_CHARS: usize = 4000;
+/// Prompt budget for a consumer's own fork, appended after the owner's memory.
+const CONSUMER_RECALL_CHARS: usize = 2000;
+
 impl Memory {
     pub fn new(db: Db, icm_db_path: String) -> Self {
         Self { db, icm_db_path }
     }
 
-    fn topic(agent_id: &str) -> String {
-        format!("takoia/agent/{agent_id}")
+    /// What a marketplace consumer's run recalls: the publisher's curated memory
+    /// first (the expertise they pay for), then the consumer's own fork (what
+    /// the agent has learnt about THEM), each within its own budget. The
+    /// personal part comes last so it is the freshest context before the task.
+    pub async fn recall_composed(
+        &self,
+        agent_id: &str,
+        consumer_account: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> String {
+        let owner_scope = MemoryScope::owner(agent_id);
+        let Some(account) = consumer_account else {
+            return self
+                .recall(&owner_scope, query, limit)
+                .await
+                .chars()
+                .take(OWNER_RECALL_CHARS)
+                .collect();
+        };
+        // Independent lookups (each up to three `icm` spawns): run them together.
+        let fork_scope = MemoryScope::consumer(agent_id, account);
+        let (owner, own) = tokio::join!(
+            self.recall(&owner_scope, query, limit),
+            self.recall(&fork_scope, query, limit)
+        );
+        let owner: String = owner.chars().take(OWNER_RECALL_CHARS).collect();
+        let own: String = own.chars().take(CONSUMER_RECALL_CHARS).collect();
+        compose_recall(&owner, &own)
     }
 
     /// Recall expertise relevant to `query` for prompt injection at the Analyse
     /// step. Tries ICM first (semantic), falls back to recent DB memories.
-    pub async fn recall(&self, agent_id: &str, query: &str, limit: usize) -> String {
-        // 1) Query-scoped keyword recall.
-        if let Some(text) = self.recall_icm(agent_id, query, limit).await {
-            if Self::toon_has_entries(&text) {
-                return text;
-            }
+    pub async fn recall(&self, scope: &MemoryScope, query: &str, limit: usize) -> String {
+        // 1) Query-scoped keyword recall (exact topic, see `recall_icm`).
+        if let Some(text) = self.recall_icm(scope, query, limit).await {
+            return text;
         }
         // 2) Keyword recall frequently misses (memories carry generic step-name
         //    keywords, not content terms), in which case ICM returns an empty
         //    `memories[0]{...}` header. Fall back to the agent's highest-weight
         //    memories so accumulated expertise is ALWAYS injected.
-        if let Some(text) = self.recall_top(agent_id).await {
+        if let Some(text) = self.recall_top(scope).await {
             if !text.trim().is_empty() {
                 return text;
             }
         }
         // 3) Last resort: the DB mirror.
-        self.recall_db(agent_id, limit).await.unwrap_or_default()
+        self.recall_db(scope, limit).await.unwrap_or_default()
     }
 
     /// True when a TOON recall payload actually carries rows. ICM emits a header
@@ -88,11 +199,11 @@ impl Memory {
     /// Highest-weight memories for the agent's topic, independent of the query.
     /// `icm recall` needs a keyword/embedding match; `icm list` does not, so this
     /// reliably surfaces the consolidated expertise even when recall misses.
-    async fn recall_top(&self, agent_id: &str) -> Option<String> {
+    async fn recall_top(&self, scope: &MemoryScope) -> Option<String> {
         let output = Command::new("icm")
             .arg("list")
             .arg("--topic")
-            .arg(Self::topic(agent_id))
+            .arg(scope.topic())
             .arg("--db")
             .arg(&self.icm_db_path)
             .arg("--sort")
@@ -116,36 +227,44 @@ impl Memory {
         Some(text.chars().take(4000).collect())
     }
 
-    async fn recall_icm(&self, agent_id: &str, query: &str, limit: usize) -> Option<String> {
+    /// Query-scoped recall, filtered to EXACTLY this scope's topic. `icm recall
+    /// --topic` is a prefix filter, so without this a slug agent id would pull
+    /// in its longer siblings (`invoice-bot` ⊂ `invoice-bot-v2`). Returns
+    /// `None` when nothing (of this topic) matched.
+    async fn recall_icm(&self, scope: &MemoryScope, query: &str, limit: usize) -> Option<String> {
+        let topic = scope.topic();
         let output = Command::new("icm")
             .arg("recall")
             .arg(query)
             .arg("--topic")
-            .arg(Self::topic(agent_id))
+            .arg(&topic)
             .arg("--db")
             .arg(&self.icm_db_path)
             .arg("--limit")
             .arg(limit.to_string())
             .arg("--format")
-            .arg("toon")
+            .arg("json")
             // Keyword search, matching how we store (no embedding model download).
             .arg("--no-embeddings")
             .output()
             .await
             .ok()?;
         if !output.status.success() {
-            tracing::warn!(agent_id, "icm recall failed, falling back to db memory");
+            tracing::warn!(%topic, "icm recall failed, falling back to db memory");
             return None;
         }
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        render_recall(&String::from_utf8_lossy(&output.stdout), &topic)
     }
 
-    async fn recall_db(&self, agent_id: &str, limit: usize) -> Result<String> {
+    async fn recall_db(&self, scope: &MemoryScope, limit: usize) -> Result<String> {
+        // `IS ?` so a NULL bind matches the owner rows (`= NULL` never matches).
         let rows = sqlx::query_as::<_, MemoryEntry>(
             r#"SELECT id, agent_id, key, content, created_at
-               FROM memories WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?"#,
+               FROM memories WHERE agent_id = ? AND consumer_account IS ?
+               ORDER BY created_at DESC LIMIT ?"#,
         )
-        .bind(agent_id)
+        .bind(scope.agent_id())
+        .bind(scope.consumer_account())
         .bind(limit as i64)
         .fetch_all(&self.db)
         .await?;
@@ -186,7 +305,8 @@ impl Memory {
     }
 
     /// Persist a new memory at the Restitution step: ICM (best-effort) + DB.
-    pub async fn store(&self, agent_id: &str, key: &str, content: &str) -> Result<()> {
+    pub async fn store(&self, scope: &MemoryScope, key: &str, content: &str) -> Result<()> {
+        let agent_id = scope.agent_id();
         // User-specific memories are protected from decay/consolidation by
         // storing them at high importance; other (generic step) memories keep
         // ICM's default (medium).
@@ -208,7 +328,7 @@ impl Memory {
         let mut cmd = Command::new("icm");
         cmd.arg("store")
             .arg("--topic")
-            .arg(Self::topic(agent_id))
+            .arg(scope.topic())
             .arg("--content")
             .arg(content)
             .arg("--keywords")
@@ -224,13 +344,17 @@ impl Memory {
             tracing::warn!(agent_id, error = %e, "icm store failed (db still persisted)");
         }
 
-        sqlx::query(r#"INSERT INTO memories (id, agent_id, key, content) VALUES (?, ?, ?, ?)"#)
-            .bind(Uuid::new_v4().to_string())
-            .bind(agent_id)
-            .bind(key)
-            .bind(content)
-            .execute(&self.db)
-            .await?;
+        sqlx::query(
+            r#"INSERT INTO memories (id, agent_id, consumer_account, key, content)
+               VALUES (?, ?, ?, ?, ?)"#,
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(agent_id)
+        .bind(scope.consumer_account())
+        .bind(key)
+        .bind(content)
+        .execute(&self.db)
+        .await?;
         Ok(())
     }
 
@@ -238,7 +362,7 @@ impl Memory {
     /// the agent improves next time. Backed by ICM feedback, mirrored to DB.
     pub async fn record_feedback(
         &self,
-        agent_id: &str,
+        scope: &MemoryScope,
         context: &str,
         predicted: &str,
         corrected: &str,
@@ -248,7 +372,7 @@ impl Memory {
             .arg("feedback")
             .arg("record")
             .arg("--topic")
-            .arg(Self::topic(agent_id))
+            .arg(scope.topic())
             .arg("--context")
             .arg(context)
             .arg("--predicted")
@@ -265,24 +389,24 @@ impl Memory {
             .output()
             .await;
         if let Err(e) = &icm {
-            tracing::warn!(agent_id, error = %e, "icm feedback record failed");
+            tracing::warn!(topic = %scope.topic(), error = %e, "icm feedback record failed");
         }
 
         // Mirror as a high-signal memory so it is recalled at the Analyse step.
         let lesson = format!(
             "CORRECTION — when: {context}. Wrong: {predicted}. Correct: {corrected}. Reason: {reason}"
         );
-        self.store(agent_id, "correction", &lesson).await
+        self.store(scope, "correction", &lesson).await
     }
 
     /// Recall past corrections relevant to `query` (ICM feedback search).
-    pub async fn recall_feedback(&self, agent_id: &str, query: &str, limit: usize) -> String {
+    pub async fn recall_feedback(&self, scope: &MemoryScope, query: &str, limit: usize) -> String {
         let output = Command::new("icm")
             .arg("feedback")
             .arg("search")
             .arg(query)
             .arg("--topic")
-            .arg(Self::topic(agent_id))
+            .arg(scope.topic())
             .arg("--limit")
             .arg(limit.to_string())
             .arg("--db")
@@ -352,23 +476,22 @@ impl Memory {
             .collect()
     }
 
-    /// Purge all memories in a topic (ICM forget --topic) and the DB mirror.
-    pub async fn forget_topic(&self, topic: &str) -> Result<()> {
+    /// Purge one scope: its ICM topic and its rows in the DB mirror. An owner
+    /// purge leaves every consumer fork in place, and vice versa.
+    pub async fn forget(&self, scope: &MemoryScope) -> Result<()> {
         let _ = Command::new("icm")
             .arg("forget")
             .arg("--topic")
-            .arg(topic)
+            .arg(scope.topic())
             .arg("--db")
             .arg(&self.icm_db_path)
             .output()
             .await;
-        // Mirror: if it's an agent topic, clear the DB memories too.
-        if let Some(agent_id) = topic.strip_prefix("takoia/agent/") {
-            sqlx::query("DELETE FROM memories WHERE agent_id = ?")
-                .bind(agent_id)
-                .execute(&self.db)
-                .await?;
-        }
+        sqlx::query("DELETE FROM memories WHERE agent_id = ? AND consumer_account IS ?")
+            .bind(scope.agent_id())
+            .bind(scope.consumer_account())
+            .execute(&self.db)
+            .await?;
         Ok(())
     }
 
@@ -382,11 +505,11 @@ impl Memory {
     /// agents' domain content and returned `[]` — which made the mirror resync
     /// log "parsed zero real entries" and never refresh. `list` returns the
     /// whole topic regardless of keywords.
-    pub async fn icm_entries(&self, agent_id: &str, _query: &str, limit: usize) -> Vec<IcmEntry> {
+    pub async fn icm_entries(&self, scope: &MemoryScope, limit: usize) -> Vec<IcmEntry> {
         let out = Command::new("icm")
             .arg("list")
             .arg("--topic")
-            .arg(Self::topic(agent_id))
+            .arg(scope.topic())
             .arg("--limit")
             .arg(limit.to_string())
             .arg("--db")
@@ -426,10 +549,11 @@ impl Memory {
             .unwrap_or_default()
     }
 
-    /// Agent ids that currently have at least `min` stored memories.
+    /// Agent ids whose OWNER memory holds at least `min` entries.
     pub async fn agents_with_memory(&self, min: i64) -> Vec<String> {
         sqlx::query_scalar::<_, String>(
-            "SELECT agent_id FROM memories GROUP BY agent_id HAVING COUNT(*) >= ?",
+            "SELECT agent_id FROM memories WHERE consumer_account IS NULL
+             GROUP BY agent_id HAVING COUNT(*) >= ?",
         )
         .bind(min)
         .fetch_all(&self.db)
@@ -437,14 +561,40 @@ impl Memory {
         .unwrap_or_default()
     }
 
+    /// Every scope (owner or consumer fork) holding at least `min_owner` /
+    /// `min_consumer` verbatim entries — the candidates for consolidation.
+    /// Consumer forks get a higher bar: each consolidation is an LLM call on the
+    /// publisher's plan, and a popular agent has many forks.
+    pub async fn scopes_to_consolidate(
+        &self,
+        min_owner: i64,
+        min_consumer: i64,
+    ) -> Vec<MemoryScope> {
+        let rows: Vec<(String, Option<String>, i64)> = sqlx::query_as(
+            "SELECT agent_id, consumer_account, COUNT(*) FROM memories
+             GROUP BY agent_id, consumer_account",
+        )
+        .fetch_all(&self.db)
+        .await
+        .unwrap_or_default();
+        rows.into_iter()
+            .filter_map(|(agent, consumer, n)| match consumer {
+                None if n >= min_owner => Some(MemoryScope::owner(&agent)),
+                Some(acc) if n >= min_consumer => Some(MemoryScope::consumer(&agent, &acc)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Consolidate an agent's verbatim memories into a single distilled summary
     /// (ICM native consolidation, LLM summarizer via the inherited Max token).
     /// Best-effort: a failure must never break a run.
-    pub async fn consolidate(&self, agent_id: &str) {
+    pub async fn consolidate(&self, scope: &MemoryScope) {
+        let topic = scope.topic();
         let out = Command::new("icm")
             .arg("consolidate")
             .arg("--topic")
-            .arg(Self::topic(agent_id))
+            .arg(&topic)
             .arg("--summarizer-provider")
             .arg("claude")
             .arg("--db")
@@ -456,13 +606,13 @@ impl Memory {
             Ok(o) if o.status.success() => {
                 // Keep the DB mirror in sync: replace verbatim rows with the
                 // consolidated summary so the UI and DB-fallback recall match.
-                self.resync_mirror_from_icm(agent_id).await;
-                tracing::info!(agent_id, "consolidated agent memory");
+                self.resync_mirror_from_icm(scope).await;
+                tracing::info!(%topic, "consolidated agent memory");
             }
             Ok(o) => {
-                tracing::warn!(agent_id, stderr = %String::from_utf8_lossy(&o.stderr), "icm consolidate failed")
+                tracing::warn!(%topic, stderr = %String::from_utf8_lossy(&o.stderr), "icm consolidate failed")
             }
-            Err(e) => tracing::warn!(agent_id, error = %e, "icm consolidate spawn failed"),
+            Err(e) => tracing::warn!(%topic, error = %e, "icm consolidate spawn failed"),
         }
     }
 
@@ -493,11 +643,11 @@ impl Memory {
     /// `summary` fields — never a raw TOON header). Only if we obtain at least
     /// one non-empty entry do we replace the mirror, and we do so inside a single
     /// transaction so a mid-way failure can never leave the mirror empty.
-    async fn resync_mirror_from_icm(&self, agent_id: &str) {
-        // Collect first. `icm_entries` substitutes a safe keyword for blank
-        // queries and yields parsed entries; an empty Vec means "nothing real".
+    async fn resync_mirror_from_icm(&self, scope: &MemoryScope) {
+        let agent_id = scope.agent_id();
+        // Collect first; an empty Vec means "nothing real".
         let entries: Vec<IcmEntry> = self
-            .icm_entries(agent_id, "memory", 50)
+            .icm_entries(scope, 50)
             .await
             .into_iter()
             // Drop any entry without a genuine summary so a header/placeholder
@@ -525,10 +675,14 @@ impl Memory {
             }
         };
 
-        if let Err(e) = sqlx::query("DELETE FROM memories WHERE agent_id = ?")
-            .bind(agent_id)
-            .execute(&mut *tx)
-            .await
+        // Scoped delete: consolidating the owner's memory must never wipe the
+        // consumer forks (and vice versa). `IS ?` matches NULL for the owner.
+        if let Err(e) =
+            sqlx::query("DELETE FROM memories WHERE agent_id = ? AND consumer_account IS ?")
+                .bind(agent_id)
+                .bind(scope.consumer_account())
+                .execute(&mut *tx)
+                .await
         {
             tracing::warn!(agent_id, error = %e, "icm resync delete failed; rolling back, mirror untouched");
             return; // dropping `tx` rolls back automatically
@@ -536,10 +690,12 @@ impl Memory {
 
         for entry in &entries {
             if let Err(e) = sqlx::query(
-                r#"INSERT INTO memories (id, agent_id, key, content) VALUES (?, ?, 'consolidated', ?)"#,
+                r#"INSERT INTO memories (id, agent_id, consumer_account, key, content)
+                   VALUES (?, ?, ?, 'consolidated', ?)"#,
             )
             .bind(Uuid::new_v4().to_string())
             .bind(agent_id)
+            .bind(scope.consumer_account())
             .bind(entry.summary.trim())
             .execute(&mut *tx)
             .await
@@ -554,16 +710,60 @@ impl Memory {
         }
     }
 
-    /// List stored memories for an agent (UI).
-    pub async fn list(&self, agent_id: &str) -> Result<Vec<MemoryEntry>> {
+    /// List stored memories of one scope (UI / consumer API).
+    pub async fn list(&self, scope: &MemoryScope) -> Result<Vec<MemoryEntry>> {
         let rows = sqlx::query_as::<_, MemoryEntry>(
             r#"SELECT id, agent_id, key, content, created_at
-               FROM memories WHERE agent_id = ? ORDER BY created_at DESC"#,
+               FROM memories WHERE agent_id = ? AND consumer_account IS ?
+               ORDER BY created_at DESC"#,
         )
-        .bind(agent_id)
+        .bind(scope.agent_id())
+        .bind(scope.consumer_account())
         .fetch_all(&self.db)
         .await?;
         Ok(rows)
+    }
+}
+
+/// Verbatim entries before an owner's memory is consolidated.
+const OWNER_CONSOLIDATE_MIN: i64 = 6;
+/// Verbatim entries before a consumer fork is consolidated. Higher on purpose:
+/// every consolidation is an LLM call on the publisher's plan and a popular
+/// agent has one fork per paying account.
+const CONSUMER_CONSOLIDATE_MIN: i64 = 20;
+
+/// Turn `icm recall --format json` output into prompt text, keeping only rows
+/// whose `topic` is exactly `wanted` (most important first, as ICM orders
+/// them). `None` when no row of that topic came back or the JSON is not a list.
+fn render_recall(json: &str, wanted: &str) -> Option<String> {
+    let rows: Vec<serde_json::Value> = serde_json::from_str(json.trim()).ok()?;
+    let lines: Vec<String> = rows
+        .iter()
+        .filter(|r| r.get("topic").and_then(|t| t.as_str()) == Some(wanted))
+        .filter_map(|r| {
+            let summary = r.get("summary").and_then(|s| s.as_str())?.trim();
+            if summary.is_empty() {
+                return None;
+            }
+            let importance = r
+                .get("importance")
+                .and_then(|i| i.as_str())
+                .unwrap_or("medium");
+            Some(format!("- [{importance}] {summary}"))
+        })
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// Join the owner's recalled memory and a consumer's own fork for the prompt.
+fn compose_recall(owner: &str, own: &str) -> String {
+    match (owner.trim().is_empty(), own.trim().is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => owner.to_string(),
+        (true, false) => format!("What you have learnt about this user:\n{own}"),
+        (false, false) => {
+            format!("{owner}\n\nWhat you have learnt about this user (their own history with you):\n{own}")
+        }
     }
 }
 
@@ -581,11 +781,86 @@ pub fn spawn_maintenance(memory: Memory, interval_secs: u64) {
     tokio::spawn(async move {
         tokio::time::sleep(settle).await;
         loop {
-            for agent_id in memory.agents_with_memory(6).await {
-                memory.consolidate(&agent_id).await;
+            for scope in memory
+                .scopes_to_consolidate(OWNER_CONSOLIDATE_MIN, CONSUMER_CONSOLIDATE_MIN)
+                .await
+            {
+                memory.consolidate(&scope).await;
             }
             memory.decay_and_prune().await;
             tokio::time::sleep(interval).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topic_round_trips_for_both_scopes() {
+        let o = MemoryScope::owner("agent-1");
+        assert_eq!(o.topic(), "takoia/agent/agent-1");
+        assert_eq!(MemoryScope::parse_topic(&o.topic()), Some(o.clone()));
+        assert_eq!(o.consumer_account(), None);
+        let c = MemoryScope::consumer("agent-1", "acct-b");
+        assert_eq!(c.topic(), "takoia/fork/agent-1/acct-b");
+        assert!(
+            !c.topic().starts_with(&o.topic()),
+            "a fork topic must never extend the owner topic (icm recall is a prefix match)"
+        );
+        assert_eq!(MemoryScope::parse_topic(&c.topic()), Some(c.clone()));
+        assert_eq!(c.consumer_account(), Some("acct-b"));
+        assert_eq!(c.agent_id(), "agent-1");
+    }
+
+    #[test]
+    fn parse_rejects_malformed_topics() {
+        for t in [
+            "takoia/agent/",
+            "other/agent/x",
+            "takoia/fork/a/",
+            "takoia/fork//b",
+            "takoia/fork/a",
+            "takoia/agent/a/b",
+            "takoia/fork/a/b/c",
+            "",
+        ] {
+            assert!(
+                MemoryScope::parse_topic(t).is_none(),
+                "{t:?} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn recall_rendering_keeps_only_the_exact_topic() {
+        let json = r#"[
+          {"topic":"takoia/agent/a1","summary":"owner fact","importance":"high"},
+          {"topic":"takoia/agent/a10","summary":"sibling fact","importance":"medium"},
+          {"topic":"takoia/fork/a1/c1","summary":"consumer fact","importance":"low"},
+          {"topic":"takoia/agent/a1","summary":"   ","importance":"low"}
+        ]"#;
+        assert_eq!(
+            render_recall(json, "takoia/agent/a1").as_deref(),
+            Some("- [high] owner fact")
+        );
+        assert_eq!(
+            render_recall(json, "takoia/fork/a1/c1").as_deref(),
+            Some("- [low] consumer fact")
+        );
+        assert!(render_recall(json, "takoia/agent/a2").is_none());
+        assert!(render_recall("memories[0]{id}:", "takoia/agent/a1").is_none());
+        assert!(render_recall("[]", "takoia/agent/a1").is_none());
+    }
+
+    #[test]
+    fn composed_recall_puts_the_personal_part_last() {
+        assert_eq!(compose_recall("", ""), "");
+        assert_eq!(compose_recall("expertise", ""), "expertise");
+        let both = compose_recall("expertise", "likes brevity");
+        assert!(both.starts_with("expertise"));
+        assert!(both.ends_with("likes brevity"));
+        assert!(compose_recall("", "likes brevity").contains("likes brevity"));
+    }
 }

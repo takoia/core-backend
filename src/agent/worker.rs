@@ -38,6 +38,15 @@ pub async fn recover(state: &AppState) {
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "stale synchronous job sweep failed"),
     }
+    // A credit hold belongs to an invoke that died with the previous process.
+    match crate::billing::sweep_stale_holds(&state.db, 0).await {
+        Ok(n) if n > 0 => tracing::info!(
+            released = n,
+            "released credit holds left over from the previous process"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "stale credit hold sweep failed"),
+    }
 }
 
 /// Spawn the worker loop and the periodic stale-job sweep. Returns immediately.
@@ -52,6 +61,11 @@ pub fn spawn(state: AppState) {
                     Ok(n) if n > 0 => tracing::warn!(failed = n, "failed stale synchronous jobs"),
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error = %e, "stale synchronous job sweep failed"),
+                }
+                match crate::billing::sweep_stale_holds(&db, max_age).await {
+                    Ok(n) if n > 0 => tracing::warn!(released = n, "released stale credit holds"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "stale credit hold sweep failed"),
                 }
             }
         });
@@ -70,7 +84,9 @@ pub fn spawn(state: AppState) {
                     tracing::info!(job_id = %job.id, "claimed job");
                     let state = state.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = engine::run_job(&state, &job, false).await {
+                        if let Err(e) =
+                            engine::run_job(&state, &job, &engine::MemoryMode::Owner).await
+                        {
                             // Background runs fail loudly; the job row records why.
                             tracing::error!(job_id = %job.id, error = %e, "job run failed");
                             engine::fail(&state, &job.id, &e).await;

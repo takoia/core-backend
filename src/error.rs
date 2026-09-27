@@ -23,6 +23,12 @@ pub enum AppError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    #[error("payment required: {0}")]
+    PaymentRequired(String),
+
+    #[error("too many requests: {0}")]
+    TooManyRequests(String),
+
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 
@@ -38,6 +44,8 @@ impl AppError {
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
             AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::PaymentRequired(_) => StatusCode::PAYMENT_REQUIRED,
+            AppError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             AppError::Database(sqlx::Error::RowNotFound) => StatusCode::NOT_FOUND,
             AppError::Database(_) | AppError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }

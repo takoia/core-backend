@@ -4,6 +4,7 @@
 mod agents;
 mod approvals;
 mod connectors;
+mod credit;
 mod health;
 mod integrations;
 mod jobs;
@@ -164,7 +165,14 @@ pub fn router(state: AppState) -> Router {
             get(marketplace::list_keys).post(marketplace::create_key),
         )
         .route("/keys/:id", delete(marketplace::revoke_key))
+        // Prepaid credit: consumers read their balance, admins top accounts up.
+        .route("/credit", get(credit::get))
+        .route("/accounts/:id/credit", post(credit::topup))
         .route("/v1/agents/:id/invoke", post(marketplace::invoke))
+        .route(
+            "/v1/agents/:id/memory",
+            get(marketplace::consumer_memory).delete(marketplace::forget_consumer_memory),
+        )
         // OpenAI-compatible API: point any OpenAI SDK base_url at `<host>/api/v1`.
         .route("/v1/chat/completions", post(marketplace::chat_completions))
         .route("/v1/models", get(marketplace::list_models))

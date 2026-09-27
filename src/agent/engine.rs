@@ -10,6 +10,7 @@ use super::events::JobEvent;
 use super::steps::{default_system_prompt, label};
 use crate::domain::{AutonomyLevel, JobStatus, StepOptions, StepType};
 use crate::llm::{CompletionRequest, Message, TokenUsage};
+use crate::memory::MemoryScope;
 use crate::queue::{self, ClaimedJob};
 use crate::state::AppState;
 use crate::tools;
@@ -50,15 +51,41 @@ struct StepConfigRow {
     options: String,
 }
 
-/// Run (or resume) a job to completion or to an approval pause. When
-/// `read_only_memory` is set (marketplace consumer invokes), the agent recalls
-/// its memory but does NOT write to it, so the publisher's curated expertise is
-/// never polluted by consumer inputs.
-pub async fn run_job(
-    state: &AppState,
-    job: &ClaimedJob,
-    read_only_memory: bool,
-) -> Result<RunOutcome> {
+/// Whose memory a run reads and writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryMode {
+    /// The publisher's own run: recall and write the agent's memory; the
+    /// agent's inner life reacts to the interaction.
+    Owner,
+    /// A marketplace consumer: recall the publisher's curated memory (read-only)
+    /// plus the consumer's own fork, and write only to that fork. The agent
+    /// keeps learning from the person using it without touching the expertise
+    /// they pay for.
+    Consumer { account_id: String },
+}
+
+impl MemoryMode {
+    /// Scope that receives this run's writes.
+    fn write_scope(&self, agent_id: &str) -> MemoryScope {
+        match self {
+            MemoryMode::Owner => MemoryScope::owner(agent_id),
+            MemoryMode::Consumer { account_id } => MemoryScope::consumer(agent_id, account_id),
+        }
+    }
+
+    /// Consumer account whose fork is recalled on top of the owner's memory.
+    fn recall_consumer(&self) -> Option<&str> {
+        match self {
+            MemoryMode::Consumer { account_id } => Some(account_id),
+            MemoryMode::Owner => None,
+        }
+    }
+}
+
+/// Run (or resume) a job to completion or to an approval pause. `mode` decides
+/// whose memory is recalled and where this run's learnings are written (see
+/// [`MemoryMode`]).
+pub async fn run_job(state: &AppState, job: &ClaimedJob, mode: &MemoryMode) -> Result<RunOutcome> {
     let bus = &state.events;
     bus.publish(JobEvent::status(&job.id, "running", "job started"));
 
@@ -88,7 +115,7 @@ pub async fn run_job(
     // Permanent memory: recall accumulated expertise for prompt injection.
     let memory_ctx = state
         .memory
-        .recall(&job.agent_id, &objective.prompt, 6)
+        .recall_composed(&job.agent_id, mode.recall_consumer(), &objective.prompt, 6)
         .await;
     if !memory_ctx.trim().is_empty() {
         bus.publish(JobEvent::log(&job.id, "recalled expertise from memory"));
@@ -96,7 +123,7 @@ pub async fn run_job(
     // Past corrections (learn from detected errors).
     let corrections = state
         .memory
-        .recall_feedback(&job.agent_id, &objective.prompt, 5)
+        .recall_feedback(&MemoryScope::owner(&job.agent_id), &objective.prompt, 5)
         .await;
     if !corrections.trim().is_empty() {
         bus.publish(JobEvent::log(&job.id, "applying past corrections"));
@@ -119,9 +146,13 @@ pub async fn run_job(
         session: Vec::new(),
         recalled_memory: memory_ctx.clone(),
         mood_flavor,
-        read_only: read_only_memory,
+        write_scope: mode.write_scope(&job.agent_id),
         last_step_canned: false,
         any_step_canned: false,
+        max_tokens: match mode {
+            MemoryMode::Consumer { .. } => Some(state.config.invoke_max_output_tokens),
+            MemoryMode::Owner => None,
+        },
     };
 
     // ── Analyse ────────────────────────────────────────────────────────────
@@ -196,6 +227,7 @@ pub async fn run_job(
             provider_name: provider_name.as_deref(),
             allowed: &allowed,
             params: &params,
+            memory_mode: mode,
         })
         .await?;
         for (provider, model, usage) in out.usage {
@@ -235,13 +267,10 @@ pub async fn run_job(
     // Persist what was learned so the agent gets more expert over time.
     // Read-only (marketplace) runs never write to the publisher's memory.
     // Skipped on a resumed-after-completion run so the summary is stored once.
-    if !read_only_memory && !restitution_was_done {
+    if !restitution_was_done {
+        let scope = mode.write_scope(&job.agent_id);
         let summary = report.chars().take(600).collect::<String>();
-        if let Err(e) = state
-            .memory
-            .store(&job.agent_id, "run-summary", &summary)
-            .await
-        {
+        if let Err(e) = state.memory.store(&scope, "run-summary", &summary).await {
             tracing::warn!(error = %e, "failed to persist memory");
         }
         // Capture HOW the user interacted (their wording/tone), separate from the
@@ -249,10 +278,14 @@ pub async fn run_job(
         let interaction = objective.prompt.chars().take(400).collect::<String>();
         let _ = state
             .memory
-            .store(&job.agent_id, "interaction", &interaction)
+            .store(&scope, "interaction", &interaction)
             .await;
         // Inner life: a completed interaction grows familiarity and lifts energy.
-        super::inner_life::note_activity(&state.db, &job.agent_id).await;
+        // Only the owner's own interactions move the agent's mood/familiarity;
+        // a consumer's call must not shift the publisher's agent.
+        if *mode == MemoryMode::Owner {
+            super::inner_life::note_activity(&state.db, &job.agent_id).await;
+        }
     }
 
     // Discord alert: only when the agent actually produced an alert. The agent
@@ -347,13 +380,15 @@ struct RunCtx<'a> {
     /// One line describing the agent's current mood/energy, injected so its tone
     /// reflects how it feels right now (its "inner life").
     mood_flavor: String,
-    /// Recall memory but never write it (marketplace consumer invokes).
-    read_only: bool,
+    /// Where this run's step memories go (owner memory or the consumer's fork).
+    write_scope: MemoryScope,
     /// Whether the most recent step fell back to the canned offline provider
     /// (its generic demo content must not be pushed as a real Discord alert).
     last_step_canned: bool,
     /// Whether ANY step of this run used the canned provider (demo mode only).
     any_step_canned: bool,
+    /// Per-step output budget (marketplace consumer runs); None = provider default.
+    max_tokens: Option<u32>,
 }
 
 impl<'a> RunCtx<'a> {
@@ -481,7 +516,8 @@ impl<'a> RunCtx<'a> {
             ));
         }
         messages.push(Message::user(input.to_string()));
-        let req = CompletionRequest::new(messages);
+        let mut req = CompletionRequest::new(messages);
+        req.max_tokens = self.max_tokens;
 
         // A provider failure fails the step (and the run). Only demo mode
         // substitutes the offline canned provider, and the run is then flagged
@@ -528,12 +564,13 @@ impl<'a> RunCtx<'a> {
         // interaction are stored, at the end of the run. Skipped for read-only
         // (marketplace) runs to protect the publisher, and when the canned demo
         // fallback was used (its generic content would poison recall).
-        if !self.read_only && !used_canned && self.remember(step) {
+        if !used_canned && self.remember(step) {
+            let scope = &self.write_scope;
             let trimmed: String = completion.content.chars().take(500).collect();
             if let Err(e) = self
                 .state
                 .memory
-                .store(&self.job.agent_id, step.as_str(), &trimmed)
+                .store(scope, step.as_str(), &trimmed)
                 .await
             {
                 tracing::warn!(error = %e, "failed to store step memory");

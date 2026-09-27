@@ -343,6 +343,44 @@ pub async fn publish(
             ))
         }
     };
+    if visibility == "public" {
+        // The effective price after this update must clear the floor, so a
+        // publisher cannot keep a free agent live once a floor is configured.
+        let floor = state.config.marketplace_min_price_per_1k;
+        let effective = match body.price_per_1k_output_tokens {
+            Some(p) => p,
+            None => sqlx::query_scalar::<_, f64>(
+                "SELECT price_per_1k_output_tokens FROM agents WHERE id = ?",
+            )
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await?
+            .unwrap_or(0.0),
+        };
+        if !effective.is_finite() || effective < 0.0 {
+            return Err(AppError::BadRequest(
+                "price must be a non-negative number".into(),
+            ));
+        }
+        if effective < floor {
+            return Err(AppError::BadRequest(format!(
+                "price_per_1k_output_tokens must be at least {floor} on this marketplace"
+            )));
+        }
+        let share = match body.revenue_share {
+            Some(s) => s,
+            None => sqlx::query_scalar::<_, f64>("SELECT revenue_share FROM agents WHERE id = ?")
+                .bind(&id)
+                .fetch_optional(&state.db)
+                .await?
+                .unwrap_or(0.7),
+        };
+        if !(0.0..=1.0).contains(&share) {
+            return Err(AppError::BadRequest(
+                "revenue_share must be between 0 and 1".into(),
+            ));
+        }
+    }
     sqlx::query(
         r#"UPDATE agents SET
              visibility = ?,
@@ -578,7 +616,11 @@ pub async fn add_memory(
     }
     state
         .memory
-        .store(&id, &body.key, &body.content)
+        .store(
+            &crate::memory::MemoryScope::owner(&id),
+            &body.key,
+            &body.content,
+        )
         .await
         .map_err(AppError::Other)?;
     Ok(Json(json!({ "ok": true })))
@@ -591,7 +633,11 @@ pub async fn memories(
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
     crate::http::users::require_agent_role(&state, &id, &me, "viewer").await?;
-    let items = state.memory.list(&id).await.map_err(AppError::Other)?;
+    let items = state
+        .memory
+        .list(&crate::memory::MemoryScope::owner(&id))
+        .await
+        .map_err(AppError::Other)?;
     Ok(Json(json!({ "memories": items })))
 }
 
@@ -654,7 +700,7 @@ pub async fn evolve_persona(
     let memories = state
         .memory
         .recall(
-            &id,
+            &crate::memory::MemoryScope::owner(&id),
             "interactions tone style how the user treats me preferences",
             16,
         )
@@ -846,15 +892,9 @@ pub async fn icm_memories(
 ) -> AppResult<Json<Value>> {
     crate::http::users::require_agent_role(&state, &id, &me, "viewer").await?;
     // Keyword query from the agent's name + domain so its memories surface.
-    let row: Option<(String, String)> =
-        sqlx::query_as("SELECT name, expertise_domain FROM agents WHERE id = ?")
-            .bind(&id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| AppError::Other(e.into()))?;
-    let query = row
-        .map(|(n, e)| format!("{n} {e}"))
-        .unwrap_or_else(|| "memory".into());
-    let entries = state.memory.icm_entries(&id, &query, 30).await;
+    let entries = state
+        .memory
+        .icm_entries(&crate::memory::MemoryScope::owner(&id), 30)
+        .await;
     Ok(Json(json!({ "entries": entries })))
 }

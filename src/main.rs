@@ -3,6 +3,7 @@
 
 mod agent;
 mod agentdef;
+mod billing;
 mod bootstrap;
 mod config;
 mod crypto;

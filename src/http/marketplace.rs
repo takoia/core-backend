@@ -50,6 +50,9 @@ fn hash_key(key: &str) -> String {
 pub struct NewKey {
     #[serde(default)]
     pub name: String,
+    /// Requests per minute allowed on this key (default 60; 0 = unlimited).
+    #[serde(default)]
+    pub rate_limit_per_min: Option<i64>,
 }
 
 /// `POST /api/keys` — create a consumer API key (plaintext shown once).
@@ -60,15 +63,17 @@ pub async fn create_key(
 ) -> AppResult<Json<Value>> {
     let secret = format!("sk_takoia_{}", Uuid::new_v4().simple());
     let prefix = secret.chars().take(16).collect::<String>();
+    let rate = body.rate_limit_per_min.unwrap_or(60).max(0);
     sqlx::query(
-        r#"INSERT INTO api_keys (id, account_id, name, key_hash, key_prefix)
-           VALUES (?, ?, ?, ?, ?)"#,
+        r#"INSERT INTO api_keys (id, account_id, name, key_hash, key_prefix, rate_limit_per_min)
+           VALUES (?, ?, ?, ?, ?, ?)"#,
     )
     .bind(Uuid::new_v4().to_string())
     .bind(&me.account_id)
     .bind(&body.name)
     .bind(hash_key(&secret))
     .bind(&prefix)
+    .bind(rate)
     .execute(&state.db)
     .await?;
     // The plaintext is returned only here, never stored.
@@ -176,8 +181,8 @@ pub struct InvokeInput {
     pub input: String,
 }
 
-/// Authenticate a `Bearer sk_...` key, returning the consumer account id.
-async fn auth_key(state: &AppState, headers: &HeaderMap) -> AppResult<String> {
+/// Authenticate a `Bearer sk_...` key, returning the consumer key record.
+async fn auth_key(state: &AppState, headers: &HeaderMap) -> AppResult<crate::billing::ConsumerKey> {
     let raw = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -187,21 +192,25 @@ async fn auth_key(state: &AppState, headers: &HeaderMap) -> AppResult<String> {
         return Err(AppError::Unauthorized("missing API key".into()));
     }
     let key_hash = hash_key(key);
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT account_id FROM api_keys WHERE key_hash = ? AND revoked = 0")
-            .bind(&key_hash)
-            .fetch_optional(&state.db)
-            .await?;
-    let account = row
-        .map(|(a,)| a)
-        .ok_or_else(|| AppError::Unauthorized("invalid API key".into()))?;
+    let row: Option<(String, String, i64)> = sqlx::query_as(
+        "SELECT id, account_id, rate_limit_per_min FROM api_keys WHERE key_hash = ? AND revoked = 0",
+    )
+    .bind(&key_hash)
+    .fetch_optional(&state.db)
+    .await?;
+    let (api_key_id, account_id, rate_limit_per_min) =
+        row.ok_or_else(|| AppError::Unauthorized("invalid API key".into()))?;
     let _ = sqlx::query(
         "UPDATE api_keys SET last_used_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key_hash = ?",
     )
     .bind(&key_hash)
     .execute(&state.db)
     .await;
-    Ok(account)
+    Ok(crate::billing::ConsumerKey {
+        account_id,
+        api_key_id,
+        rate_limit_per_min,
+    })
 }
 
 /// `POST /api/v1/agents/:id/invoke` — call a published agent over HTTP. Runs the
@@ -230,6 +239,10 @@ pub async fn invoke(
     })))
 }
 
+/// Steps that may produce billable output in one invoke: the four loop steps
+/// plus one web search. Sizes the credit reservation.
+const INVOKE_BILLABLE_STEPS: u32 = 5;
+
 /// Outcome of running a published agent once, with metered token usage and the
 /// amounts already recorded in `marketplace_usage`.
 struct InvokeResult {
@@ -252,11 +265,12 @@ async fn run_and_bill(
     state: &AppState,
     id: &str,
     input: &str,
-    consumer: &str,
+    key: &crate::billing::ConsumerKey,
 ) -> AppResult<InvokeResult> {
     if input.trim().is_empty() {
         return Err(AppError::BadRequest("input is required".into()));
     }
+    let consumer: &str = &key.account_id;
     let agent: Option<(String, String, f64, f64, String)> = sqlx::query_as(
         "SELECT name, visibility, price_per_1k_output_tokens, revenue_share, account_id
          FROM agents WHERE id = ?",
@@ -270,10 +284,48 @@ async fn run_and_bill(
         return Err(AppError::BadRequest("agent is not published".into()));
     }
 
+    // Admission — rate limit and credit in one transaction. The reservation is
+    // the worst case for this agent's shape (its loop steps plus nested
+    // call_agent runs). A publisher calling their own agent is not a sale.
+    let self_invoke = consumer == publisher;
+    let job_id = Uuid::new_v4().to_string();
+    let steps = billable_steps(state, id).await;
+    let hold_id = match crate::billing::admit(
+        &state.db,
+        crate::billing::AdmissionRequest {
+            key,
+            job_id: &job_id,
+            price_per_1k,
+            max_output_tokens: state.config.invoke_max_output_tokens,
+            steps,
+            self_invoke,
+        },
+    )
+    .await
+    .map_err(AppError::Other)?
+    {
+        crate::billing::Admission::Held { hold_id, .. } => hold_id,
+        crate::billing::Admission::RateLimited { per_min } => {
+            return Err(AppError::TooManyRequests(format!(
+                "rate limit of {per_min} requests per minute reached for this key"
+            )));
+        }
+        crate::billing::Admission::InsufficientCredit {
+            needed_usd,
+            available_usd,
+        } => {
+            return Err(AppError::PaymentRequired(format!(
+                "insufficient credit: this call reserves up to {needed_usd:.4} USD, {available_usd:.4} USD available"
+            )));
+        }
+    };
+    // Released automatically on any early return or cancellation below, unless
+    // settlement takes it over.
+    let guard = crate::billing::HoldGuard::new(state.db.clone(), hold_id);
+
     // Create the job already 'running' so the background worker skips it; we run
     // it inline for a synchronous response.
     let objective_id = Uuid::new_v4().to_string();
-    let job_id = Uuid::new_v4().to_string();
     let mut tx = state.db.begin().await?;
     sqlx::query(
         "INSERT INTO objectives (id, account_id, agent_id, title, prompt) VALUES (?, ?, ?, ?, ?)",
@@ -298,8 +350,24 @@ async fn run_and_bill(
         objective_id,
         agent_id: id.to_string(),
     };
-    // read_only_memory = true: never write to the publisher's curated memory.
-    let canned = match crate::agent::engine::run_job(state, &claimed, true).await {
+    // A consumer recalls the publisher's curated memory plus their own fork and
+    // writes only to the fork. The publisher calling their own agent is just an
+    // owner run.
+    let mode = if self_invoke {
+        crate::agent::engine::MemoryMode::Owner
+    } else {
+        crate::agent::engine::MemoryMode::Consumer {
+            account_id: consumer.to_string(),
+        }
+    };
+    let outcome = crate::agent::engine::run_job(state, &claimed, &mode).await;
+
+    // Tokens metered over the whole job chain (call_agent sub-runs included),
+    // whatever the outcome: a failed run still spent them and must be visible.
+    let (pt, ct) = chain_tokens(state, &job_id).await?;
+
+    let canned = match outcome {
+        Ok(crate::agent::engine::RunOutcome::Completed { canned }) => canned,
         Ok(crate::agent::engine::RunOutcome::AwaitingApproval) => {
             crate::queue::mark_failed(
                 &state.db,
@@ -308,17 +376,18 @@ async fn run_and_bill(
             )
             .await
             .ok();
+            settle_unbilled(state, guard, key, id, &publisher, &job_id, pt, ct).await?;
             return Err(AppError::BadRequest(
                 "This agent requires human approval before acting and cannot be invoked via the synchronous API".into(),
             ));
         }
-        Ok(crate::agent::engine::RunOutcome::Completed { canned }) => canned,
         Err(e) => {
             // Synchronous jobs are excluded from crash recovery: an unmarked
             // failure would leave the row `running` forever.
             crate::queue::mark_failed(&state.db, &job_id, &format!("{e:#}"))
                 .await
                 .ok();
+            settle_unbilled(state, guard, key, id, &publisher, &job_id, pt, ct).await?;
             return Err(AppError::Other(anyhow::anyhow!("agent run failed: {e}")));
         }
     };
@@ -340,36 +409,28 @@ async fn run_and_bill(
         })
         .unwrap_or_default();
 
-    // Token usage for this job → metered billing.
-    let (pt, ct): (i64, i64) = sqlx::query_as(
-        "SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0)
-         FROM token_usage WHERE job_id = ?",
-    )
-    .bind(&job_id)
-    .fetch_one(&state.db)
-    .await?;
     // Nothing is charged for demo (canned) output, nor when the publisher calls
     // its own agent: a self-invoke is a test, not a sale.
-    let self_invoke = consumer == publisher;
     let (billed, publisher_usd) = compute_bill(ct, price_per_1k, rev_share, canned || self_invoke);
 
-    sqlx::query(
-        r#"INSERT INTO marketplace_usage
-             (id, agent_id, publisher_account, consumer_account, job_id,
-              prompt_tokens, completion_tokens, billed_usd, publisher_usd)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+    // Usage row, ledger row, balance and hold in one transaction.
+    let hold_id = guard.take();
+    crate::billing::settle(
+        &state.db,
+        crate::billing::Settlement {
+            hold_id: Some(&hold_id),
+            key,
+            agent_id: id,
+            publisher_account: &publisher,
+            job_id: &job_id,
+            prompt_tokens: pt,
+            completion_tokens: ct,
+            billed_usd: billed,
+            publisher_usd,
+        },
     )
-    .bind(Uuid::new_v4().to_string())
-    .bind(id)
-    .bind(&publisher)
-    .bind(consumer)
-    .bind(&job_id)
-    .bind(pt)
-    .bind(ct)
-    .bind(billed)
-    .bind(publisher_usd)
-    .execute(&state.db)
-    .await?;
+    .await
+    .map_err(AppError::Other)?;
 
     Ok(InvokeResult {
         name,
@@ -381,6 +442,82 @@ async fn run_and_bill(
         demo: canned,
         self_invoke,
     })
+}
+
+/// A run that produced no deliverable is not charged, but the tokens it spent
+/// are recorded (usage row with billed 0) and the reservation is consumed.
+#[allow(clippy::too_many_arguments)]
+async fn settle_unbilled(
+    state: &AppState,
+    guard: crate::billing::HoldGuard,
+    key: &crate::billing::ConsumerKey,
+    agent_id: &str,
+    publisher: &str,
+    job_id: &str,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+) -> AppResult<()> {
+    let hold_id = guard.take();
+    crate::billing::settle(
+        &state.db,
+        crate::billing::Settlement {
+            hold_id: Some(&hold_id),
+            key,
+            agent_id,
+            publisher_account: publisher,
+            job_id,
+            prompt_tokens,
+            completion_tokens,
+            billed_usd: 0.0,
+            publisher_usd: 0.0,
+        },
+    )
+    .await
+    .map_err(AppError::Other)
+}
+
+/// Prompt/completion tokens of a job and every sub-job under it.
+async fn chain_tokens(state: &AppState, job_id: &str) -> AppResult<(i64, i64)> {
+    let row: (i64, i64) = sqlx::query_as(
+        r#"WITH RECURSIVE chain(id) AS (
+             SELECT ?1
+             UNION ALL
+             SELECT j.id FROM jobs j JOIN chain ON j.parent_job_id = chain.id
+           )
+           SELECT COALESCE(SUM(t.prompt_tokens), 0), COALESCE(SUM(t.completion_tokens), 0)
+           FROM token_usage t WHERE t.job_id IN (SELECT id FROM chain)"#,
+    )
+    .bind(job_id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(row)
+}
+
+/// Steps that may produce billable output for this agent: its four loop steps,
+/// one web search, and four more per agent it orchestrates with call_agent.
+async fn billable_steps(state: &AppState, agent_id: &str) -> u32 {
+    let options: Option<(String,)> = sqlx::query_as(
+        "SELECT options FROM agent_step_configs WHERE agent_id = ? AND step_type = 'action'",
+    )
+    .bind(agent_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let targets = options
+        .and_then(|(o,)| serde_json::from_str::<crate::domain::StepOptions>(&o).ok())
+        .map(|o| {
+            let params = &o.tool_params;
+            let list = params
+                .get("call_agents")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len() as u32)
+                .unwrap_or(0);
+            let single = u32::from(params.get("call_agent_id").is_some());
+            list.max(single)
+        })
+        .unwrap_or(0);
+    INVOKE_BILLABLE_STEPS + 4 * targets
 }
 
 /// Consumer charge and publisher share for `completion_tokens` at
@@ -515,4 +652,57 @@ pub async fn list_models(State(state): State<AppState>) -> AppResult<Json<Value>
         })
         .collect();
     Ok(Json(json!({ "object": "list", "data": data })))
+}
+
+/// `GET /api/v1/agents/:id/memory` — what this agent has learnt about the
+/// calling consumer account: their fork only, never the publisher's memory.
+pub async fn consumer_memory(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    let consumer = auth_key(&state, &headers).await?;
+    ensure_published(&state, &id).await?;
+    let entries = state
+        .memory
+        .list(&crate::memory::MemoryScope::consumer(
+            &id,
+            &consumer.account_id,
+        ))
+        .await
+        .map_err(AppError::Other)?;
+    Ok(Json(json!({ "agent": id, "memories": entries })))
+}
+
+/// `DELETE /api/v1/agents/:id/memory` — erase the calling consumer's fork
+/// (ICM topic + mirror). The publisher's memory is untouched; this is the
+/// consumer's right-to-erasure switch.
+pub async fn forget_consumer_memory(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    let consumer = auth_key(&state, &headers).await?;
+    ensure_published(&state, &id).await?;
+    state
+        .memory
+        .forget(&crate::memory::MemoryScope::consumer(
+            &id,
+            &consumer.account_id,
+        ))
+        .await
+        .map_err(AppError::Other)?;
+    Ok(Json(json!({ "ok": true, "agent": id })))
+}
+
+async fn ensure_published(state: &AppState, agent_id: &str) -> AppResult<()> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT visibility FROM agents WHERE id = ?")
+        .bind(agent_id)
+        .fetch_optional(&state.db)
+        .await?;
+    match row {
+        Some((v,)) if v == "public" => Ok(()),
+        Some(_) => Err(AppError::BadRequest("agent is not published".into())),
+        None => Err(AppError::NotFound("agent not found".into())),
+    }
 }

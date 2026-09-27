@@ -213,6 +213,8 @@ The four logical providers are `claude_max` (Claude plan proxy), `ollama`
 | `DEMO_MODE` | *(unset = off)* | When `true`, a step whose LLM provider fails falls back to the offline **canned** provider so a run still completes (quick start, hackathon demo). Such runs are flagged (`demo: true` on the invoke API) and never billed. Off, a provider failure fails the run. |
 | `LLM_PRICING` | *(unset)* | JSON object keyed by model-name prefix, longest prefix wins: `{"claude-opus":{"input_per_m":15,"output_per_m":75},"claude":{"input_per_m":3,"output_per_m":15}}`. Values are USD per million tokens. |
 | `LLM_PRICING_DEFAULT` | `{"input_per_m":3,"output_per_m":15}` | Rate for models matching no prefix. The canned provider is always free. |
+| `INVOKE_MAX_OUTPUT_TOKENS` | `4096` | Per-step output budget for marketplace consumer runs; also sizes the credit reserved before a run (5 billable steps × budget × price, capped by the account's `max_invoke_usd`). |
+| `MARKETPLACE_MIN_PRICE_PER_1K` | `0` | Lowest `price_per_1k_output_tokens` a publisher may set. `0` allows free agents (the publisher then pays the LLM cost of every consumer call). |
 | `SYNC_JOB_MAX_SECS` | `14400` | A synchronous job (marketplace invoke, `call_agent` sub-run) still running after this long is considered abandoned and failed. Generous on purpose: nested sub-runs and web searches take time, and a false positive fails a paying call after its tokens were spent. |
 | `AGENT_ENV_PASSTHROUGH` | *(unset)* | Comma-separated extra environment variables forwarded to agent subprocesses, on top of the built-in proxy (`HTTP(S)_PROXY`, `NO_PROXY`), CA (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`) and `CLAUDE_CONFIG_DIR` passthrough. `MASTER_KEY`, `DATABASE_URL`, `ADMIN_PASSWORD`, `*_API_KEY` and `*_TOKEN` are never forwarded. |
 
@@ -385,6 +387,26 @@ curl -X POST http://localhost:8080/api/v1/agents/<AGENT_ID>/invoke \
   -H "Content-Type: application/json" \
   -d '{"input": "Summarize this week in Rust async."}'
 ```
+
+Consumers pay from **prepaid credit**. Before a run, the worst-case charge is
+reserved against the account's available credit (balance minus reservations in
+flight); without enough credit the call is refused with **402** before any
+token is spent. Each key also has a per-minute rate limit (**429**, default 60,
+set at key creation). The run settles in one transaction: usage row, ledger
+row, balance, reservation released. `GET /api/credit` shows your balance and
+ledger; an admin tops an account up with `POST /api/accounts/:id/credit
+{"delta_usd": 10}`. The ledger is the source of truth — a payment provider, when
+wired, will only write `topup` rows. The reservation is an estimate: the
+`claude -p` transport has no output-token cap, so a run can cost more than was
+reserved; the exact amount is always charged and a negative balance blocks the
+next call until the account is topped up. Refused calls (402, 429) count
+towards the key's rate limit.
+
+The agent's memory is **forked per consumer**: your calls recall the
+publisher's curated expertise plus what the agent has learnt about you, and
+write only to your fork. `GET /api/v1/agents/:id/memory` lists it and
+`DELETE` erases it (your right-to-erasure switch); the publisher's memory is
+never touched by consumer calls.
 
 The response carries `cost_usd`, `publisher_earned_usd`, and two flags:
 `demo` (the output came from the offline provider in `DEMO_MODE`, nothing is

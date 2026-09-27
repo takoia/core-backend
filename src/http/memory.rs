@@ -30,14 +30,15 @@ pub async fn purge(
     Query(q): Query<TopicQuery>,
 ) -> AppResult<Json<Value>> {
     crate::http::users::require_admin(&me)?;
-    let Some(agent_id) = q.topic.strip_prefix("takoia/agent/") else {
+    let Some(scope) = crate::memory::MemoryScope::parse_topic(&q.topic) else {
         return Err(crate::error::AppError::BadRequest(
-            "topic must be takoia/agent/<agent id>".into(),
+            "topic must be takoia/agent/<agent id> or takoia/agent/<agent id>/consumer/<account>"
+                .into(),
         ));
     };
     let owned: Option<(String,)> =
         sqlx::query_as("SELECT id FROM agents WHERE id = ? AND account_id = ?")
-            .bind(agent_id)
+            .bind(scope.agent_id())
             .bind(&me.account_id)
             .fetch_optional(&state.db)
             .await?;
@@ -46,7 +47,7 @@ pub async fn purge(
     }
     state
         .memory
-        .forget_topic(&q.topic)
+        .forget(&scope)
         .await
         .map_err(crate::error::AppError::Other)?;
     Ok(Json(json!({ "ok": true, "purged": q.topic })))

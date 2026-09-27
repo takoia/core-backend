@@ -3,7 +3,7 @@
 //! instance or a remote one) so the engine only sees a digest plus the LLM
 //! usage to record.
 
-use super::engine::{run_job, RunOutcome};
+use super::engine::{run_job, MemoryMode, RunOutcome};
 use super::events::JobEvent;
 use crate::domain::AutonomyLevel;
 use crate::llm::{ProviderRegistry, TokenUsage};
@@ -30,6 +30,8 @@ pub struct ToolRun<'a> {
     pub allowed: &'a [String],
     /// Per-tool parameters (`tool_params`).
     pub params: &'a serde_json::Value,
+    /// Memory mode of the parent run; call_agent sub-runs inherit it.
+    pub memory_mode: &'a MemoryMode,
 }
 
 /// Digest of every tool that ran, plus LLM usage to meter: (provider, model, usage).
@@ -134,9 +136,11 @@ pub async fn gather(run: ToolRun<'_>) -> Result<Gathered> {
                 match run_subagent(
                     run.state,
                     run.account_id,
+                    &run.job.id,
                     target,
                     run.objective_prompt,
                     depth + 1,
+                    run.memory_mode,
                 )
                 .await
                 {
@@ -243,14 +247,16 @@ async fn job_chain_depth(state: &AppState, job_id: &str) -> i64 {
 }
 
 /// Run another agent synchronously and return its deliverable (restitution).
-/// Read-only so the callee's curated memory is never polluted by the caller's
-/// sub-task. `Box::pin` breaks the run_job -> call_agent -> run_job async cycle.
+/// The sub-run inherits the parent's memory mode: an owner's orchestration
+/// teaches the callee, a consumer's stays inside that consumer's forks. `Box::pin` breaks the run_job -> call_agent -> run_job async cycle.
 async fn run_subagent(
     state: &AppState,
     caller_account_id: &str,
+    parent_job_id: &str,
     target_agent_id: &str,
     subtask: &str,
     depth: i64,
+    mode: &MemoryMode,
 ) -> Result<(String, bool)> {
     // Same account only: another tenant's agent would run on their providers,
     // recall their memory and bill their usage on behalf of the caller.
@@ -288,12 +294,14 @@ async fn run_subagent(
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "INSERT INTO jobs (id, objective_id, agent_id, status, synchronous, chain_depth) VALUES (?, ?, ?, 'running', 1, ?)",
+        "INSERT INTO jobs (id, objective_id, agent_id, status, synchronous, chain_depth, parent_job_id)
+         VALUES (?, ?, ?, 'running', 1, ?, ?)",
     )
     .bind(&sub_job_id)
     .bind(&objective_id)
     .bind(target_agent_id)
     .bind(depth)
+    .bind(parent_job_id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -303,7 +311,7 @@ async fn run_subagent(
         objective_id,
         agent_id: target_agent_id.to_string(),
     };
-    let canned = match Box::pin(run_job(state, &claimed, true)).await {
+    let canned = match Box::pin(run_job(state, &claimed, mode)).await {
         Ok(RunOutcome::Completed { canned }) => canned,
         Ok(RunOutcome::AwaitingApproval) => {
             let msg = "sub-agent paused for approval inside a synchronous call";
