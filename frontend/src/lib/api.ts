@@ -122,6 +122,15 @@ export interface InnerState {
   commitments: Commitment[];
 }
 
+// One row of an agent's memory. `layer` is absent on an older backend, where
+// every row is an episode.
+export interface AgentMemory {
+  key: string;
+  content: string;
+  created_at: string;
+  layer?: "episode" | "knowledge" | (string & {});
+}
+
 export interface UsageTotal {
   provider: string;
   prompt_tokens: number;
@@ -267,10 +276,12 @@ export const api = {
       method: "POST",
       headers: jsonH,
     }),
+  // The agent's own memory: distilled knowledge first, then its episodes.
+  // `knowledge` is absent on a backend older than the layered memory.
   memories: (id: string) =>
-    req<{ memories: { key: string; content: string; created_at: string }[] }>(
+    req<{ memories: AgentMemory[]; knowledge?: AgentMemory[] }>(
       `/api/agents/${id}/memories`,
-    ).then((r) => r.memories),
+    ).then((r) => [...(r.knowledge ?? []), ...r.memories]),
 
   // ICM memories with native importance metadata (weight, access_count).
   icmMemories: (id: string) =>
@@ -392,9 +403,13 @@ export const api = {
     }),
 
   memoryOverview: () =>
-    req<{ stats: Record<string, string>; topics: { topic: string; count: number }[] }>(
-      "/api/memory/overview",
-    ),
+    req<{
+      stats: Record<string, string>;
+      topics: { topic: string; count: number }[];
+      // False on a server without the `icm` binary: memory then runs on its
+      // own database, and the stats and topics are that database's.
+      icm_available?: boolean;
+    }>("/api/memory/overview"),
   memoryPurge: (topic: string) =>
     req<{ ok: boolean }>(`/api/memory/purge?topic=${encodeURIComponent(topic)}`, {
       method: "POST",

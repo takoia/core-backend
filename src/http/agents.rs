@@ -328,6 +328,12 @@ pub struct PublishInput {
 }
 
 /// `POST /api/agents/:id/publish` — make the expert agent public or private.
+///
+/// Going public distils the owner episodes still waiting, in the background
+/// ([`crate::distill::on_publish`]): what a buyer gets is the knowledge layer,
+/// and it must not be empty for want of a sixth episode. The answer says how
+/// many knowledge rows the agent holds now (`knowledge_rows`) and whether
+/// this call started a distillation (`distillation_started`).
 pub async fn publish(
     State(state): State<AppState>,
     crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
@@ -399,10 +405,26 @@ pub async fn publish(
     .bind(&id)
     .execute(&state.db)
     .await?;
-    Ok(Json(json!({ "ok": true, "visibility": visibility })))
+    let distillation_started =
+        visibility == "public" && crate::distill::on_publish(&state, &id).await;
+    let knowledge_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM memories
+         WHERE agent_id = ? AND consumer_account IS NULL AND layer = 'knowledge'",
+    )
+    .bind(&id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(json!({
+        "ok": true,
+        "visibility": visibility,
+        "knowledge_rows": knowledge_rows,
+        "distillation_started": distillation_started,
+    })))
 }
 
 /// `POST /api/agents/import` — import a declarative agent from a TOML body.
+/// A definition that takes the agent public distils its pending episodes like
+/// a publication does (`distillation_started` in the answer).
 pub async fn import_toml(
     State(state): State<AppState>,
     crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
@@ -413,13 +435,14 @@ pub async fn import_toml(
     // agent must be in the caller's account — agent_role enforces both).
     let def = crate::agentdef::parse(&body)
         .map_err(|e| AppError::BadRequest(format!("invalid agent definition: {e}")))?;
-    let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM agents WHERE id = ?")
+    let existing: Option<(String,)> = sqlx::query_as("SELECT visibility FROM agents WHERE id = ?")
         .bind(&def.agent.id)
         .fetch_optional(&state.db)
         .await?;
     if existing.is_some() {
         crate::http::users::require_agent_role(&state, &def.agent.id, &me, "owner").await?;
     }
+    let was_public = existing.is_some_and(|(visibility,)| visibility == "public");
     let id = crate::agentdef::import(&state.db, &me.account_id, &body)
         .await
         .map_err(AppError::Other)?;
@@ -437,7 +460,22 @@ pub async fn import_toml(
         ));
     }
     crate::http::users::grant_owner(&state.db, &id, &me.id).await?;
-    Ok(Json(json!({ "id": id })))
+    // A definition can make an agent public as well as the publish endpoint
+    // does, and its buyers are owed the same: what waits is distilled now.
+    // Only when the import is what made it public — re-importing a public
+    // agent is an edit, and must not buy a model call each time.
+    let is_public: Option<String> =
+        sqlx::query_scalar("SELECT visibility FROM agents WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await?;
+    let distillation_started = !was_public
+        && is_public.as_deref() == Some("public")
+        && crate::distill::on_publish(&state, &id).await;
+    Ok(Json(json!({
+        "id": id,
+        "distillation_started": distillation_started,
+    })))
 }
 
 /// Run a one-shot `claude -p` generation and return the inner JSON object the
@@ -575,19 +613,46 @@ pub async fn export_toml(
     Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], toml))
 }
 
-/// `DELETE /api/agents/:id` — remove an agent and its configs (cascade).
+/// `DELETE /api/agents/:id` — remove an agent, its configs (cascade) and
+/// everything it remembers, in ICM as well as in the mirror.
 pub async fn delete(
     State(state): State<AppState>,
     crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
     crate::http::users::require_agent_role(&state, &id, &me, "owner").await?;
+    // Same account filter as the DELETE below: memory must never be wiped for
+    // an agent this request is not going to remove.
+    let owned: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM agents WHERE id = ? AND account_id = ?")
+            .bind(&id)
+            .bind(&me.account_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if owned.is_none() {
+        return Ok(Json(json!({ "ok": true })));
+    }
+    // ICM first: its topics are found through the mirror rows, which the
+    // cascade below would take away.
+    let wipe = state
+        .memory
+        .forget_agent(&id)
+        .await
+        .map_err(AppError::Other)?;
     sqlx::query("DELETE FROM agents WHERE id = ? AND account_id = ?")
         .bind(&id)
         .bind(&me.account_id)
         .execute(&state.db)
         .await?;
-    Ok(Json(json!({ "ok": true })))
+    // A run still in flight may have stored into a topic after it was wiped.
+    // With the agent row gone no store can succeed any more: wipe once more.
+    let icm_failed = wipe.icm_failed.max(state.memory.wipe_again(&wipe).await);
+    // `memory_complete` is false when an ICM topic could not be forgotten.
+    Ok(Json(json!({
+        "ok": true,
+        "icm_failed": icm_failed,
+        "memory_complete": icm_failed == 0,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -660,7 +725,7 @@ pub async fn add_memory(
             .retain_until(until)
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
     }
-    state
+    let stored = state
         .memory
         .store_with(
             &crate::memory::MemoryScope::owner(&id),
@@ -670,7 +735,17 @@ pub async fn add_memory(
         )
         .await
         .map_err(AppError::Other)?;
-    Ok(Json(json!({ "ok": true })))
+    // `duplicate`: the agent already held this content for this subject, so
+    // nothing was added and `id` is the existing memory. That memory keeps its
+    // legal basis, and its deadline is only ever brought forward: the two
+    // fields say what is in force, which may not be what was sent.
+    Ok(Json(json!({
+        "ok": true,
+        "id": stored.id,
+        "duplicate": !stored.created,
+        "retain_until": stored.retain_until,
+        "legal_basis": stored.legal_basis,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -680,7 +755,8 @@ pub struct EraseQuery {
 }
 
 /// `DELETE /api/agents/:id/memories?subject=…` — targeted erasure (owner):
-/// every memory of this agent about `subject`, ICM and mirror, in every scope.
+/// every memory of this agent about `subject`, ICM and mirror, in every scope,
+/// and the knowledge distilled from them (`derived`).
 pub async fn erase_subject(
     State(state): State<AppState>,
     crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
@@ -701,6 +777,7 @@ pub async fn erase_subject(
     Ok(Json(json!({
         "ok": true,
         "erased": erased.rows,
+        "derived": erased.derived,
         "icm_failed": erased.icm_failed,
         "complete": erased.icm_failed == 0,
     })))
@@ -723,12 +800,15 @@ pub async fn erase_memory(
     };
     Ok(Json(json!({
         "ok": true,
+        "derived": erased.derived,
         "icm_failed": erased.icm_failed,
         "complete": erased.icm_failed == 0,
     })))
 }
 
-/// `GET /api/agents/:id/memories` — the agent's accumulated expertise.
+/// `GET /api/agents/:id/memories` — the agent's accumulated expertise:
+/// `memories` are the owner's episodes, `knowledge` what was distilled from
+/// them (each row carries its `layer`).
 pub async fn memories(
     State(state): State<AppState>,
     crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
@@ -740,7 +820,12 @@ pub async fn memories(
         .list(&crate::memory::MemoryScope::owner(&id))
         .await
         .map_err(AppError::Other)?;
-    Ok(Json(json!({ "memories": items })))
+    let knowledge = state
+        .memory
+        .list(&crate::memory::MemoryScope::knowledge(&id))
+        .await
+        .map_err(AppError::Other)?;
+    Ok(Json(json!({ "memories": items, "knowledge": knowledge })))
 }
 
 #[derive(Deserialize)]

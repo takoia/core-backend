@@ -411,6 +411,10 @@ export const en: Record<string, string> = {
   "memory.confirmPurge": "Purge all memories for:",
   "memory.entriesTitle": "Memories",
   "memory.noEntries": "No entries.",
+  "memory.layerKnowledge": "knowledge",
+  "memory.topicKnowledge": "distilled knowledge",
+  "memory.noIcm": "ICM is not installed on this server: memory runs on its own database (the most recent entries are recalled, nothing is searched).",
+  "memory.confirmPurgeKnowledge": "Purge the distilled knowledge (it is rebuilt from the agent's episodes) for:",
 
   // Video analysis
   "nav.video": "Improve",

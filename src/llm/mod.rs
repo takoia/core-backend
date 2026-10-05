@@ -57,6 +57,9 @@ pub struct CompletionRequest {
     /// Ask the provider to perform live web search if it supports it
     /// (claude -p enables the WebSearch tool).
     pub enable_web_search: bool,
+    /// Pure text-in/text-out: give the provider no tool at all (claude -p
+    /// otherwise keeps its read-only file tool).
+    pub no_tools: bool,
 }
 
 impl CompletionRequest {
@@ -67,7 +70,14 @@ impl CompletionRequest {
             temperature: None,
             max_tokens: None,
             enable_web_search: false,
+            no_tools: false,
         }
+    }
+
+    /// Run this request without any tool.
+    pub fn without_tools(mut self) -> Self {
+        self.no_tools = true;
+        self
     }
 
     /// Enable live web search for this request.
@@ -93,6 +103,8 @@ pub struct Completion {
 }
 
 /// Abstraction over an LLM backend. New providers plug in by implementing this.
+// `async_trait` marks the boxed future `#[must_use]`, which clippy 1.99 flags.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Provider name (e.g. "claude_max", "ollama").

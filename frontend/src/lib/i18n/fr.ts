@@ -411,6 +411,10 @@ export const fr: Record<string, string> = {
   "memory.confirmPurge": "Purger toutes les mémoires de :",
   "memory.entriesTitle": "Mémoires",
   "memory.noEntries": "Aucune entrée.",
+  "memory.layerKnowledge": "savoir",
+  "memory.topicKnowledge": "savoir distillé",
+  "memory.noIcm": "ICM n'est pas installé sur ce serveur : la mémoire fonctionne sur sa propre base (les entrées les plus récentes sont rappelées, rien n'est recherché).",
+  "memory.confirmPurgeKnowledge": "Purger le savoir distillé (il est reconstruit à partir des épisodes de l'agent) de :",
 
   // Video analysis
   "nav.video": "Amélioration",

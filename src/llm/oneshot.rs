@@ -50,7 +50,7 @@ pub async fn generate_json(state: &AppState, prompt: &str) -> Option<Value> {
 }
 
 /// Pull the outermost `{...}` out of free text and parse it.
-fn extract_json_object(text: &str) -> Option<Value> {
+pub(crate) fn extract_json_object(text: &str) -> Option<Value> {
     let slice = match (text.find('{'), text.rfind('}')) {
         (Some(a), Some(b)) if b > a => &text[a..=b],
         _ => text,

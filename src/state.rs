@@ -17,6 +17,9 @@ pub struct AppState {
     pub cipher: Cipher,
     pub memory: Memory,
     pub events: EventBus,
+    /// Agents whose episodes are being distilled right now, so the maintenance
+    /// loop and a publication never distil the same agent at once.
+    pub distilling: crate::distill::InFlight,
     /// Per-event attempt limiter for the public webhook route.
     pub webhook_limiter: Arc<crate::ratelimit::SlidingWindow>,
 }
@@ -24,7 +27,8 @@ pub struct AppState {
 impl AppState {
     pub fn new(db: Db, config: Config) -> Self {
         let cipher = Cipher::new(config.master_key);
-        let memory = Memory::new(db.clone(), config.icm_db_path.clone());
+        let memory = Memory::new(db.clone(), config.icm_db_path.clone())
+            .with_embeddings(config.memory_embeddings);
         let events = EventBus::new(db.clone());
         let webhook_limiter = Arc::new(crate::ratelimit::SlidingWindow::new(
             config.webhook_rate_limit_per_min,
@@ -35,6 +39,7 @@ impl AppState {
             cipher,
             memory,
             events,
+            distilling: crate::distill::InFlight::default(),
             webhook_limiter,
         }
     }

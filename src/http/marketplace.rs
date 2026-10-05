@@ -337,12 +337,18 @@ async fn run_and_bill(
     .bind(input)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO jobs (id, objective_id, agent_id, status, synchronous) VALUES (?, ?, ?, 'running', 1)")
-        .bind(&job_id)
-        .bind(&objective_id)
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+    // `invoked_by`: whose run this is, kept on the job itself. The hold and
+    // the usage row say it too, but neither outlives an abandoned invoke.
+    sqlx::query(
+        "INSERT INTO jobs (id, objective_id, agent_id, status, synchronous, invoked_by)
+         VALUES (?, ?, ?, 'running', 1, ?)",
+    )
+    .bind(&job_id)
+    .bind(&objective_id)
+    .bind(id)
+    .bind(consumer)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
 
     let claimed = ClaimedJob {
@@ -350,9 +356,9 @@ async fn run_and_bill(
         objective_id,
         agent_id: id.to_string(),
     };
-    // A consumer recalls the publisher's curated memory plus their own fork and
-    // writes only to the fork. The publisher calling their own agent is just an
-    // owner run.
+    // A consumer recalls the knowledge distilled from the publisher's memory
+    // (never its raw episodes) plus their own fork, and writes only to the
+    // fork. The publisher calling their own agent is just an owner run.
     let mode = if self_invoke {
         crate::agent::engine::MemoryMode::Owner
     } else {
@@ -684,15 +690,23 @@ pub async fn forget_consumer_memory(
 ) -> AppResult<Json<Value>> {
     let consumer = auth_key(&state, &headers).await?;
     ensure_published(&state, &id).await?;
-    state
+    let icm_failed = state
         .memory
         .forget(&crate::memory::MemoryScope::consumer(
             &id,
             &consumer.account_id,
         ))
         .await
-        .map_err(AppError::Other)?;
-    Ok(Json(json!({ "ok": true, "agent": id })))
+        .map_err(AppError::Other)?
+        .icm_failed;
+    // `complete` is false when ICM did not confirm the erasure: the fork may
+    // still be recalled there, and the call must be made again.
+    Ok(Json(json!({
+        "ok": true,
+        "agent": id,
+        "icm_failed": icm_failed,
+        "complete": icm_failed == 0,
+    })))
 }
 
 async fn ensure_published(state: &AppState, agent_id: &str) -> AppResult<()> {

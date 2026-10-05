@@ -18,9 +18,16 @@ use std::time::Duration;
 use uuid::Uuid;
 
 /// Record an inner-life event in `event_log` so the Journaux page shows what the
-/// agent did autonomously (reflections, mood, initiative, commitments). Uses a
-/// per-agent sentinel `job_id` (`inner:<agent_id>`) so it is filterable.
-async fn audit(state: &AppState, agent_id: &str, kind: &str, message: &str, data: Value) {
+/// agent did autonomously (reflections, mood, initiative, commitments, memory
+/// distillation). Uses a per-agent sentinel `job_id` (`inner:<agent_id>`) so it
+/// is filterable.
+pub(crate) async fn audit(
+    db: &crate::db::Db,
+    agent_id: &str,
+    kind: &str,
+    message: &str,
+    data: Value,
+) {
     let _ = sqlx::query(
         "INSERT INTO event_log (id, job_id, kind, message, data) VALUES (?, ?, ?, ?, ?)",
     )
@@ -29,7 +36,7 @@ async fn audit(state: &AppState, agent_id: &str, kind: &str, message: &str, data
     .bind(kind)
     .bind(message)
     .bind(data.to_string())
-    .execute(&state.db)
+    .execute(db)
     .await;
 }
 
@@ -419,7 +426,7 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
             .await;
         tracing::info!(agent_id, mood = %mood, "agent reflected");
         audit(
-            state,
+            &state.db,
             agent_id,
             "reflection",
             text,
@@ -447,7 +454,7 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
         .execute(&state.db)
         .await;
         audit(
-            state,
+            &state.db,
             agent_id,
             "commitment",
             &format!("committed to: {commitment}"),
@@ -466,7 +473,7 @@ pub async fn reflect(state: &AppState, agent_id: &str) {
         enqueue_self_objective(state, agent_id, "Self-initiated", &intention).await;
         tracing::info!(agent_id, "agent took initiative");
         audit(
-            state,
+            &state.db,
             agent_id,
             "initiative",
             &format!("took initiative: {intention}"),
@@ -498,7 +505,7 @@ async fn honour_due_commitments(state: &AppState) {
             )
             .await;
             audit(
-                state,
+                &state.db,
                 &agent_id,
                 "commitment_due",
                 &format!("following up on commitment: {description}"),
