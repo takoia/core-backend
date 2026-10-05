@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api } from "./api";
+  import { api, type AgentMemory } from "./api";
   import { t } from "./i18n";
   import Icon from "./Icon.svelte";
   import MemoryGraph from "./MemoryGraph.svelte";
@@ -8,13 +8,17 @@
 
   let stats: Record<string, string> = {};
   let topics: { topic: string; count: number }[] = [];
-  let agentMemories: { key: string; content: string; created_at?: string }[] = [];
+  let agentMemories: AgentMemory[] = [];
   let selectedTopic: string | null = null;
   let expandedMem: number | null = null;
   let busy = false;
 
+  // The agent behind an owner (episodes) or knowledge topic; forks have none.
   function agentId(topic: string): string | null {
-    return topic.startsWith("takoia/agent/") ? topic.slice("takoia/agent/".length) : null;
+    for (const prefix of ["takoia/agent/", "takoia/know/"]) {
+      if (topic.startsWith(prefix)) return topic.slice(prefix.length);
+    }
+    return null;
   }
 
   async function load() {
@@ -91,6 +95,7 @@
       {#each agentMemories as m, i}
         <div class="mem" class:open={expandedMem === i} on:click={() => (expandedMem = expandedMem === i ? null : i)} role="button" tabindex="0">
           <span class="muted small">{expandedMem === i ? "▾" : "▸"} {m.key}{m.created_at ? " · " + m.created_at.slice(0, 19).replace("T", " ") : ""}</span>
+          {#if m.layer === "knowledge"}<span class="layer">{$t("memory.layerKnowledge")}</span>{/if}
           {#if expandedMem === i}
             <pre class="memfull">{m.content}</pre>
           {:else}
@@ -120,6 +125,7 @@
   .mem:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .mem.open { background: color-mix(in srgb, var(--accent) 6%, transparent); }
   .memshort { font-size: 0.85rem; }
+  .layer { margin-left: 0.4rem; border: 1px solid var(--accent); color: var(--accent); border-radius: 20px; padding: 0 0.4rem; font-size: 0.7rem; }
   .memfull { margin: 0.4rem 0 0; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, monospace; font-size: 0.78rem; max-height: 340px; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem; }
   .small { font-size: 0.78rem; }
 </style>

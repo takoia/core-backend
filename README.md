@@ -69,9 +69,13 @@ billing.
   human-in-the-loop approval gate; the Restitution step persists what was
   learned back into memory.
 - **ICM memory.** `src/memory.rs` bridges TakoIA to the **ICM** (`icm` CLI) for
-  semantic recall and consolidation, with a local SQLite `memories` table as a
-  fallback. Each agent owns its own ICM topic, so its expertise is private and
-  cumulative — this is what makes a trained agent irreplaceable.
+  recall, with a local SQLite `memories` table as a fallback. Each agent owns
+  its own ICM topics, so its expertise is private and cumulative — this is what
+  makes a trained agent irreplaceable. Memory is layered: *episodes* (what was
+  learnt, as it was learnt — never deleted by maintenance) and *knowledge*
+  (the transferable expertise `src/distill.rs` distils from them through the
+  account's own LLM provider). A run recalls the knowledge first, then its own
+  episodes (the owner) or its own fork (a marketplace consumer).
 - **LLM provider registry.** `src/llm/` selects a provider per step. The
   default `claude_max` provider shells out to `claude -p --output-format json`;
   `ollama`, `gemini`, and `codex` are OpenAI-compatible HTTP providers.
@@ -93,7 +97,7 @@ Flowbite, built with Bun.
 | **Rust** (stable toolchain) | builds and runs the backend | `rustup` recommended |
 | **Bun** (or Node 18+) | installs deps & builds the Svelte frontend | `bun` is what the Makefile uses |
 | **`claude` CLI**, authenticated | the default `claude_max` LLM provider runs `claude -p` | run `claude` once to log in, or generate a plan token with `claude setup-token` |
-| **`icm` CLI** | persistent per-agent long-term memory (semantic recall) | optional but recommended — without it, memory falls back to a local SQLite table |
+| **`icm` CLI** | persistent per-agent long-term memory (keyword recall; semantic with `MEMORY_EMBEDDINGS`) | optional but recommended — without it, memory falls back to a local SQLite table |
 | **SQLite** | embedded database (queue, agents, memory) | no server needed; the file is created automatically |
 | `openssl` | generate the `MASTER_KEY` | already present on most systems |
 
@@ -169,6 +173,7 @@ documents every variable read by `src/config.rs`.
 |---|---|---|
 | `DATABASE_URL` | `sqlite://data/takoia.db?mode=rwc` | Main SQLite database (job queue, agents, marketplace). The file and its parent dir are created on demand. |
 | `ICM_DB_PATH` | `data/icm.db` | Dedicated SQLite database used by the `icm` CLI for agent long-term memory. |
+| `MEMORY_EMBEDDINGS` | _unset_ | Experimental. `true` lets ICM embed memories on store and recall instead of keyword matching only; slow (every `icm` call loads the embedding model, 2-20 s). ICM then folds a near-duplicate into an existing entry, so one entry can hold the text of several memories: erasing one of them forgets the entry and stores the others again (more slow calls), so the erased text does not stay behind. |
 | `AGENT_WORKDIR` | `/tmp/takoia-agent-workspace` | Root of the per-agent working directories for `claude -p` subprocesses (one subdirectory per agent, each with its own `tmp/`), deliberately **outside** the project git tree so the CLI does not pick up the host `CLAUDE.md` or trigger project-scoped ICM recall. The child process gets a cleared environment (PATH, HOME, TMPDIR, LANG, the plan token) — never the server's. |
 
 ### Authentication (admin login)
@@ -404,10 +409,12 @@ next call until the account is topped up. Refused calls (402, 429) count
 towards the key's rate limit.
 
 The agent's memory is **forked per consumer**: your calls recall the
-publisher's curated expertise plus what the agent has learnt about you, and
-write only to your fork. `GET /api/v1/agents/:id/memory` lists it and
-`DELETE` erases it (your right-to-erasure switch); the publisher's memory is
-never touched by consumer calls.
+agent's *knowledge* — the expertise distilled from the publisher's training —
+plus what the agent has learnt about you, and write only to your fork. They
+never read the publisher's raw episodes (their runs, conversations and
+corrections), nor another consumer's fork. `GET /api/v1/agents/:id/memory`
+lists your fork and `DELETE` erases it (your right-to-erasure switch); the
+publisher's memory is never touched by consumer calls.
 
 The response carries `cost_usd`, `publisher_earned_usd`, and two flags:
 `demo` (the output came from the offline provider in `DEMO_MODE`, nothing is
@@ -439,22 +446,92 @@ minute on one event name get a 429.
 ### 8. Memory provenance and erasure
 
 Every memory row records its provenance: `source` (run, interaction, step,
-correction, manual, video, reflection, consolidated), `subject` (whose data it
+correction, manual, video, reflection, distilled), `subject` (whose data it
 is — a consumer account, a person's reference; never the author),
 `legal_basis` (`contract` for consumer runs; whatever the author declares for
-manual entries), an optional `retain_until` (RFC 3339, normalised to UTC), and
-the ICM id. Provenance survives consolidation (the distilled row keeps the
-scope's subject and the earliest deadline of what it replaced).
-`GET /api/agents/:id/memories` returns it all. `POST /api/agents/:id/memory`
+manual entries), an optional `retain_until` (RFC 3339, normalised to UTC), its
+`layer` (`episode` or `knowledge`) and the ICM id.
+`GET /api/agents/:id/memories` returns it all (`memories` for the episodes,
+`knowledge` for the distilled layer). `POST /api/agents/:id/memory`
 accepts `subject` + `legal_basis` (both or neither) and `retain_until`.
+
+Storing is de-duplicated: content the agent already holds for the same scope
+and the same subject (compared ignoring case and spacing) is not stored twice —
+the call answers `duplicate: true` with the existing `id`. The same content for
+two different subjects stays two memories, each erasable on its own.
+A duplicate is not ignored for all that. The existing memory keeps its `key`
+and its `legal_basis`, and its `retain_until` can only be **brought forward**:
+a deadline sent with the repeat is applied when the memory had none or a later
+one, never to extend it. The answer carries the `retain_until` and
+`legal_basis` in force, which may differ from what was sent; to renew or
+change them, erase the memory and store it again. A memory already past its
+deadline is erased rather than matched, and the repeat is stored as new.
 
 Erasure is targeted and honest: `DELETE /api/agents/:id/memories?subject=<id>`
 erases everything the agent holds about one subject in every scope (ICM by id,
 the whole fork topic for a consumer, then the mirror);
 `DELETE /api/agents/:id/memories/:memory_id` erases one entry; the maintenance
-loop erases rows past their `retain_until`. Responses carry `icm_failed` and
+loop erases rows past their `retain_until` (it no longer consolidates, decays
+or prunes). Responses carry `icm_failed` and
 `complete: false` when an ICM copy could not be removed — an erasure that left
-copies behind is reported as partial, never as done.
+copies behind is reported as partial, never as done. That holds for the
+whole-scope switches too: `POST /api/memory/purge?topic=…` (admin) and
+`DELETE /api/v1/agents/:id/memory` (a consumer erasing their fork) empty the
+mirror and answer `complete: false` when ICM did not confirm, in which case the
+call must be made again. Deleting an agent forgets
+its ICM topics too (owner, knowledge and every consumer fork). A memory that
+never reached ICM (it was down, or not installed) is stored there again by the
+same loop, a few per pass.
+
+After the retention sweep, the same loop **distils**: an agent with six or more
+owner episodes waiting (or one that has waited a day) gets one LLM call, on its
+account's default provider, metered in `token_usage` with no job. The model
+returns rules, procedures, facts and preferences — never names, addresses or
+one-off details — which are stored as knowledge rows (`source: distilled`,
+`key` = the kind) and may retire the knowledge they supersede. Episodes are
+only marked as distilled, never rewritten; consumer forks and the agent's own
+reflections are not distilled.
+An episode past its `retain_until` is never sent to the model. An item is
+dropped when it carries an e-mail address or names a data subject of the
+episodes; an answer that retires more than two knowledge rows beyond the items
+it returns is refused whole (episodes are untrusted text, and nothing would
+rebuild a wiped layer).
+An unusable answer or a provider error changes nothing and is retried (the
+canned demo provider is refused). Each pass leaves a `distillation` entry in
+the agent's journal, with the ids of the rows it retired. The retention sweep
+does not wait for a pass, and an erasure does not wait for the model: the
+agent's memory is locked while the pass reads and while it writes, and an
+answer is discarded if what it was written from was erased in between.
+
+Every knowledge row is linked to the episodes it came from
+(`memory_derivations`), so erasure reaches what was derived: erasing an episode
+— by subject, by id, by retention — also erases the knowledge distilled from it
+(`derived` in the response) and sends the other episodes behind that knowledge
+back to be distilled without the erased data. Purging the owner topic purges
+the knowledge topic with it. A knowledge row that replaces another inherits
+its episodes; one that builds on another without replacing it inherits them
+when the model declares it (`based_on`), which is the one link that rests on
+the model's word.
+
+**Recall** has one shape — `- [importance] text` lines under a heading per
+block — and two compositions:
+
+| Run | First block | Second block |
+|---|---|---|
+| owner | knowledge (top entries by weight) | the owner's episodes |
+| marketplace consumer | knowledge (top entries by weight) | that consumer's fork |
+
+The second block is searched with the objective: ICM hits for it, restricted to
+the exact topic; when nothing matches, the scope's top-weight entries; when ICM
+is missing or empty, the most recent rows of the SQLite mirror. An entry
+already shown as knowledge is not repeated. Each block has a budget of 2000
+characters spent on whole entries: one that does not fit is left out, and an
+entry is cut (with an ellipsis) only when nothing fits whole. Past corrections
+(`POST /api/jobs/:id/feedback`) are injected into the owner's runs only; a
+consumer gets them once distilled into knowledge.
+
+ICM still lowers the weight of entries that are not recalled (at most once a
+day), which changes their rank and deletes nothing.
 
 ---
 

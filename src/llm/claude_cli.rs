@@ -230,6 +230,18 @@ impl ClaudeCliProvider {
     }
 }
 
+/// The tools a completion request gets: none when it asks for none, live
+/// research when it asks for web search, the read-only file tool otherwise.
+fn tool_set(req: &CompletionRequest) -> ToolSet {
+    if req.no_tools {
+        ToolSet::None
+    } else if req.enable_web_search {
+        ToolSet::Research
+    } else {
+        ToolSet::ReadOnly
+    }
+}
+
 #[async_trait]
 impl LlmProvider for ClaudeCliProvider {
     fn name(&self) -> &str {
@@ -263,11 +275,7 @@ impl LlmProvider for ClaudeCliProvider {
             }
         }
         let model = req.model.as_deref().or(self.default_model.as_deref());
-        let tools = if req.enable_web_search {
-            ToolSet::Research
-        } else {
-            ToolSet::ReadOnly
-        };
+        let tools = tool_set(&req);
         let out = run(
             &self.runtime,
             ClaudeRun {
@@ -320,6 +328,19 @@ mod tests {
         assert_eq!(ToolSet::None.cli_value(), "");
         assert_eq!(ToolSet::ReadOnly.cli_value(), "Read");
         assert_eq!(ToolSet::Research.cli_value(), "WebSearch,WebFetch,Read");
+    }
+
+    #[test]
+    fn a_request_gets_no_tool_only_when_it_asks_for_none() {
+        let req = || CompletionRequest::new(vec![]);
+        assert_eq!(tool_set(&req()), ToolSet::ReadOnly);
+        assert_eq!(tool_set(&req().with_web_search()), ToolSet::Research);
+        assert_eq!(tool_set(&req().without_tools()), ToolSet::None);
+        // "No tools" wins over a web-search request.
+        assert_eq!(
+            tool_set(&req().with_web_search().without_tools()),
+            ToolSet::None
+        );
     }
 
     #[test]

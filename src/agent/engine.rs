@@ -57,10 +57,11 @@ pub enum MemoryMode {
     /// The publisher's own run: recall and write the agent's memory; the
     /// agent's inner life reacts to the interaction.
     Owner,
-    /// A marketplace consumer: recall the publisher's curated memory (read-only)
-    /// plus the consumer's own fork, and write only to that fork. The agent
-    /// keeps learning from the person using it without touching the expertise
-    /// they pay for.
+    /// A marketplace consumer: recall the knowledge distilled from the
+    /// publisher's memory (read-only, never its raw episodes) plus the
+    /// consumer's own fork, and write only to that fork. The agent keeps
+    /// learning from the person using it without touching the expertise they
+    /// pay for.
     Consumer { account_id: String },
 }
 
@@ -73,7 +74,7 @@ impl MemoryMode {
         }
     }
 
-    /// Consumer account whose fork is recalled on top of the owner's memory.
+    /// Consumer account whose fork is recalled after the agent's knowledge.
     fn recall_consumer(&self) -> Option<&str> {
         match self {
             MemoryMode::Consumer { account_id } => Some(account_id),
@@ -120,10 +121,12 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, mode: &MemoryMode) -> R
     if !memory_ctx.trim().is_empty() {
         bus.publish(JobEvent::log(&job.id, "recalled expertise from memory"));
     }
-    // Past corrections (learn from detected errors).
+    // Past corrections (learn from detected errors), from the scope this run
+    // may read: the publisher's raw corrections quote the publisher's own jobs
+    // and reach a consumer run only once distilled into knowledge.
     let corrections = state
         .memory
-        .recall_feedback(&MemoryScope::owner(&job.agent_id), &objective.prompt, 5)
+        .recall_feedback(&mode.write_scope(&job.agent_id), &objective.prompt, 5)
         .await;
     if !corrections.trim().is_empty() {
         bus.publish(JobEvent::log(&job.id, "applying past corrections"));
@@ -484,8 +487,8 @@ impl<'a> RunCtx<'a> {
         let provider = self.registry.resolve(self.provider_for(step).as_deref())?;
         let mut messages = vec![Message::system(self.system_prompt(step))];
         // Per-agent persona (static identity/voice). The evolving half is the
-        // ICM memory recalled just below — together they form the agent's
-        // personalization that grows as memory consolidates.
+        // memory recalled just below — together they form the agent's
+        // personalization, which grows as episodes are distilled into knowledge.
         if !self.persona.trim().is_empty() {
             messages.push(Message::system(format!(
                 "Your persona / identity:\n{}",
@@ -498,11 +501,13 @@ impl<'a> RunCtx<'a> {
         }
         // Tell the agent it owns a persistent ICM memory it recalls and writes to.
         messages.push(Message::system(
-            "You have a persistent long-term memory (ICM). Before acting it is \
-             recalled for you (the most important and most recent items first), \
-             and your conclusions are saved back to it automatically after each \
-             step. Build on what you already learned; do not contradict it and \
-             avoid repeating it."
+            "You have a persistent long-term memory (ICM). Before acting, the \
+             part of it that matters is recalled for you: the expertise you \
+             have distilled from experience, then what you remember that \
+             relates to this task. Each line starts with its importance in \
+             brackets. What you conclude is saved back to it automatically. \
+             Build on what you already learned; do not contradict it and avoid \
+             repeating it."
                 .to_string(),
         ));
         if !self.session.is_empty() {
@@ -513,7 +518,7 @@ impl<'a> RunCtx<'a> {
         }
         if !recalled.trim().is_empty() {
             messages.push(Message::system(format!(
-                "Your recalled memory (most important & recent first):\n{recalled}"
+                "Your recalled memory:\n\n{recalled}"
             )));
         } else {
             messages.push(Message::system(

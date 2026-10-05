@@ -8,6 +8,7 @@ mod bootstrap;
 mod config;
 mod crypto;
 mod db;
+mod distill;
 mod domain;
 mod error;
 mod http;
@@ -81,11 +82,9 @@ async fn main() -> Result<()> {
     // Recurring scheduler (autonomous learning loops).
     scheduler::spawn(state.clone());
 
-    // Background memory maintenance: consolidate / decay / prune ICM memories.
-    memory::spawn_maintenance(
-        state.memory.clone(),
-        config.memory_maintenance_interval_secs,
-    );
+    // Background memory maintenance: erase memories past their retention, then
+    // distil the episodes that are waiting into knowledge.
+    memory::spawn_maintenance(state.clone(), config.memory_maintenance_interval_secs);
 
     // Inner life: reflection, mood drift, initiative, and kept commitments.
     agent::inner_life::spawn(state.clone(), config.inner_life_interval_secs);

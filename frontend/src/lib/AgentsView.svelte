@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, type Agent } from "./api";
+  import { api, type Agent, type AgentMemory } from "./api";
   import { t } from "./i18n";
 
   export let agents: Agent[] = [];
@@ -9,7 +9,7 @@
 
   let importMsg = "";
   let memoriesFor: string | null = null;
-  let memories: { key: string; content: string }[] = [];
+  let memories: AgentMemory[] = [];
 
   $: visibleAgents = agents.filter((a) => a.visibility === tab);
 
@@ -123,7 +123,11 @@
       <p class="muted">{$t("agents.noMemory")}</p>
     {:else}
       {#each memories as m}
-        <div class="mem"><span class="muted small">{m.key}</span><div>{m.content.slice(0, 240)}</div></div>
+        <div class="mem">
+          <span class="muted small">{m.key}</span>
+          {#if m.layer === "knowledge"}<span class="layer">{$t("memory.layerKnowledge")}</span>{/if}
+          <div>{m.content.slice(0, 240)}</div>
+        </div>
       {/each}
     {/if}
   </div>
@@ -211,4 +215,5 @@
   .row { display: flex; gap: 0.8rem; align-items: center; margin-top: 0.6rem; }
   .small { font-size: 0.78rem; }
   .mem { padding: 0.4rem 0; border-bottom: 1px solid #161c2a; }
+  .layer { margin-left: 0.4rem; border: 1px solid var(--accent); color: var(--accent); border-radius: 20px; padding: 0 0.4rem; font-size: 0.7rem; }
 </style>

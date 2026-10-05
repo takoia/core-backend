@@ -24,7 +24,8 @@ pub struct AppState {
 impl AppState {
     pub fn new(db: Db, config: Config) -> Self {
         let cipher = Cipher::new(config.master_key);
-        let memory = Memory::new(db.clone(), config.icm_db_path.clone());
+        let memory = Memory::new(db.clone(), config.icm_db_path.clone())
+            .with_embeddings(config.memory_embeddings);
         let events = EventBus::new(db.clone());
         let webhook_limiter = Arc::new(crate::ratelimit::SlidingWindow::new(
             config.webhook_rate_limit_per_min,

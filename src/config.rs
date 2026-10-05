@@ -33,9 +33,13 @@ pub struct Config {
     /// Admin password, only set when `ADMIN_PASSWORD` is provided. When `None`,
     /// no admin is seeded and the first-run setup wizard creates it instead.
     pub admin_password: Option<String>,
-    /// How often the background memory maintenance pass runs (consolidate +
-    /// decay + prune), in seconds. Lower it to see memory grow in near real time.
+    /// How often the background memory maintenance pass runs (retention
+    /// sweep, then distillation of pending episodes), in seconds.
     pub memory_maintenance_interval_secs: u64,
+    /// `MEMORY_EMBEDDINGS=true`: let ICM embed memories on store and recall
+    /// instead of keyword matching only. Off by default and experimental:
+    /// every `icm` call then loads the embedding model (seconds per call).
+    pub memory_embeddings: bool,
     /// How often the inner-life pass runs (reflection, mood update, initiative,
     /// kept commitments), in seconds. Lower it to watch the agent come alive.
     pub inner_life_interval_secs: u64,
@@ -93,13 +97,16 @@ impl Config {
             .ok()
             .filter(|p| !p.trim().is_empty());
 
-        // Memory maintenance cadence. Default 300s (5 min) so consolidation is
-        // visible without hammering the LLM; clamped to >= 30s.
+        // Memory maintenance cadence. Default 300s (5 min); clamped to >= 30s.
         let memory_maintenance_interval_secs = std::env::var("MEMORY_MAINTENANCE_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|n| *n >= 30)
             .unwrap_or(300);
+
+        let memory_embeddings = std::env::var("MEMORY_EMBEDDINGS")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
 
         // Inner-life cadence (reflection/mood/initiative). Default 900s (15 min);
         // clamped to >= 60s. Each pass is one LLM call per agent with memory.
@@ -159,6 +166,7 @@ impl Config {
             admin_username,
             admin_password,
             memory_maintenance_interval_secs,
+            memory_embeddings,
             inner_life_interval_secs,
             demo_mode,
             pricing,

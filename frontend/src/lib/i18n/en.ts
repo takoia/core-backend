@@ -411,6 +411,7 @@ export const en: Record<string, string> = {
   "memory.confirmPurge": "Purge all memories for:",
   "memory.entriesTitle": "Memories",
   "memory.noEntries": "No entries.",
+  "memory.layerKnowledge": "knowledge",
 
   // Video analysis
   "nav.video": "Improve",

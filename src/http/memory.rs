@@ -32,7 +32,8 @@ pub async fn purge(
     crate::http::users::require_admin(&me)?;
     let Some(scope) = crate::memory::MemoryScope::parse_topic(&q.topic) else {
         return Err(crate::error::AppError::BadRequest(
-            "topic must be takoia/agent/<agent id> or takoia/agent/<agent id>/consumer/<account>"
+            "topic must be takoia/agent/<agent id>, takoia/know/<agent id> or \
+             takoia/fork/<agent id>/<account>"
                 .into(),
         ));
     };
@@ -45,10 +46,17 @@ pub async fn purge(
     if owned.is_none() {
         return Err(crate::error::AppError::NotFound("agent not found".into()));
     }
-    state
+    let icm_failed = state
         .memory
         .forget(&scope)
         .await
         .map_err(crate::error::AppError::Other)?;
-    Ok(Json(json!({ "ok": true, "purged": q.topic })))
+    // `complete` is false when ICM did not confirm: its entries are still
+    // recalled, and the purge must be asked again.
+    Ok(Json(json!({
+        "ok": true,
+        "purged": q.topic,
+        "icm_failed": icm_failed,
+        "complete": icm_failed == 0,
+    })))
 }
