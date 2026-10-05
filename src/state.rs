@@ -17,6 +17,9 @@ pub struct AppState {
     pub cipher: Cipher,
     pub memory: Memory,
     pub events: EventBus,
+    /// Agents whose episodes are being distilled right now, so the maintenance
+    /// loop and a publication never distil the same agent at once.
+    pub distilling: crate::distill::InFlight,
     /// Per-event attempt limiter for the public webhook route.
     pub webhook_limiter: Arc<crate::ratelimit::SlidingWindow>,
 }
@@ -36,6 +39,7 @@ impl AppState {
             cipher,
             memory,
             events,
+            distilling: crate::distill::InFlight::default(),
             webhook_limiter,
         }
     }

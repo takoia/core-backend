@@ -121,9 +121,10 @@ pub async fn run_job(state: &AppState, job: &ClaimedJob, mode: &MemoryMode) -> R
     if !memory_ctx.trim().is_empty() {
         bus.publish(JobEvent::log(&job.id, "recalled expertise from memory"));
     }
-    // Past corrections (learn from detected errors), from the scope this run
-    // may read: the publisher's raw corrections quote the publisher's own jobs
-    // and reach a consumer run only once distilled into knowledge.
+    // Past corrections (learn from detected errors): the `correction` episodes
+    // of the scope this run writes to, which the personal block above leaves
+    // out. The publisher's raw corrections quote the publisher's own jobs and
+    // reach a consumer run only once distilled into knowledge.
     let corrections = state
         .memory
         .recall_feedback(&mode.write_scope(&job.agent_id), &objective.prompt, 5)

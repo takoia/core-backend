@@ -8,33 +8,48 @@
 
   let stats: Record<string, string> = {};
   let topics: { topic: string; count: number }[] = [];
+  let icmAvailable = true;
   let agentMemories: AgentMemory[] = [];
   let selectedTopic: string | null = null;
   let expandedMem: number | null = null;
   let busy = false;
 
+  const KNOWLEDGE_PREFIX = "takoia/know/";
+
   // The agent behind an owner (episodes) or knowledge topic; forks have none.
   function agentId(topic: string): string | null {
-    for (const prefix of ["takoia/agent/", "takoia/know/"]) {
+    for (const prefix of ["takoia/agent/", KNOWLEDGE_PREFIX]) {
       if (topic.startsWith(prefix)) return topic.slice(prefix.length);
     }
     return null;
+  }
+
+  // An agent has two topics under the same id: its episodes and what was
+  // distilled from them. The second is labelled, or the two rows look alike.
+  function isKnowledge(topic: string): boolean {
+    return topic.startsWith(KNOWLEDGE_PREFIX);
   }
 
   async function load() {
     const o = await api.memoryOverview();
     stats = o.stats;
     topics = o.topics;
+    icmAvailable = o.icm_available ?? true;
   }
 
   async function view(topic: string) {
     selectedTopic = topic;
     const id = agentId(topic);
-    agentMemories = id ? await api.memories(id) : [];
+    const rows = id ? await api.memories(id) : [];
+    // The knowledge topic holds knowledge rows only. The owner topic keeps
+    // both: purging it takes the knowledge along.
+    agentMemories = isKnowledge(topic) ? rows.filter((m) => m.layer === "knowledge") : rows;
   }
 
   async function purge(topic: string) {
-    if (!(await confirmModal(`${$t("memory.confirmPurge")}\n${topic}`))) return;
+    // A purged knowledge topic is distilled again from the agent's episodes.
+    const question = isKnowledge(topic) ? "memory.confirmPurgeKnowledge" : "memory.confirmPurge";
+    if (!(await confirmModal(`${$t(question)}\n${topic}`))) return;
     busy = true;
     try {
       await api.memoryPurge(topic);
@@ -53,6 +68,7 @@
 
 <div class="card">
   <h2>{$t("memory.title")} <span class="muted small">— {$t("memory.subtitle")}</span></h2>
+  {#if !icmAvailable}<p class="muted small">{$t("memory.noIcm")}</p>{/if}
   <div class="stats">
     <div class="stat"><span class="n">{stats.memories ?? "0"}</span><span class="l">{$t("memory.memories")}</span></div>
     <div class="stat"><span class="n">{stats.topics ?? "0"}</span><span class="l">{$t("memory.topics")}</span></div>
@@ -73,7 +89,10 @@
       <tbody>
         {#each topics as tp}
           <tr>
-            <td class="topic">{agentId(tp.topic) ?? tp.topic}</td>
+            <td class="topic">
+              {agentId(tp.topic) ?? tp.topic}
+              {#if isKnowledge(tp.topic)}<span class="layer">{$t("memory.topicKnowledge")}</span>{/if}
+            </td>
             <td><span class="badge">{tp.count}</span></td>
             <td class="actions">
               <button on:click={() => view(tp.topic)}><Icon name="agents" size={14} /> {$t("memory.viewBtn")}</button>
@@ -88,7 +107,10 @@
 
 {#if selectedTopic}
   <div class="card">
-    <h2>{$t("memory.entriesTitle")} <span class="muted small">{agentId(selectedTopic) ?? selectedTopic}</span></h2>
+    <h2>
+      {$t("memory.entriesTitle")} <span class="muted small">{agentId(selectedTopic) ?? selectedTopic}</span>
+      {#if isKnowledge(selectedTopic)}<span class="layer">{$t("memory.topicKnowledge")}</span>{/if}
+    </h2>
     {#if agentMemories.length === 0}
       <p class="muted small">{$t("memory.noEntries")}</p>
     {:else}

@@ -113,8 +113,12 @@ pub async fn get(
 }
 
 /// `POST /api/jobs/:id/feedback` — submit a correction for a job's output. The
-/// correction is recorded in the agent's memory (ICM feedback) so future runs
-/// improve. This is the "detect an error and improve the agent" loop.
+/// correction is recorded as an episode of the memory that job's run wrote to
+/// — the agent's own, or the consumer's fork for a marketplace run — so future
+/// runs on that memory improve, and it can be erased like any other memory.
+/// A run whose memory cannot be told (see [`run_scope`]) is not corrected:
+/// 409, and nothing is stored. This is the "detect an error and improve the
+/// agent" loop.
 pub async fn feedback(
     State(state): State<AppState>,
     crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
@@ -134,12 +138,17 @@ pub async fn feedback(
         return Err(crate::error::AppError::NotFound("job not found".into()));
     };
 
+    // The correction quotes the run (its prompt, its output): it goes where
+    // that run's own memories went, under the same provenance. A consumer's
+    // run is corrected in that consumer's fork, never in the publisher's
+    // episodes — from where it would be distilled into what every buyer gets.
+    let scope = run_scope(&state, &id, &agent_id).await?;
+    let prov = crate::memory::Provenance::for_run(&scope, &id);
     state
         .memory
         .record_feedback(
-            &crate::memory::MemoryScope::owner(&agent_id),
-            // The correcting user authored it; they are not its data subject.
-            None,
+            &scope,
+            &prov,
             &context.chars().take(400).collect::<String>(),
             &body.predicted,
             &body.corrected,
@@ -153,6 +162,124 @@ pub async fn feedback(
         "correction recorded — agent will improve",
     ));
     Ok(Json(json!({ "ok": true, "agent_id": agent_id })))
+}
+
+/// The memory scope the run of `job_id` wrote to. A marketplace invoke by
+/// another account — and every `call_agent` sub-run under it — writes to that
+/// consumer's fork of the agent it ran; anything else is an owner run.
+///
+/// Whose run it was is read from the job at the top of the chain: the account
+/// recorded on it when it was invoked (`jobs.invoked_by`). An invoke older
+/// than that column is told by its billing rows — its reservation while it
+/// runs, its usage row afterwards — and, when it was abandoned before
+/// settlement and has neither, by the fork its run wrote to.
+///
+/// When nothing says whose run it was, the answer is a refusal (409), never
+/// the owner scope: a correction quotes the run's prompt, and a consumer's
+/// prompt stored among the publisher's episodes would be distilled into what
+/// every other buyer is given.
+async fn run_scope(
+    state: &AppState,
+    job_id: &str,
+    agent_id: &str,
+) -> AppResult<crate::memory::MemoryScope> {
+    use crate::memory::MemoryScope;
+    let unknown = || {
+        crate::error::AppError::Conflict(
+            "the account this run was invoked for is not recorded (its invoke was \
+             abandoned before it was settled, or is gone); its run cannot be corrected"
+                .into(),
+        )
+    };
+    // Up the `call_agent` chain: the job it ends on, and that job's agent's
+    // account (the publisher).
+    #[derive(sqlx::FromRow)]
+    struct Top {
+        id: String,
+        parent_job_id: Option<String>,
+        synchronous: i64,
+        invoked_by: Option<String>,
+        publisher: String,
+    }
+    let top: Option<Top> = sqlx::query_as(
+        r#"WITH RECURSIVE chain(id, parent, depth) AS (
+             SELECT id, parent_job_id, 0 FROM jobs WHERE id = ?1
+             UNION ALL
+             SELECT j.id, j.parent_job_id, chain.depth + 1
+             FROM jobs j JOIN chain ON j.id = chain.parent
+             WHERE chain.depth < 64
+           )
+           SELECT j.id, j.parent_job_id, j.synchronous, j.invoked_by,
+                  a.account_id AS publisher
+           FROM chain JOIN jobs j ON j.id = chain.id JOIN agents a ON a.id = j.agent_id
+           ORDER BY chain.depth DESC LIMIT 1"#,
+    )
+    .bind(job_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some(top) = top else {
+        return Err(crate::error::AppError::NotFound("job not found".into()));
+    };
+    // The chain does not reach its first job (a parent is gone, or it is
+    // deeper than any run goes): a sub-run of nobody knows whose invoke.
+    if top.parent_job_id.is_some() {
+        return Err(unknown());
+    }
+    let for_account = |account: &str| {
+        if account == top.publisher {
+            MemoryScope::owner(agent_id)
+        } else {
+            MemoryScope::consumer(agent_id, account)
+        }
+    };
+    if let Some(account) = &top.invoked_by {
+        return Ok(for_account(account));
+    }
+    // Only an invoke is created synchronous without a parent; everything
+    // else at the top of a chain (objective, schedule, webhook, inner life)
+    // is the publisher's own run.
+    if top.synchronous == 0 {
+        return Ok(MemoryScope::owner(agent_id));
+    }
+    // An invoke from before `invoked_by`: its billing rows, a consumer's
+    // ahead of the publisher's own.
+    let billed: Vec<String> = sqlx::query_scalar(
+        r#"SELECT consumer_account FROM marketplace_usage WHERE job_id = ?1
+           UNION ALL
+           SELECT account_id FROM credit_hold WHERE job_id = ?1"#,
+    )
+    .bind(&top.id)
+    .fetch_all(&state.db)
+    .await?;
+    if let Some(account) = billed
+        .iter()
+        .find(|account| **account != top.publisher)
+        .or(billed.first())
+    {
+        return Ok(for_account(account));
+    }
+    // Abandoned before settlement: what its run stored, anywhere in the
+    // chain, says which fork it wrote to. One fork, or it is not known.
+    let forks: Vec<String> = sqlx::query_scalar(
+        r#"WITH RECURSIVE tree(id, depth) AS (
+             SELECT ?1, 0
+             UNION ALL
+             SELECT j.id, tree.depth + 1
+             FROM jobs j JOIN tree ON j.parent_job_id = tree.id
+             WHERE tree.depth < 64
+           )
+           SELECT DISTINCT m.consumer_account
+           FROM memories m JOIN tree ON m.job_id = tree.id
+           WHERE m.consumer_account IS NOT NULL
+           LIMIT 2"#,
+    )
+    .bind(&top.id)
+    .fetch_all(&state.db)
+    .await?;
+    match forks.as_slice() {
+        [account] => Ok(for_account(account)),
+        _ => Err(unknown()),
+    }
 }
 
 #[derive(serde::Deserialize)]

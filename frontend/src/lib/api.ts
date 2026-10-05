@@ -403,9 +403,13 @@ export const api = {
     }),
 
   memoryOverview: () =>
-    req<{ stats: Record<string, string>; topics: { topic: string; count: number }[] }>(
-      "/api/memory/overview",
-    ),
+    req<{
+      stats: Record<string, string>;
+      topics: { topic: string; count: number }[];
+      // False on a server without the `icm` binary: memory then runs on its
+      // own database, and the stats and topics are that database's.
+      icm_available?: boolean;
+    }>("/api/memory/overview"),
   memoryPurge: (topic: string) =>
     req<{ ok: boolean }>(`/api/memory/purge?topic=${encodeURIComponent(topic)}`, {
       method: "POST",

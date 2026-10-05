@@ -3,7 +3,9 @@
 //! Backed by ICM (`icm` CLI) for recall, with the `memories` table as the
 //! always-available source of truth for the UI and as a fallback if ICM is
 //! unavailable. Each agent owns an ICM topic, so an expert agent (e.g. trading)
-//! accumulates and refines expertise across runs.
+//! accumulates and refines expertise across runs. A host without the `icm`
+//! binary runs on the mirror alone: the binary is probed, not tried on every
+//! call (see [`Memory::probe_icm`]).
 //!
 //! Memory is scoped ([`MemoryScope`]): the owner's memory lives in
 //! `takoia/agent/{id}`; every marketplace consumer gets a fork of their own in
@@ -26,7 +28,9 @@ use anyhow::Result;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -106,11 +110,20 @@ struct MirrorRow {
 
 impl MirrorRow {
     fn scope(&self) -> MemoryScope {
-        match (&self.consumer_account, self.layer.as_str()) {
-            (Some(account), _) => MemoryScope::consumer(&self.agent_id, account),
-            (None, LAYER_KNOWLEDGE) => MemoryScope::knowledge(&self.agent_id),
-            (None, _) => MemoryScope::owner(&self.agent_id),
-        }
+        scope_of(
+            &self.agent_id,
+            self.consumer_account.as_deref(),
+            &self.layer,
+        )
+    }
+}
+
+/// The scope a mirror row belongs to, from the columns that say so.
+fn scope_of(agent_id: &str, consumer_account: Option<&str>, layer: &str) -> MemoryScope {
+    match (consumer_account, layer) {
+        (Some(account), _) => MemoryScope::consumer(agent_id, account),
+        (None, LAYER_KNOWLEDGE) => MemoryScope::knowledge(agent_id),
+        (None, _) => MemoryScope::owner(agent_id),
     }
 }
 
@@ -199,7 +212,8 @@ pub fn normalize_deadline(input: &str) -> Result<String> {
 /// Result of an erasure: rows removed from the mirror, and how many of them
 /// could NOT be removed from ICM (no id known, or `icm forget` failed) — the
 /// caller must surface that, an erasure that silently left ICM copies is not
-/// an erasure.
+/// an erasure. On a host without `icm` a row that never had an ICM id has no
+/// copy to leave behind and is not counted; one that had an id still is.
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 pub struct Erased {
     /// The rows that were asked for.
@@ -208,6 +222,18 @@ pub struct Erased {
     pub derived: u64,
     /// ICM copies left behind, over both kinds of rows.
     pub icm_failed: u64,
+}
+
+/// What [`Memory::forget`] did beyond emptying the scope.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Purged {
+    /// ICM topics that could NOT be forgotten: their entries are still
+    /// recalled (ICM is asked before the mirror), so the purge is incomplete
+    /// and must be asked again.
+    pub icm_failed: u64,
+    /// Owner episodes sent back to be distilled, because the knowledge that
+    /// was distilled from them is gone (a purge of the knowledge layer alone).
+    pub requeued: u64,
 }
 
 /// What [`Memory::forget_agent`] wiped.
@@ -454,6 +480,12 @@ pub struct Memory {
     /// `MEMORY_EMBEDDINGS`: let ICM embed on store and recall (off by default).
     embeddings: bool,
     locks: AgentLocks,
+    /// The binary every ICM call runs.
+    icm_bin: String,
+    /// Whether that binary could be run when last probed
+    /// ([`probe_icm`](Self::probe_icm)); assumed so until a probe says
+    /// otherwise. Shared by every clone.
+    icm_present: Arc<AtomicBool>,
 }
 
 /// Prompt budget of the knowledge block, in chars, spent on whole entries.
@@ -464,6 +496,24 @@ const EPISODE_RECALL_CHARS: usize = 2000;
 const FORK_RECALL_CHARS: usize = 2000;
 /// Prompt budget of a single-scope [`Memory::recall`].
 const SCOPE_RECALL_CHARS: usize = 4000;
+/// Prompt budget of the corrections a run is given ([`Memory::recall_feedback`]).
+const CORRECTION_RECALL_CHARS: usize = 2000;
+/// Query hits looked through for corrections: they are a few rows among a
+/// scope's episodes, and ICM cannot be asked for them alone.
+const CORRECTION_HIT_WINDOW: usize = 50;
+/// Most entries asked for beyond the ones wanted to make up for the
+/// corrections a personal block leaves out.
+const CORRECTION_SKIP_MAX: usize = 100;
+/// `memories.key` of a correction (see [`Memory::record_feedback`]).
+const CORRECTION_KEY: &str = "correction";
+/// How long `icm --version` may take before the binary is taken as missing.
+const ICM_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maintenance passes between two probes of the `icm` binary while it is
+/// there. While it is missing it is probed on every pass: one failed probe on
+/// a host that has ICM must not keep memory off it for long.
+const ICM_REPROBE_PASSES: u64 = 5;
+/// ICM topics left behind by erasures that one maintenance pass wipes again.
+const ICM_RESIDUE_PER_PASS: i64 = 25;
 /// Knowledge rows asked for per run; the budget decides how many are kept.
 const KNOWLEDGE_RECALL_ENTRIES: usize = 24;
 /// `icm recall --topic` matches sibling topics too and applies `--limit`
@@ -485,6 +535,8 @@ impl Memory {
             icm_db_path,
             embeddings: false,
             locks: AgentLocks::default(),
+            icm_bin: "icm".to_string(),
+            icm_present: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -499,13 +551,67 @@ impl Memory {
     /// The one place an `icm` command is built: the binary, the dedicated
     /// database, and keyword-only mode unless embeddings were opted into.
     /// Callers append the subcommand and its arguments.
-    fn icm(&self) -> Command {
-        let mut cmd = Command::new("icm");
+    ///
+    /// `None` while the binary is missing ([`probe_icm`](Self::probe_icm)):
+    /// nothing is spawned then, and every caller has to say what it does
+    /// without ICM.
+    fn icm(&self) -> Option<Command> {
+        if !self.icm_available() {
+            return None;
+        }
+        let mut cmd = Command::new(&self.icm_bin);
         cmd.arg("--db").arg(&self.icm_db_path);
         if !self.embeddings {
             cmd.arg("--no-embeddings");
         }
-        cmd
+        Some(cmd)
+    }
+
+    /// Whether the `icm` binary could be run when last probed. While it could
+    /// not, memory runs on the mirror alone: stores write only there, recall
+    /// reads it, and an erasure has no ICM copy to remove unless the row
+    /// carries the id of one.
+    pub fn icm_available(&self) -> bool {
+        self.icm_present.load(Ordering::Relaxed)
+    }
+
+    /// Run `icm --version` and remember whether it worked. Called once at
+    /// startup, then every few maintenance passes — every pass while it is
+    /// missing ([`reprobe_due`]): a host without ICM is told so once, here,
+    /// instead of failing a spawn on every store and recall — and ICM
+    /// installed later is picked up without a restart.
+    pub async fn probe_icm(&self) -> bool {
+        let mut cmd = Command::new(&self.icm_bin);
+        cmd.arg("--version").kill_on_drop(true);
+        let found = matches!(
+            tokio::time::timeout(ICM_PROBE_TIMEOUT, cmd.output()).await,
+            Ok(Ok(out)) if out.status.success()
+        );
+        match (self.icm_present.swap(found, Ordering::Relaxed), found) {
+            (true, false) => tracing::warn!(
+                binary = %self.icm_bin,
+                "icm cannot be run: memory works from its own database only (no ICM recall, no ICM copies) until it is installed"
+            ),
+            (false, true) => {
+                tracing::info!(binary = %self.icm_bin, "icm found: memory uses it again")
+            }
+            _ => {}
+        }
+        found
+    }
+
+    /// Take the binary as present or missing without probing it.
+    #[cfg(test)]
+    pub fn assume_icm(&self, present: bool) {
+        self.icm_present.store(present, Ordering::Relaxed);
+    }
+
+    /// Run another binary in place of `icm`.
+    #[cfg(test)]
+    pub fn with_icm_binary(mut self, binary: &str) -> Self {
+        self.icm_bin = binary.to_string();
+        self.icm_present = Arc::new(AtomicBool::new(true));
+        self
     }
 
     /// The mirror's database, for the distillation pass that works on it.
@@ -536,8 +642,9 @@ impl Memory {
 
     /// What a run recalls, as headed blocks of `- [importance] summary` lines.
     ///
-    /// Every run gets the KNOWLEDGE block first: the top-weight entries of
-    /// what was distilled from the publisher's episodes. Then comes the
+    /// Every run gets the KNOWLEDGE block first: what was distilled from the
+    /// publisher's episodes, the rows relevant to `query` ahead of the
+    /// top-weight ones that fill the rest ([`relevant_first`]). Then comes the
     /// personal block — the owner's episodes for the owner's own run, the
     /// consumer's fork for a marketplace run — so the freshest, most specific
     /// context sits last, right before the task. A consumer run never reads
@@ -546,7 +653,8 @@ impl Memory {
     ///
     /// Each block has its own budget, spent on whole entries (see
     /// [`within_budget`]); an entry already shown by the knowledge block is
-    /// not repeated.
+    /// not repeated. Corrections are not part of the personal block: a run is
+    /// given them on their own ([`recall_feedback`](Self::recall_feedback)).
     pub async fn recall_composed(
         &self,
         agent_id: &str,
@@ -569,8 +677,8 @@ impl Memory {
         // Independent lookups (a few `icm` spawns each): run them together.
         let knowledge_scope = MemoryScope::knowledge(agent_id);
         let (knowledge, personal) = tokio::join!(
-            self.entries(&knowledge_scope, None, KNOWLEDGE_RECALL_ENTRIES),
-            self.entries(&personal, Some(query), limit)
+            self.knowledge_entries(&knowledge_scope, query),
+            self.entries(&personal, Some(query), limit, Rows::NoCorrection)
         );
         // Budget first for the knowledge: only what its block really shows may
         // hide a personal entry.
@@ -588,40 +696,90 @@ impl Memory {
     /// No other scope or layer is read: a caller that wants the distilled
     /// knowledge too asks for [`recall_composed`](Self::recall_composed).
     pub async fn recall(&self, scope: &MemoryScope, query: &str, limit: usize) -> String {
-        let entries = self.entries(scope, Some(query), limit).await;
+        let entries = self.entries(scope, Some(query), limit, Rows::All).await;
         render_entries(&within_budget(
             distinct(entries, &mut HashSet::new()),
             SCOPE_RECALL_CHARS,
         ))
     }
 
+    /// The knowledge a run is shown, at most [`KNOWLEDGE_RECALL_ENTRIES`] rows
+    /// and each once: the ICM hits for `query` first — the same search, cut to
+    /// the exact topic, as for a personal block — then the layer's top-weight
+    /// rows, which need no match, so the block is as full without a hit as it
+    /// ever was. The mirror serves it when ICM is missing or holds nothing
+    /// for the topic.
+    async fn knowledge_entries(&self, scope: &MemoryScope, query: &str) -> Vec<Recalled> {
+        let cap = KNOWLEDGE_RECALL_ENTRIES;
+        let query = Some(query.trim()).filter(|q| !q.is_empty());
+        let (hits, top) = tokio::join!(
+            async {
+                match query {
+                    Some(query) => self.icm_hits(scope, query, cap).await,
+                    None => Vec::new(),
+                }
+            },
+            self.icm_top(scope, cap)
+        );
+        let entries = relevant_first(hits, top, cap);
+        if !entries.is_empty() {
+            return entries;
+        }
+        self.mirror_or_nothing(scope, Rows::All, cap).await
+    }
+
     /// Up to `limit` entries of one scope, from the best source that has any:
-    /// 1) ICM hits for `query` (`None`: the scope is recalled whole, not
-    ///    searched — the knowledge layer);
+    /// 1) ICM hits for `query` (`None`: the scope is not searched);
     /// 2) keyword recall frequently misses (a query shares no term with the
     ///    memories), so the scope's top-weight entries, which need no match —
     ///    accumulated expertise is ALWAYS injected;
     /// 3) the mirror, when ICM is missing or holds nothing for the topic.
+    ///
+    /// With [`Rows::NoCorrection`] the scope's corrections are left out, and
+    /// ICM is asked for that many more entries so the block is not short of
+    /// what it leaves out.
     async fn entries(
         &self,
         scope: &MemoryScope,
         query: Option<&str>,
         limit: usize,
+        rows: Rows,
     ) -> Vec<Recalled> {
         if limit == 0 {
             return Vec::new();
         }
+        let skipped = match rows {
+            Rows::NoCorrection => self.corrections(scope).await,
+            Rows::All | Rows::Corrections => Corrections::default(),
+        };
+        let fetch = limit.saturating_add(skipped.len().min(CORRECTION_SKIP_MAX));
+        let kept = |mut entries: Vec<Recalled>| {
+            entries.retain(|entry| !skipped.holds(entry));
+            entries.truncate(limit);
+            entries
+        };
         if let Some(query) = query.map(str::trim).filter(|q| !q.is_empty()) {
-            let hits = self.icm_hits(scope, query, limit).await;
+            let hits = kept(self.icm_hits(scope, query, fetch).await);
             if !hits.is_empty() {
                 return hits;
             }
         }
-        let top = self.icm_top(scope, limit).await;
+        let top = kept(self.icm_top(scope, fetch).await);
         if !top.is_empty() {
             return top;
         }
-        match self.mirror_entries(scope, limit).await {
+        self.mirror_or_nothing(scope, rows, limit).await
+    }
+
+    /// [`mirror_entries`](Self::mirror_entries), a failure logged and read as
+    /// an empty scope: recall never breaks a run.
+    async fn mirror_or_nothing(
+        &self,
+        scope: &MemoryScope,
+        rows: Rows,
+        limit: usize,
+    ) -> Vec<Recalled> {
+        match self.mirror_entries(scope, rows, limit).await {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::warn!(topic = %scope.topic(), error = %e, "memory mirror recall failed");
@@ -630,21 +788,26 @@ impl Memory {
         }
     }
 
-    /// True when a TOON recall payload actually carries rows. ICM emits a header
-    /// like `memories[0]{id,topic,...}:` (note the `[0]`) with no rows when
-    /// nothing matched — that header is non-empty but must be treated as empty.
-    fn toon_has_entries(toon: &str) -> bool {
-        let t = toon.trim();
-        if t.is_empty() {
-            return false;
-        }
-        if let Some(rest) = t.strip_prefix("memories[") {
-            if let Some(end) = rest.find(']') {
-                return rest[..end].trim() != "0";
+    /// The corrections `scope` holds, as recall needs them to recognise one
+    /// among the entries ICM serves. A failure is logged and read as none.
+    async fn corrections(&self, scope: &MemoryScope) -> Corrections {
+        let rows: Result<Vec<(Option<String>, String)>, sqlx::Error> = sqlx::query_as(
+            "SELECT icm_id, content FROM memories
+             WHERE agent_id = ? AND consumer_account IS ? AND layer = ? AND key = ?",
+        )
+        .bind(scope.agent_id())
+        .bind(scope.consumer_account())
+        .bind(scope.layer())
+        .bind(CORRECTION_KEY)
+        .fetch_all(&self.db)
+        .await;
+        match rows {
+            Ok(rows) => Corrections::of(rows),
+            Err(e) => {
+                tracing::warn!(topic = %scope.topic(), error = %e, "could not list a scope's corrections");
+                Corrections::default()
             }
         }
-        // Unknown shape: only trust it if there is more than the header line.
-        t.lines().count() > 1
     }
 
     /// Stdout of a read-only `icm` call that must print a JSON list, or `None`
@@ -667,8 +830,10 @@ impl Memory {
     /// any query. `icm list --topic` is an exact match and needs no keyword
     /// hit, so it reliably surfaces what the scope holds.
     async fn icm_top(&self, scope: &MemoryScope, limit: usize) -> Vec<Recalled> {
+        let Some(mut cmd) = self.icm() else {
+            return Vec::new();
+        };
         let topic = scope.topic();
-        let mut cmd = self.icm();
         cmd.arg("list")
             .arg("--topic")
             .arg(&topic)
@@ -690,9 +855,31 @@ impl Memory {
     /// --topic` matches topics by substring, so without the filter a slug agent
     /// id would pull in its longer siblings (`invoice-bot` ⊂ `invoice-bot-v2`);
     /// and since ICM cuts to `--limit` first, more is asked for than wanted.
+    ///
+    /// A run's query is its whole prompt, a sentence or several. In keyword
+    /// mode ICM answers one with every row any of its words is found in —
+    /// as a substring, and in the topic and the keywords as much as in the
+    /// text (verified against icm 0.10.65): `a` or `agent` hit everything.
+    /// So ICM is asked about the query's salient words only, the ones a
+    /// memory's own keywords are made of ([`content_keywords`](Self::content_keywords)),
+    /// and its answer is kept and ranked on the text ([`by_relevance`]). With
+    /// embeddings ICM ranks by meaning: the query goes as it is.
     async fn icm_hits(&self, scope: &MemoryScope, query: &str, limit: usize) -> Vec<Recalled> {
+        let Some(mut cmd) = self.icm() else {
+            return Vec::new();
+        };
+        let terms = if self.embeddings {
+            Vec::new()
+        } else {
+            Self::content_keywords(query)
+        };
+        // A query without one salient word is asked as it is.
+        let asked = if terms.is_empty() {
+            query.to_string()
+        } else {
+            terms.join(" ")
+        };
         let topic = scope.topic();
-        let mut cmd = self.icm();
         cmd.arg("recall")
             .arg("--topic")
             .arg(&topic)
@@ -702,30 +889,44 @@ impl Memory {
             .arg("json")
             // The query is free text: after `--` it is never read as a flag.
             .arg("--")
-            .arg(query);
+            .arg(asked);
         let Some(json) = self.icm_json(cmd, "recall", &topic).await else {
             return Vec::new();
         };
         let mut entries = parse_recalled(&json, &topic);
+        if !terms.is_empty() {
+            entries = by_relevance(entries, &terms);
+        }
         entries.truncate(limit);
         entries
     }
 
     /// The scope's most recent mirror rows, in the shape ICM would give them.
-    async fn mirror_entries(&self, scope: &MemoryScope, limit: usize) -> Result<Vec<Recalled>> {
+    async fn mirror_entries(
+        &self,
+        scope: &MemoryScope,
+        rows: Rows,
+        limit: usize,
+    ) -> Result<Vec<Recalled>> {
+        // The key is a constant of this file, not a value to bind.
+        let only = match rows {
+            Rows::All => String::new(),
+            Rows::NoCorrection => format!("AND key != '{CORRECTION_KEY}'"),
+            Rows::Corrections => format!("AND key = '{CORRECTION_KEY}'"),
+        };
         // `IS ?` so a NULL bind matches the owner rows (`= NULL` never matches).
-        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        let found: Vec<(String, String, Option<String>)> = sqlx::query_as(&format!(
             "SELECT key, content, icm_id FROM memories
-             WHERE agent_id = ? AND consumer_account IS ? AND layer = ?
-             ORDER BY created_at DESC, rowid DESC LIMIT ?",
-        )
+             WHERE agent_id = ? AND consumer_account IS ? AND layer = ? {only}
+             ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        ))
         .bind(scope.agent_id())
         .bind(scope.consumer_account())
         .bind(scope.layer())
         .bind(i64::try_from(limit).unwrap_or(i64::MAX))
         .fetch_all(&self.db)
         .await?;
-        Ok(rows
+        Ok(found
             .into_iter()
             .filter(|(_, content, _)| !content.trim().is_empty())
             .map(|(key, content, icm_id)| Recalled {
@@ -800,8 +1001,9 @@ impl Memory {
 
     /// `icm store` of one content in `scope`'s topic: `Ok(Some(id))` with
     /// ICM's id for it, `Ok(None)` when ICM ran but refused or printed no id,
-    /// `Err` when it could not be run at all (not installed). Failures are
-    /// logged and nothing more: ICM is best-effort, it must never break a run.
+    /// `Err` when it could not be run at all (not installed, or known to be
+    /// missing). Failures are logged and nothing more: ICM is best-effort, it
+    /// must never break a run.
     async fn icm_store(
         &self,
         scope: &MemoryScope,
@@ -812,7 +1014,10 @@ impl Memory {
         // derived from the content so keyword recall can match content queries.
         let mut keywords = vec![key.to_string()];
         keywords.extend(Self::content_keywords(content));
-        let mut cmd = self.icm();
+        // No binary, no attempt and no warning: the probe said so once.
+        let Some(mut cmd) = self.icm() else {
+            return Err(std::io::ErrorKind::NotFound.into());
+        };
         cmd.arg("store")
             .arg("--topic")
             .arg(scope.topic())
@@ -848,11 +1053,12 @@ impl Memory {
     pub(crate) async fn attach_icm_id(
         &self,
         held: Option<&AgentGuard>,
-        agent_id: &str,
+        scope: &MemoryScope,
         row_id: &str,
         content: &str,
         icm_id: &str,
     ) -> Result<()> {
+        let agent_id = scope.agent_id();
         let attached = sqlx::query("UPDATE memories SET icm_id = ? WHERE id = ?")
             .bind(icm_id)
             .bind(row_id)
@@ -868,7 +1074,7 @@ impl Memory {
                 held.guard(),
                 &HashMap::from([(icm_id.to_string(), 1)]),
                 &HashSet::new(),
-                &[(icm_id.to_string(), content_hash(content))],
+                &[(icm_id.to_string(), content_hash(content), scope.topic())],
             )
             .await?
         };
@@ -893,7 +1099,7 @@ impl Memory {
             Err(_) => Ok(None),
             Ok(None) => Ok(Some(false)),
             Ok(Some(icm_id)) => {
-                self.attach_icm_id(held, &row.agent_id, &row.id, &row.content, &icm_id)
+                self.attach_icm_id(held, &row.scope(), &row.id, &row.content, &icm_id)
                     .await?;
                 Ok(Some(true))
             }
@@ -905,6 +1111,10 @@ impl Memory {
     /// else, since recall asks ICM first: try a few of them again. Returns how
     /// many now have their copy. Run by the maintenance loop.
     pub async fn backfill_icm(&self) -> Result<u64> {
+        if !self.icm_available() {
+            // Nothing to store them in; they are tried once ICM is found.
+            return Ok(0);
+        }
         // Random order: a row ICM keeps refusing must not hold the others back.
         let rows: Vec<MirrorRow> = sqlx::query_as(&format!(
             "SELECT {MIRROR_ROW_COLUMNS} FROM memories
@@ -1090,7 +1300,7 @@ impl Memory {
         // A row ICM did not take stays in the mirror and is tried again by the
         // maintenance loop (`backfill_icm`).
         if let Ok(Some(icm_id)) = self.icm_store(scope, key, content).await {
-            self.attach_icm_id(held, agent_id, &id, content, &icm_id)
+            self.attach_icm_id(held, scope, &id, content, &icm_id)
                 .await?;
         }
         Ok(Stored {
@@ -1201,8 +1411,11 @@ impl Memory {
     /// The ICM side of an erasure, under the agent's lock. `leaving` maps each
     /// ICM id carried by the rows on their way out to how many of them carry
     /// it, `gone` holds those rows' mirror ids, and `vanished` adds the
-    /// `(icm id, content hash)` of rows the mirror no longer has. Returns how
-    /// many leaving rows keep an ICM copy because `icm forget` failed.
+    /// `(icm id, content hash, topic)` of rows the mirror no longer has.
+    /// Returns how many leaving rows keep an ICM copy because `icm forget`
+    /// failed — or could not be tried, on a host without `icm`. Such entries
+    /// are remembered by id ([`note_left_behind`](Self::note_left_behind)), to
+    /// be forgotten as soon as ICM answers.
     ///
     /// An entry no surviving row points at is forgotten. An entry surviving
     /// rows share is kept as long as it holds nothing but their content (the
@@ -1216,14 +1429,17 @@ impl Memory {
         _guard: &AgentGuard,
         leaving: &HashMap<String, u64>,
         gone: &HashSet<&str>,
-        vanished: &[(String, String)],
+        vanished: &[(String, String, String)],
     ) -> Result<u64> {
         use futures::stream::{self, StreamExt};
         // Content hashes leaving each entry, and the rows staying on it.
         let mut out: HashMap<String, HashSet<String>> = HashMap::new();
         let mut staying: HashMap<String, Vec<MirrorRow>> = HashMap::new();
-        for (icm_id, hash) in vanished {
+        // The topic each entry lives in.
+        let mut topics: HashMap<String, String> = HashMap::new();
+        for (icm_id, hash, topic) in vanished {
             out.entry(icm_id.clone()).or_default().insert(hash.clone());
+            topics.insert(icm_id.clone(), topic.clone());
         }
         let icm_ids: Vec<&String> = leaving.keys().collect();
         for chunk in icm_ids.chunks(SQL_IN_CHUNK) {
@@ -1239,6 +1455,9 @@ impl Memory {
                 let Some(icm_id) = row.icm_id.clone() else {
                     continue;
                 };
+                topics
+                    .entry(icm_id.clone())
+                    .or_insert_with(|| row.scope().topic());
                 if gone.contains(row.id.as_str()) {
                     out.entry(icm_id)
                         .or_default()
@@ -1267,9 +1486,15 @@ impl Memory {
 
         let failed: HashSet<String> = stream::iter(forget)
             .map(|icm_id| {
-                let mut cmd = self.icm();
-                cmd.arg("forget").arg(&icm_id);
+                let cmd = self.icm().map(|mut cmd| {
+                    cmd.arg("forget").arg(&icm_id);
+                    cmd
+                });
                 async move {
+                    // Without the binary nothing is tried: the copy stays.
+                    let Some(mut cmd) = cmd else {
+                        return Some(icm_id);
+                    };
                     match cmd.output().await {
                         Ok(o) if o.status.success() => None,
                         Ok(o) => {
@@ -1287,34 +1512,61 @@ impl Memory {
             .filter_map(|failed| async move { failed })
             .collect()
             .await;
+        if !failed.is_empty() {
+            if !self.icm_available() {
+                tracing::warn!(
+                    copies = failed.len(),
+                    "icm is missing: the ICM copies of erased memories were left behind"
+                );
+            }
+            // Owned: a future borrowing a closure's argument is not `Send`
+            // in a way axum accepts.
+            let left: Vec<(String, String)> = failed
+                .iter()
+                .map(|icm_id| {
+                    let topic = topics.get(icm_id).cloned().unwrap_or_default();
+                    (icm_id.clone(), topic)
+                })
+                .collect();
+            self.note_left_behind(&left).await;
+        }
 
         // Only once every forget is done: a content stored again must not land
         // in an entry that is itself on its way out.
         for (icm_id, rows) in rebuild {
             if failed.contains(&icm_id) {
-                // Still there, and still theirs.
+                // Still there, and still theirs — until it is forgotten for
+                // good (`wipe_residue`), which stores them again as well.
                 continue;
             }
-            for row in rows {
-                let fresh = self
-                    .icm_store(&row.scope(), &row.key, &row.content)
-                    .await
-                    .ok()
-                    .flatten();
-                if fresh.is_none() {
-                    tracing::warn!(row_id = %row.id, "a surviving memory lost its ICM copy; maintenance will store it again");
-                }
-                sqlx::query("UPDATE memories SET icm_id = ? WHERE id = ?")
-                    .bind(&fresh)
-                    .bind(&row.id)
-                    .execute(&self.db)
-                    .await?;
-            }
+            self.store_again(&rows).await?;
         }
         Ok(failed
             .iter()
             .filter_map(|icm_id| leaving.get(icm_id))
             .sum::<u64>())
+    }
+
+    /// Give `rows` an ICM copy of their own content again, once the entry
+    /// they pointed at is forgotten. A row ICM does not take is left without
+    /// an id, for the back-fill.
+    async fn store_again(&self, rows: &[MirrorRow]) -> Result<()> {
+        for row in rows {
+            let fresh = self
+                .icm_store(&row.scope(), &row.key, &row.content)
+                .await
+                .ok()
+                .flatten();
+            if fresh.is_none() {
+                tracing::warn!(row_id = %row.id, "a surviving memory lost its ICM copy; maintenance will store it again");
+            }
+            sqlx::query("UPDATE memories SET icm_id = ? WHERE id = ?")
+                .bind(&fresh)
+                .bind(&row.id)
+                .execute(&self.db)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Honest erasure: the knowledge distilled from any of `erased` (mirror
@@ -1388,7 +1640,9 @@ impl Memory {
     /// very same content (see [`release_icm`](Self::release_icm)). Every ICM
     /// failure — unknown id or a failed `icm forget` — is counted per row and
     /// logged: recall consults ICM before the mirror, so a copy left there
-    /// would still be served.
+    /// would still be served. On a host without `icm` the count is a matter
+    /// of fact: a row that carries an ICM id has a copy that cannot be
+    /// removed, a row that carries none has no copy at all.
     async fn erase_rows(
         &self,
         guard: &AgentGuard,
@@ -1404,6 +1658,9 @@ impl Memory {
         for (row_id, icm_id) in rows.iter().chain(&cascade.knowledge) {
             match icm_id {
                 Some(icm_id) => *doomed.entry(icm_id.clone()).or_default() += 1,
+                // Without `icm` nothing is ever copied there: a row that
+                // carries no id has no copy, and its erasure is whole.
+                None if !self.icm_available() => {}
                 None => {
                     tracing::warn!(row_id, "memory has no ICM id; ICM copy (if any) not erased");
                     icm_failed += 1;
@@ -1463,85 +1720,72 @@ impl Memory {
     }
 
     /// Record a correction (what the agent predicted vs the correct answer) so
-    /// the agent improves next time. Backed by ICM feedback, mirrored to DB.
+    /// the agent improves next time: one high-importance `correction` episode
+    /// in `scope` — the scope of the run that is corrected, with that run's
+    /// provenance — stored like any other episode. It is de-duplicated,
+    /// distilled with the owner's others, and above all erasable: by id, by
+    /// subject, by purge, by retention.
+    ///
+    /// Nothing goes to ICM's own feedback store any more: it has no way to
+    /// delete a row (`icm forget --topic` leaves them too), so a correction
+    /// written there could never be erased.
     pub async fn record_feedback(
         &self,
         scope: &MemoryScope,
-        subject: Option<&str>,
+        prov: &Provenance,
         context: &str,
         predicted: &str,
         corrected: &str,
         reason: &str,
-    ) -> Result<()> {
-        let icm = self
-            .icm()
-            .arg("feedback")
-            .arg("record")
-            .arg("--topic")
-            .arg(scope.topic())
-            .arg("--context")
-            .arg(context)
-            .arg("--predicted")
-            .arg(predicted)
-            .arg("--corrected")
-            .arg(corrected)
-            .arg("--reason")
-            .arg(reason)
-            .arg("--source")
-            .arg("user")
-            .output()
-            .await;
-        if let Err(e) = &icm {
-            tracing::warn!(topic = %scope.topic(), error = %e, "icm feedback record failed");
-        }
-
-        // Mirror as a high-signal memory so it is recalled at the Analyse step.
+    ) -> Result<Stored> {
+        anyhow::ensure!(
+            scope.layer() == LAYER_EPISODE,
+            "a correction is an episode: it is not stored in the knowledge layer"
+        );
         let lesson = format!(
             "CORRECTION — when: {context}. Wrong: {predicted}. Correct: {corrected}. Reason: {reason}"
         );
-        let mut prov = Provenance::default();
-        if let Some(s) = subject {
-            prov = prov.subject(s).basis("consent");
-        }
-        self.store_with(scope, "correction", &lesson, &prov)
-            .await
-            .map(|_| ())
+        self.store_with(scope, CORRECTION_KEY, &lesson, prov).await
     }
 
-    /// Recall past corrections relevant to `query` (ICM feedback search).
+    /// The past corrections of ONE scope a run should apply, as
+    /// `- [importance] summary` lines within a budget spent on whole entries:
+    /// those ICM finds for `query` first, then the most recent ones, each
+    /// once, `limit` at most. They are the scope's `correction` episodes and
+    /// nothing else: no other scope is read, and the rows older versions wrote
+    /// to ICM's feedback store are no longer read at all.
     pub async fn recall_feedback(&self, scope: &MemoryScope, query: &str, limit: usize) -> String {
-        let output = self
-            .icm()
-            .arg("feedback")
-            .arg("search")
-            .arg("--topic")
-            .arg(scope.topic())
-            .arg("--limit")
-            .arg(limit.to_string())
-            // Free text: after `--` it is never read as a flag.
-            .arg("--")
-            .arg(query)
-            .output()
-            .await;
-        match output {
-            Ok(o) if o.status.success() => {
-                let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                // When nothing matched, ICM emits an empty TOON header (e.g.
-                // `memories[0]{...}:`) that must not be surfaced as fake
-                // corrections — treat it as "no feedback".
-                if Self::toon_has_entries(&text) {
-                    text
-                } else {
-                    String::new()
-                }
-            }
-            _ => String::new(),
+        if limit == 0 {
+            return String::new();
         }
+        let corrections = self.corrections(scope).await;
+        if corrections.is_empty() {
+            return String::new();
+        }
+        let mut entries = match Some(query.trim()).filter(|q| !q.is_empty()) {
+            Some(query) => {
+                let mut hits = self.icm_hits(scope, query, CORRECTION_HIT_WINDOW).await;
+                hits.retain(|entry| corrections.holds(entry));
+                hits
+            }
+            None => Vec::new(),
+        };
+        entries.extend(
+            self.mirror_or_nothing(scope, Rows::Corrections, limit)
+                .await,
+        );
+        let mut entries = distinct(entries, &mut HashSet::new());
+        entries.truncate(limit);
+        render_entries(&within_budget(entries, CORRECTION_RECALL_CHARS))
     }
 
-    /// Global ICM statistics (memory count, topics, age).
+    /// Global memory statistics (memory count, topics, age): ICM's, or the
+    /// mirror's own on a host without `icm`.
     pub async fn stats(&self) -> serde_json::Value {
-        let out = self.icm().arg("stats").output().await;
+        let Some(mut cmd) = self.icm() else {
+            return self.mirror_stats().await;
+        };
+        let out = cmd.arg("stats").output().await;
         let text = match out {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
             _ => String::new(),
@@ -1558,9 +1802,35 @@ impl Memory {
         serde_json::Value::Object(map)
     }
 
-    /// List ICM topics with their memory counts (org-wide memory map).
+    /// [`stats`](Self::stats) from the mirror, under ICM's keys and as text
+    /// like ICM's.
+    async fn mirror_stats(&self) -> serde_json::Value {
+        let row: Result<(i64, Option<String>), sqlx::Error> =
+            sqlx::query_as("SELECT COUNT(*), MAX(created_at) FROM memories")
+                .fetch_one(&self.db)
+                .await;
+        let (memories, newest) = row.unwrap_or_default();
+        let mut map = serde_json::Map::new();
+        map.insert("memories".into(), memories.to_string().into());
+        map.insert(
+            "topics".into(),
+            self.mirror_topics().await.len().to_string().into(),
+        );
+        if let Some(newest) = newest {
+            // `2026-10-05T12:32:56.254Z` as ICM prints it: `2026-10-05 12:32`.
+            let minute: String = newest.chars().take(16).collect();
+            map.insert("newest".into(), minute.replace('T', " ").into());
+        }
+        serde_json::Value::Object(map)
+    }
+
+    /// List the memory topics with their memory counts (org-wide memory map):
+    /// ICM's, or the mirror's scopes on a host without `icm`.
     pub async fn topics(&self) -> Vec<serde_json::Value> {
-        let out = self.icm().arg("topics").output().await;
+        let Some(mut cmd) = self.icm() else {
+            return self.mirror_topics().await;
+        };
+        let out = cmd.arg("topics").output().await;
         let text = match out {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
             _ => return Vec::new(),
@@ -1575,17 +1845,94 @@ impl Memory {
             .collect()
     }
 
+    /// The scopes the mirror holds rows for, as ICM would list their topics.
+    async fn mirror_topics(&self) -> Vec<serde_json::Value> {
+        let rows = sqlx::query_as::<_, (String, Option<String>, String, i64)>(
+            "SELECT agent_id, consumer_account, layer, COUNT(*) FROM memories
+             GROUP BY agent_id, consumer_account, layer",
+        )
+        .fetch_all(&self.db)
+        .await;
+        let mut topics: Vec<(String, i64)> = rows
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(agent, account, layer, count)| {
+                (scope_of(&agent, account.as_deref(), &layer).topic(), count)
+            })
+            .collect();
+        topics.sort();
+        topics
+            .into_iter()
+            .map(|(topic, count)| serde_json::json!({ "topic": topic, "count": count }))
+            .collect()
+    }
+
+    /// Remember that `topics` hold ICM copies a purge could not remove
+    /// (`icm` missing or failing), in `icm_residue`. A whole-topic forget on
+    /// a host without `icm` reads it — a scope whose rows once had ICM copies
+    /// is not reported clean because those rows are gone from the mirror —
+    /// and maintenance wipes such topics again once ICM answers
+    /// ([`wipe_residue`](Self::wipe_residue)).
+    async fn note_residue(&self, topics: impl IntoIterator<Item = &str>) {
+        for topic in topics {
+            let noted = sqlx::query("INSERT OR IGNORE INTO icm_residue (topic) VALUES (?)")
+                .bind(topic)
+                .execute(&self.db)
+                .await;
+            if let Err(e) = noted {
+                tracing::warn!(topic, error = %e, "could not record an ICM topic left with erased copies");
+            }
+        }
+    }
+
+    /// Remember the ICM entries — `(icm id, topic)` — an erasure could not
+    /// forget (`icm` missing or failing), in `icm_residue_ids`. The mirror
+    /// rows that led to them are gone, so nothing else says they exist. By
+    /// id rather than by topic: an entry left in a topic that stays in use
+    /// cannot wait for that topic to be purged, recall would serve it until
+    /// then. Maintenance forgets each of them once ICM answers
+    /// ([`wipe_residue`](Self::wipe_residue)).
+    async fn note_left_behind(&self, entries: &[(String, String)]) {
+        for (icm_id, topic) in entries {
+            let noted =
+                sqlx::query("INSERT OR IGNORE INTO icm_residue_ids (icm_id, topic) VALUES (?, ?)")
+                    .bind(icm_id)
+                    .bind(topic)
+                    .execute(&self.db)
+                    .await;
+            if let Err(e) = noted {
+                tracing::warn!(icm_id, topic, error = %e, "could not record an ICM entry left behind by an erasure");
+            }
+        }
+    }
+
+    /// Whether `topic` may hold copies an earlier erasure left behind: the
+    /// topic as a whole, or entries of it. A failure to read says it may.
+    async fn has_residue(&self, topic: &str) -> bool {
+        let found: Result<i64, sqlx::Error> = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM icm_residue WHERE topic = ?1)
+                  + (SELECT COUNT(*) FROM icm_residue_ids WHERE topic = ?1)",
+        )
+        .bind(topic)
+        .fetch_one(&self.db)
+        .await;
+        match found {
+            Ok(n) => n > 0,
+            Err(e) => {
+                tracing::warn!(topic, error = %e, "could not read the ICM topics left with erased copies");
+                true
+            }
+        }
+    }
+
     /// `icm forget --topic` (ICM matches the topic exactly). Returns whether
     /// ICM confirmed; a failure is logged, the caller decides what it means.
+    /// `false` without a try on a host without `icm`.
     async fn forget_topic(&self, topic: &str) -> bool {
-        match self
-            .icm()
-            .arg("forget")
-            .arg("--topic")
-            .arg(topic)
-            .output()
-            .await
-        {
+        let Some(mut cmd) = self.icm() else {
+            return false;
+        };
+        let confirmed = match cmd.arg("forget").arg("--topic").arg(topic).output().await {
             Ok(o) if o.status.success() => true,
             Ok(o) => {
                 tracing::warn!(topic, stderr = %String::from_utf8_lossy(&o.stderr), "icm forget --topic failed");
@@ -1595,42 +1942,209 @@ impl Memory {
                 tracing::warn!(topic, error = %e, "icm forget --topic could not run");
                 false
             }
+        };
+        if confirmed {
+            // Whatever an earlier erasure left in it is gone with the rest.
+            for table in ["icm_residue", "icm_residue_ids"] {
+                let cleared = sqlx::query(&format!("DELETE FROM {table} WHERE topic = ?"))
+                    .bind(topic)
+                    .execute(&self.db)
+                    .await;
+                if let Err(e) = cleared {
+                    tracing::warn!(topic, error = %e, "could not clear a wiped ICM topic from the residue list");
+                }
+            }
+        } else {
+            self.note_residue([topic]).await;
         }
+        confirmed
     }
 
-    /// `icm forget --topic` for each of `topics`, concurrently (bounded).
-    /// Returns how many ICM did NOT confirm.
-    async fn forget_topics(&self, topics: &[String]) -> u64 {
+    /// Wipe ICM topics, concurrently (bounded). Each comes with whether mirror
+    /// rows of its scope carried an ICM id when they were erased. Returns how
+    /// many topics may still hold copies.
+    ///
+    /// With `icm`, that is every topic `icm forget --topic` did not confirm.
+    /// Without it nothing can be removed, and the answer is a matter of fact:
+    /// a topic is clean when no row of its scope ever had an ICM copy — none
+    /// of the rows erased now, and nothing an earlier erasure left behind.
+    async fn forget_topics(&self, topics: &[(String, bool)]) -> u64 {
         use futures::stream::{self, StreamExt};
+        if !self.icm_available() {
+            let mut left = 0u64;
+            for (topic, had_copies) in topics {
+                if *had_copies {
+                    self.note_residue([topic.as_str()]).await;
+                    left += 1;
+                } else {
+                    left += u64::from(self.has_residue(topic).await);
+                }
+            }
+            if left > 0 {
+                tracing::warn!(
+                    topics = left,
+                    "icm is missing: ICM topics of erased memories were left as they are"
+                );
+            }
+            return left;
+        }
         // Owned topics: a future borrowing the closure's argument is not `Send`
         // in a way axum accepts.
         stream::iter(topics.to_vec())
-            .map(|topic| async move { u64::from(!self.forget_topic(&topic).await) })
+            .map(|(topic, _)| async move { u64::from(!self.forget_topic(&topic).await) })
             .buffer_unordered(8)
             .fold(0u64, |acc, n| async move { acc + n })
             .await
     }
 
+    /// `icm forget <id>` for an entry an erasure left behind: whether it is
+    /// gone from ICM — forgotten now, or not there any more (it went with its
+    /// topic, or by hand), which settles it just as well.
+    async fn forget_left_behind(&self, icm_id: &str) -> bool {
+        let Some(mut cmd) = self.icm() else {
+            return false;
+        };
+        match cmd.arg("forget").arg(icm_id).output().await {
+            Ok(o) if o.status.success() => true,
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                // icm 0.10.65: `Error: memory not found: <id>`, exit 1.
+                let absent = stderr.to_lowercase().contains("memory not found");
+                if !absent {
+                    tracing::warn!(icm_id, stderr = %stderr, "icm forget failed again; the copy stays for now");
+                }
+                absent
+            }
+            Err(e) => {
+                tracing::warn!(icm_id, error = %e, "icm forget could not run; the copy stays for now");
+                false
+            }
+        }
+    }
+
+    /// The ICM entries erasures could not forget (`icm` was missing or
+    /// failing) are forgotten now that ICM answers, each on its own, whatever
+    /// its topic still holds. A mirror row that points at such an entry — it
+    /// shared it with an erased row, or the same content was stored again
+    /// since — is given a copy of its own content in its place. Returns how
+    /// many entries were settled.
+    async fn wipe_left_behind(&self) -> Result<u64> {
+        // Random order: an entry ICM keeps refusing must not hold the others back.
+        let entries: Vec<(String, String)> =
+            sqlx::query_as("SELECT icm_id, topic FROM icm_residue_ids ORDER BY random() LIMIT ?")
+                .bind(ICM_RESIDUE_PER_PASS)
+                .fetch_all(&self.db)
+                .await?;
+        let mut settled = 0u64;
+        for (icm_id, topic) in entries {
+            // Every row on one entry is of one topic, hence of one agent.
+            let agent_id = MemoryScope::parse_topic(&topic).map(|s| s.agent_id().to_string());
+            let guard = match &agent_id {
+                Some(agent_id) => Some(self.lock_agent(agent_id).await),
+                None => None,
+            };
+            let rows: Vec<MirrorRow> = sqlx::query_as(&format!(
+                "SELECT {MIRROR_ROW_COLUMNS} FROM memories WHERE icm_id = ?"
+            ))
+            .bind(&icm_id)
+            .fetch_all(&self.db)
+            .await?;
+            if self.forget_left_behind(&icm_id).await {
+                self.store_again(&rows).await?;
+                sqlx::query("DELETE FROM icm_residue_ids WHERE icm_id = ?")
+                    .bind(&icm_id)
+                    .execute(&self.db)
+                    .await?;
+                settled += 1;
+            }
+            drop(guard);
+            if let Some(agent_id) = &agent_id {
+                // The agent may be gone for good: do not keep a lock for it.
+                self.locks.release(agent_id);
+            }
+        }
+        Ok(settled)
+    }
+
+    /// What earlier erasures could not remove from ICM (`icm` was missing or
+    /// failing) is removed now that it answers: the entries remembered by id
+    /// ([`wipe_left_behind`](Self::wipe_left_behind)), then the topics a
+    /// purge could not wipe — those whose scope holds nothing in the mirror
+    /// any more, so that no memory still in use loses its copy. Returns how
+    /// many entries and topics were settled. Run by the maintenance loop.
+    pub async fn wipe_residue(&self) -> Result<u64> {
+        if !self.icm_available() {
+            return Ok(0);
+        }
+        let mut wiped = self.wipe_left_behind().await?;
+        // Random order: a topic ICM keeps refusing must not hold the others back.
+        let topics: Vec<String> =
+            sqlx::query_scalar("SELECT topic FROM icm_residue ORDER BY random() LIMIT ?")
+                .bind(ICM_RESIDUE_PER_PASS)
+                .fetch_all(&self.db)
+                .await?;
+        for topic in topics {
+            let Some(scope) = MemoryScope::parse_topic(&topic) else {
+                continue;
+            };
+            let guard = self.lock_agent(scope.agent_id()).await;
+            let (live,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM memories
+                 WHERE agent_id = ? AND consumer_account IS ? AND layer = ?",
+            )
+            .bind(scope.agent_id())
+            .bind(scope.consumer_account())
+            .bind(scope.layer())
+            .fetch_one(&self.db)
+            .await?;
+            if live == 0 {
+                wiped += u64::from(self.forget_topic(&topic).await);
+            }
+            drop(guard);
+            // The agent may be gone for good: do not keep a lock for it.
+            self.locks.release(scope.agent_id());
+        }
+        Ok(wiped)
+    }
+
     /// Purge one scope: its rows in the DB mirror and its ICM topic. An owner
     /// purge leaves every consumer fork in place, and vice versa — but it takes
     /// the knowledge layer along: what was distilled from the owner's episodes
-    /// cannot outlive them. Purging the knowledge layer alone leaves the
-    /// episodes marked as distilled (it is not rebuilt from them).
+    /// cannot outlive them. Purging the knowledge layer alone sends the
+    /// owner's episodes back to be distilled (`distilled_at` NULL; not its
+    /// reflections, which never are), so the next passes rebuild the layer
+    /// from what the agent still remembers instead of leaving it empty for
+    /// good. An episode a pass had set aside is tried again with the others.
     ///
-    /// Returns how many ICM topics could NOT be forgotten: their entries are
-    /// still recalled (ICM is asked before the mirror), so the caller must
-    /// report the purge as incomplete and it must be asked again.
+    /// The result says how many ICM topics could NOT be forgotten — the caller
+    /// must report such a purge as incomplete — and how many episodes were
+    /// sent back. On a host without `icm` a topic counts as not forgotten
+    /// when rows of its scope had ICM copies (see
+    /// [`forget_topics`](Self::forget_topics)).
     ///
     /// The mirror goes first: a store in flight then either finds its row
     /// gone and takes its ICM copy back, or lands before the topic is wiped.
-    pub async fn forget(&self, scope: &MemoryScope) -> Result<u64> {
+    pub async fn forget(&self, scope: &MemoryScope) -> Result<Purged> {
         let _guard = self.lock_agent(scope.agent_id()).await;
         let mut scopes = vec![scope.clone()];
         if matches!(scope, MemoryScope::Owner { .. }) {
             scopes.push(MemoryScope::knowledge(scope.agent_id()));
         }
+        let mut topics: Vec<(String, bool)> = Vec::new();
         let mut tx = self.db.begin().await?;
         for scope in &scopes {
+            // Before the rows go: whether ICM holds copies of any of them.
+            let (copies,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM memories
+                 WHERE agent_id = ? AND consumer_account IS ? AND layer = ?
+                   AND icm_id IS NOT NULL",
+            )
+            .bind(scope.agent_id())
+            .bind(scope.consumer_account())
+            .bind(scope.layer())
+            .fetch_one(&mut *tx)
+            .await?;
+            topics.push((scope.topic(), copies > 0));
             // `memory_derivations` has no foreign key to cascade through.
             for column in ["knowledge_id", "episode_id"] {
                 sqlx::query(&format!(
@@ -1653,9 +2167,25 @@ impl Memory {
             .execute(&mut *tx)
             .await?;
         }
+        let mut requeued = 0;
+        if matches!(scope, MemoryScope::Knowledge { .. }) {
+            // In the same transaction: the layer is never seen empty with its
+            // episodes still marked as distilled into it.
+            requeued = sqlx::query(
+                "UPDATE memories SET distilled_at = NULL
+                 WHERE agent_id = ? AND consumer_account IS NULL AND layer = 'episode'
+                   AND key != 'reflection' AND distilled_at IS NOT NULL",
+            )
+            .bind(scope.agent_id())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        }
         tx.commit().await?;
-        let topics: Vec<String> = scopes.iter().map(MemoryScope::topic).collect();
-        Ok(self.forget_topics(&topics).await)
+        Ok(Purged {
+            icm_failed: self.forget_topics(&topics).await,
+            requeued,
+        })
     }
 
     /// Erase everything an agent remembers, for its deletion: the owner and
@@ -1666,22 +2196,27 @@ impl Memory {
     /// ([`wipe_again`](Self::wipe_again)).
     pub async fn forget_agent(&self, agent_id: &str) -> Result<AgentWipe> {
         let guard = self.lock_agent(agent_id).await;
-        let forks: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT consumer_account FROM memories
-             WHERE agent_id = ? AND consumer_account IS NOT NULL",
+        // Every scope the mirror holds rows for, and whether ICM has copies of
+        // any of them.
+        let held: Vec<(Option<String>, String, i64)> = sqlx::query_as(
+            "SELECT consumer_account, layer, COUNT(icm_id) FROM memories
+             WHERE agent_id = ? GROUP BY consumer_account, layer",
         )
         .bind(agent_id)
         .fetch_all(&self.db)
         .await?;
-        let mut topics = vec![
-            MemoryScope::owner(agent_id).topic(),
-            MemoryScope::knowledge(agent_id).topic(),
+        // The owner's two topics are wiped whatever the mirror holds.
+        let mut topics: Vec<(String, bool)> = vec![
+            (MemoryScope::owner(agent_id).topic(), false),
+            (MemoryScope::knowledge(agent_id).topic(), false),
         ];
-        topics.extend(
-            forks
-                .iter()
-                .map(|account| MemoryScope::consumer(agent_id, account).topic()),
-        );
+        for (account, layer, copies) in &held {
+            let topic = scope_of(agent_id, account.as_deref(), layer).topic();
+            match topics.iter_mut().find(|(known, _)| *known == topic) {
+                Some((_, had_copies)) => *had_copies |= *copies > 0,
+                None => topics.push((topic, *copies > 0)),
+            }
+        }
         let icm_failed = self.forget_topics(&topics).await;
 
         // `memory_derivations` has no foreign key to cascade through.
@@ -1699,7 +2234,10 @@ impl Memory {
             .await?;
         drop(guard);
         self.locks.release(agent_id);
-        Ok(AgentWipe { icm_failed, topics })
+        Ok(AgentWipe {
+            icm_failed,
+            topics: topics.into_iter().map(|(topic, _)| topic).collect(),
+        })
     }
 
     /// Forget a deleted agent's ICM topics a second time, once its row is
@@ -1708,7 +2246,12 @@ impl Memory {
     /// agent row is deleted no store can succeed any more, so this pass is the
     /// last word. Returns how many topics ICM did not confirm.
     pub async fn wipe_again(&self, wipe: &AgentWipe) -> u64 {
-        self.forget_topics(&wipe.topics).await
+        let topics: Vec<(String, bool)> = wipe
+            .topics
+            .iter()
+            .map(|topic| (topic.clone(), false))
+            .collect();
+        self.forget_topics(&topics).await
     }
 
     /// All of a scope's stored ICM memories with their native importance
@@ -1720,8 +2263,10 @@ impl Memory {
     /// term, so a generic query matches none of the agents' domain content.
     /// `list` returns the whole topic regardless of keywords.
     pub async fn icm_entries(&self, scope: &MemoryScope, limit: usize) -> Vec<IcmEntry> {
-        let out = self
-            .icm()
+        let Some(mut cmd) = self.icm() else {
+            return Vec::new();
+        };
+        let out = cmd
             .arg("list")
             .arg("--topic")
             .arg(scope.topic())
@@ -1808,14 +2353,72 @@ impl Memory {
         }
     }
 
-    /// The upkeep half of a maintenance pass: what ICM missed is stored there
-    /// again ([`backfill_icm`](Self::backfill_icm)).
+    /// The upkeep half of a maintenance pass, for what ICM missed while it
+    /// was down or not installed: the copies erasures could not remove are
+    /// removed ([`wipe_residue`](Self::wipe_residue)), then memories that
+    /// never reached it are stored there ([`backfill_icm`](Self::backfill_icm)).
     pub async fn upkeep(&self) {
+        match self.wipe_residue().await {
+            Ok(0) => {}
+            Ok(wiped) => tracing::info!(wiped, "ICM copies of erased memories removed"),
+            Err(e) => {
+                tracing::warn!(error = %e, "removing the ICM copies of erased memories failed")
+            }
+        }
         match self.backfill_icm().await {
             Ok(0) => {}
             Ok(synced) => tracing::info!(synced, "memories stored again in ICM"),
             Err(e) => tracing::warn!(error = %e, "ICM backfill failed"),
         }
+    }
+}
+
+/// Which rows of a scope a recall is after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rows {
+    All,
+    /// Every row but the corrections: a run's personal block, which is given
+    /// them on their own (see [`Memory::recall_feedback`]).
+    NoCorrection,
+    /// The corrections alone.
+    Corrections,
+}
+
+/// The corrections one scope holds, as recall needs them: an entry served by
+/// ICM carries no key, so a correction is recognised by its ICM id or by its
+/// content.
+#[derive(Debug, Default)]
+struct Corrections {
+    icm_ids: HashSet<String>,
+    hashes: HashSet<String>,
+}
+
+impl Corrections {
+    /// From the `(icm id, content)` of a scope's correction rows.
+    fn of(rows: Vec<(Option<String>, String)>) -> Self {
+        let mut corrections = Corrections::default();
+        for (icm_id, content) in rows {
+            corrections.hashes.insert(content_hash(&content));
+            corrections.icm_ids.extend(icm_id);
+        }
+        corrections
+    }
+
+    fn holds(&self, entry: &Recalled) -> bool {
+        entry
+            .icm_id
+            .as_ref()
+            .is_some_and(|id| self.icm_ids.contains(id))
+            || self.hashes.contains(&content_hash(&entry.summary))
+    }
+
+    /// How many distinct corrections there are.
+    fn len(&self) -> usize {
+        self.hashes.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.hashes.is_empty()
     }
 }
 
@@ -1862,6 +2465,34 @@ fn parse_recalled(json: &str, wanted: &str) -> Vec<Recalled> {
             })
         })
         .collect()
+}
+
+/// The `hits` whose text mentions at least one of the query's `terms`
+/// (lowercase words; a word is found inside a longer one, `refund` in
+/// `Refunds`), those that mention more of them first. Between two that
+/// mention as many, the order they came in — ICM's — is kept.
+fn by_relevance(hits: Vec<Recalled>, terms: &[String]) -> Vec<Recalled> {
+    let mut scored: Vec<(usize, Recalled)> = hits
+        .into_iter()
+        .map(|hit| {
+            let text = hit.summary.to_lowercase();
+            let mentioned = terms.iter().filter(|term| text.contains(*term)).count();
+            (mentioned, hit)
+        })
+        .filter(|(mentioned, _)| *mentioned > 0)
+        .collect();
+    // Stable: equal scores stay in ICM's order.
+    scored.sort_by_key(|(mentioned, _)| std::cmp::Reverse(*mentioned));
+    scored.into_iter().map(|(_, hit)| hit).collect()
+}
+
+/// The entries of a knowledge block before its budget: the `hits` for the
+/// run's query in their order, then the `top`-weight rows, each entry once
+/// and `cap` at most. With no hit this is `top` as it was served.
+fn relevant_first(hits: Vec<Recalled>, top: Vec<Recalled>, cap: usize) -> Vec<Recalled> {
+    let mut entries = distinct(hits.into_iter().chain(top).collect(), &mut HashSet::new());
+    entries.truncate(cap);
+    entries
 }
 
 /// Drop the entries already in `shown` — same ICM id, or same content up to
@@ -1969,7 +2600,9 @@ fn icm_fate(leaving: &HashSet<String>, staying: &[String]) -> IcmFate {
 /// The main loop erases what is past its retention ([`Memory::maintain`]),
 /// distils the episodes that are waiting into knowledge
 /// ([`crate::distill::run_pass`]) — in that order, so a pass starts from a
-/// swept memory — then stores again what ICM missed ([`Memory::upkeep`]).
+/// swept memory — then catches ICM up on what it missed ([`Memory::upkeep`]).
+/// Every few passes — every pass while it is missing — it also checks
+/// whether the `icm` binary is there ([`Memory::probe_icm`]).
 ///
 /// A distillation pass waits on a model once per agent and can last a long
 /// time, so the retention sweep also runs on its own, on the same interval:
@@ -1992,9 +2625,16 @@ pub fn spawn_maintenance(state: crate::state::AppState, interval_secs: u64) {
     });
     tokio::spawn(async move {
         let distiller = crate::distill::ProviderDistiller::new(state.clone());
-        let mut backoff = crate::distill::Backoff::default();
+        let mut backoff = crate::distill::Backoff::sharing(state.distilling.clone());
         tokio::time::sleep(settle).await;
+        let mut pass = 0u64;
         loop {
+            pass += 1;
+            // `icm` installed (or removed) since startup is noticed here, not
+            // by failing a spawn on every call.
+            if reprobe_due(pass, state.memory.icm_available()) {
+                state.memory.probe_icm().await;
+            }
             state.memory.maintain().await;
             crate::distill::run_pass(&state.memory, &distiller, &mut backoff).await;
             state.memory.upkeep().await;
@@ -2003,9 +2643,28 @@ pub fn spawn_maintenance(state: crate::state::AppState, interval_secs: u64) {
     });
 }
 
+/// Whether maintenance pass number `pass` (from 1) probes the `icm` binary:
+/// every [`ICM_REPROBE_PASSES`] while it is `present`, every pass while it is
+/// not. A probe is one cheap spawn; a missing ICM costs every erasure in the
+/// meantime its ICM side, so it is not left unchecked for five passes.
+fn reprobe_due(pass: u64, present: bool) -> bool {
+    !present || pass.is_multiple_of(ICM_REPROBE_PASSES)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_icm_is_probed_on_every_pass_and_a_present_one_every_few() {
+        let probed = |present: bool| -> Vec<u64> {
+            (1..=11)
+                .filter(|pass| reprobe_due(*pass, present))
+                .collect()
+        };
+        assert_eq!(probed(true), [5, 10]);
+        assert_eq!(probed(false), (1..=11).collect::<Vec<u64>>());
+    }
 
     #[test]
     fn topic_round_trips_for_both_scopes() {
@@ -2403,7 +3062,7 @@ mod tests {
     async fn every_icm_command_targets_the_dedicated_db_and_embeddings_are_opt_in() {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let args = |m: &Memory| -> Vec<String> {
-            let cmd = m.icm();
+            let cmd = m.icm().expect("icm is taken as present until probed");
             assert_eq!(cmd.as_std().get_program(), "icm");
             cmd.as_std()
                 .get_args()
@@ -2416,6 +3075,123 @@ mod tests {
             args(&memory.clone().with_embeddings(true)),
             ["--db", "/tmp/x/icm.db"]
         );
+    }
+
+    #[tokio::test]
+    async fn a_missing_icm_binary_is_probed_once_and_never_spawned() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let memory = Memory::new(pool, "/tmp/x/icm.db".into());
+        // Not probed yet: taken as present, so a host with ICM loses nothing.
+        assert!(memory.icm_available() && memory.icm().is_some());
+
+        // A binary that cannot be run. The answer is shared by every clone.
+        let missing = memory.clone().with_icm_binary("/nonexistent/takoia-no-icm");
+        let clone = missing.clone();
+        assert!(missing.icm_available(), "nothing is known before the probe");
+        assert!(!missing.probe_icm().await);
+        assert!(!missing.icm_available() && !clone.icm_available());
+        // `icm()` is the one place a command is built: none is, so nothing
+        // is spawned — whatever the call.
+        assert!(missing.icm().is_none() && clone.icm().is_none());
+        assert!(!missing.probe_icm().await, "still missing");
+        assert!(memory.icm_available(), "another Memory is not concerned");
+
+        // A binary that runs and exits 0 on `--version`: found again.
+        let found = missing.with_icm_binary("true");
+        found.assume_icm(false);
+        assert!(found.icm().is_none());
+        assert!(found.probe_icm().await);
+        assert!(found.icm_available());
+        let cmd = found.icm().expect("a command again");
+        assert_eq!(cmd.as_std().get_program(), "true");
+        // One that runs but fails is no ICM either.
+        let failing = found.with_icm_binary("false");
+        assert!(!failing.probe_icm().await);
+        assert!(failing.icm().is_none());
+    }
+
+    #[test]
+    fn the_knowledge_block_lists_query_hits_before_the_top_rows() {
+        let hit_a = entry(Some("H1"), "high", "Refunds need the order number");
+        let hit_b = entry(Some("H2"), "high", "Refunds above 500 need a manager");
+        let top: Vec<Recalled> = (0..5)
+            .map(|i| entry(Some(&format!("T{i}")), "high", &format!("General rule {i}")))
+            .collect();
+        let line = |entries: &[Recalled]| -> Vec<String> {
+            entries.iter().map(|e| e.summary.clone()).collect()
+        };
+
+        // No hit: the top-weight rows, as served, up to the cap.
+        assert_eq!(relevant_first(Vec::new(), top.clone(), 24), top);
+        assert_eq!(relevant_first(Vec::new(), top.clone(), 3), top[..3]);
+        // Hits first, in their order, then the top rows fill the block.
+        let mut ranked = top.clone();
+        // The hits are top-weight rows too: each is listed once, in front —
+        // by ICM id, and by content when the mirror served one of them.
+        ranked.insert(1, hit_b.clone());
+        ranked.push(entry(None, "high", "  refunds need the ORDER number "));
+        let block = relevant_first(vec![hit_a.clone(), hit_b.clone()], ranked, 24);
+        assert_eq!(block[..2], [hit_a.clone(), hit_b.clone()]);
+        assert_eq!(line(&block[2..]), line(&top));
+        // The cap counts the hits: the block is no longer than without them.
+        let block = relevant_first(vec![hit_a.clone(), hit_b.clone()], top.clone(), 4);
+        assert_eq!(
+            block,
+            [hit_a.clone(), hit_b, top[0].clone(), top[1].clone()]
+        );
+        assert_eq!(relevant_first(vec![hit_a.clone()], top, 0), []);
+        assert_eq!(relevant_first(vec![hit_a.clone()], Vec::new(), 24), [hit_a]);
+    }
+
+    #[test]
+    fn hits_are_kept_and_ranked_on_the_words_of_the_query_they_mention() {
+        let terms: Vec<String> =
+            Memory::content_keywords("How do I handle a REFUND for an invoice?");
+        // Short words and stopwords say nothing about what is asked.
+        assert_eq!(terms, ["handle", "refund", "invoice"]);
+        let both = entry(Some("B"), "high", "An invoice is needed before any Refund");
+        let plural = entry(Some("P"), "high", "Refunds above 500 need a manager");
+        let invoice = entry(Some("I"), "high", "Invoices carry the VAT number");
+        // ICM found these through the topic, a keyword or a one-letter word.
+        let noise = entry(Some("N"), "high", "Greet the customer by name");
+        let hits = vec![noise.clone(), plural.clone(), both.clone(), invoice.clone()];
+        // Most words mentioned first; ICM's order between equals; noise out.
+        assert_eq!(
+            by_relevance(hits, &terms),
+            [both.clone(), plural.clone(), invoice.clone()]
+        );
+        assert_eq!(by_relevance(vec![noise], &terms), []);
+        assert_eq!(by_relevance(vec![both], &[]), []);
+        assert_eq!(by_relevance(Vec::new(), &terms), []);
+        // A query made of short words only has no term: it is asked as it is.
+        assert!(Memory::content_keywords("VAT due?").is_empty());
+    }
+
+    #[test]
+    fn a_correction_is_recognised_among_the_entries_icm_serves() {
+        let corrections = Corrections::of(vec![
+            (
+                Some("C1".to_string()),
+                "CORRECTION — when: a. Wrong: b. Correct: c. Reason: d".to_string(),
+            ),
+            (None, "CORRECTION — never reached ICM".to_string()),
+        ]);
+        assert_eq!(corrections.len(), 2);
+        assert!(!corrections.is_empty() && Corrections::default().is_empty());
+        // By ICM id, whatever ICM made of the text; by content, whatever the
+        // id (or without one), up to spacing and case.
+        assert!(corrections.holds(&entry(Some("C1"), "high", "merged text")));
+        assert!(corrections.holds(&entry(
+            Some("C9"),
+            "high",
+            "correction —  NEVER reached icm"
+        )));
+        assert!(corrections.holds(&entry(None, "high", "CORRECTION — never reached ICM")));
+        // Anything else is an ordinary episode, even one that talks of a
+        // correction.
+        assert!(!corrections.holds(&entry(Some("E1"), "medium", "The correction was applied")));
+        assert!(!corrections.holds(&entry(None, "medium", "CORRECTION — another one")));
+        assert!(!Corrections::default().holds(&entry(Some("C1"), "high", "merged text")));
     }
 
     #[tokio::test]

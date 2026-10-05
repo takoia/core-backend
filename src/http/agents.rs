@@ -328,6 +328,12 @@ pub struct PublishInput {
 }
 
 /// `POST /api/agents/:id/publish` — make the expert agent public or private.
+///
+/// Going public distils the owner episodes still waiting, in the background
+/// ([`crate::distill::on_publish`]): what a buyer gets is the knowledge layer,
+/// and it must not be empty for want of a sixth episode. The answer says how
+/// many knowledge rows the agent holds now (`knowledge_rows`) and whether
+/// this call started a distillation (`distillation_started`).
 pub async fn publish(
     State(state): State<AppState>,
     crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
@@ -399,10 +405,26 @@ pub async fn publish(
     .bind(&id)
     .execute(&state.db)
     .await?;
-    Ok(Json(json!({ "ok": true, "visibility": visibility })))
+    let distillation_started =
+        visibility == "public" && crate::distill::on_publish(&state, &id).await;
+    let knowledge_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM memories
+         WHERE agent_id = ? AND consumer_account IS NULL AND layer = 'knowledge'",
+    )
+    .bind(&id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(json!({
+        "ok": true,
+        "visibility": visibility,
+        "knowledge_rows": knowledge_rows,
+        "distillation_started": distillation_started,
+    })))
 }
 
 /// `POST /api/agents/import` — import a declarative agent from a TOML body.
+/// A definition that takes the agent public distils its pending episodes like
+/// a publication does (`distillation_started` in the answer).
 pub async fn import_toml(
     State(state): State<AppState>,
     crate::http::users::CurrentUser(me): crate::http::users::CurrentUser,
@@ -413,13 +435,14 @@ pub async fn import_toml(
     // agent must be in the caller's account — agent_role enforces both).
     let def = crate::agentdef::parse(&body)
         .map_err(|e| AppError::BadRequest(format!("invalid agent definition: {e}")))?;
-    let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM agents WHERE id = ?")
+    let existing: Option<(String,)> = sqlx::query_as("SELECT visibility FROM agents WHERE id = ?")
         .bind(&def.agent.id)
         .fetch_optional(&state.db)
         .await?;
     if existing.is_some() {
         crate::http::users::require_agent_role(&state, &def.agent.id, &me, "owner").await?;
     }
+    let was_public = existing.is_some_and(|(visibility,)| visibility == "public");
     let id = crate::agentdef::import(&state.db, &me.account_id, &body)
         .await
         .map_err(AppError::Other)?;
@@ -437,7 +460,22 @@ pub async fn import_toml(
         ));
     }
     crate::http::users::grant_owner(&state.db, &id, &me.id).await?;
-    Ok(Json(json!({ "id": id })))
+    // A definition can make an agent public as well as the publish endpoint
+    // does, and its buyers are owed the same: what waits is distilled now.
+    // Only when the import is what made it public — re-importing a public
+    // agent is an edit, and must not buy a model call each time.
+    let is_public: Option<String> =
+        sqlx::query_scalar("SELECT visibility FROM agents WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await?;
+    let distillation_started = !was_public
+        && is_public.as_deref() == Some("public")
+        && crate::distill::on_publish(&state, &id).await;
+    Ok(Json(json!({
+        "id": id,
+        "distillation_started": distillation_started,
+    })))
 }
 
 /// Run a one-shot `claude -p` generation and return the inner JSON object the

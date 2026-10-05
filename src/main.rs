@@ -68,6 +68,9 @@ async fn main() -> Result<()> {
     tracing::info!("migrations applied");
 
     let state = AppState::new(pool, config.clone());
+    // Is the `icm` binary there? Asked once here (and again every few
+    // maintenance passes): without it memory runs on this database alone.
+    state.memory.probe_icm().await;
 
     // First-boot seeding: default account, providers, demo agent.
     bootstrap::run(&state.db, &state.cipher, &state.config).await?;

@@ -337,12 +337,18 @@ async fn run_and_bill(
     .bind(input)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO jobs (id, objective_id, agent_id, status, synchronous) VALUES (?, ?, ?, 'running', 1)")
-        .bind(&job_id)
-        .bind(&objective_id)
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+    // `invoked_by`: whose run this is, kept on the job itself. The hold and
+    // the usage row say it too, but neither outlives an abandoned invoke.
+    sqlx::query(
+        "INSERT INTO jobs (id, objective_id, agent_id, status, synchronous, invoked_by)
+         VALUES (?, ?, ?, 'running', 1, ?)",
+    )
+    .bind(&job_id)
+    .bind(&objective_id)
+    .bind(id)
+    .bind(consumer)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
 
     let claimed = ClaimedJob {
@@ -691,7 +697,8 @@ pub async fn forget_consumer_memory(
             &consumer.account_id,
         ))
         .await
-        .map_err(AppError::Other)?;
+        .map_err(AppError::Other)?
+        .icm_failed;
     // `complete` is false when ICM did not confirm the erasure: the fork may
     // still be recalled there, and the call must be made again.
     Ok(Json(json!({
